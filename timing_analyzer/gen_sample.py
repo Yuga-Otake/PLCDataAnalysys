@@ -1,10 +1,15 @@
 """
 gen_sample.py  — サンプルCSV生成スクリプト
-自動車部品組み立てライン（3工程）のPLCログデータを生成する
+実機 APB Variable Logger の出力フォーマットに準拠:
+  - 列名: "Date Time"
+  - タイムスタンプ: "2026-02-06 13:26:00.088848"（マイクロ秒）
+  - 変数名: "ProgramBlock.VariableName" 形式
+  - Bool値: 0 / 1（整数）
 
-ProA: 供給工程  (部品ピッキング・クランプ)
-ProB: 圧入工程  (プレスフィッティング) ← ボトルネック
-ProC: 検査排出工程 (カメラ検査・排出)
+自動車部品組み立てライン（3工程）のPLCログデータを生成する
+Assembly.ProA: 供給工程  (部品ピッキング・クランプ)
+Assembly.ProB: 圧入工程  (プレスフィッティング) ← ボトルネック
+Assembly.ProC: 検査排出工程 (カメラ検査・排出)
 """
 
 import numpy as np
@@ -20,24 +25,35 @@ def generate(filename, n_cycles, seed,
     if anomaly_pb_extreme is None:
         anomaly_pb_extreme = set()
 
-    CYCLE_MS   = 1600   # 1サイクル長
-    PULSE_MS   = 50     # 信号パルス幅
+    CYCLE_MS   = 1600   # 1サイクル長 [ms]
+    PULSE_MS   = 50     # 信号パルス幅 [ms]
     total_rows = n_cycles * CYCLE_MS
 
-    t0 = datetime(2024, 3, 1, 8, 0, 0)
+    # 開始時刻（実機ログに合わせた書式）
+    t0 = datetime(2026, 2, 6, 8, 0, 0)
 
+    # ── Bool列（実機の "ProgramBlock.VariableName" 形式）─────────
     bool_cols = [
-        'ProA_CycleStart',
-        'ProA_LoadReq', 'ProA_SliderFwd', 'ProA_PartDetect', 'ProA_ClampON',
-        'ProB_CycleStart',
-        'ProB_PressDown', 'ProB_PressContact', 'ProB_PressComplete', 'ProB_PressUp',
-        'ProC_CycleStart',
-        'ProC_CamTrigger', 'ProC_InspectDone', 'ProC_GateOpen', 'ProC_EjectDone',
+        'Assembly.ProA_CycleStart',
+        'Assembly.ProA_LoadReq',
+        'Assembly.ProA_SliderFwd',
+        'Assembly.ProA_PartDetect',
+        'Assembly.ProA_ClampON',
+        'Assembly.ProB_CycleStart',
+        'Assembly.ProB_PressDown',
+        'Assembly.ProB_PressContact',
+        'Assembly.ProB_PressComplete',
+        'Assembly.ProB_PressUp',
+        'Assembly.ProC_CycleStart',
+        'Assembly.ProC_CamTrigger',
+        'Assembly.ProC_InspectDone',
+        'Assembly.ProC_GateOpen',
+        'Assembly.ProC_EjectDone',
     ]
     data = {c: np.zeros(total_rows, dtype=np.int8) for c in bool_cols}
-    data['ProA_ClampPressure'] = np.zeros(total_rows)
-    data['ProB_PressForce']    = np.zeros(total_rows)
-    data['ProC_InspectScore']  = np.zeros(total_rows)
+    data['Assembly.ProA_ClampPressure'] = np.zeros(total_rows)
+    data['Assembly.ProB_PressForce']    = np.zeros(total_rows)
+    data['Assembly.ProC_InspectScore']  = np.zeros(total_rows)
 
     def pulse(col, start, dur=PULSE_MS):
         s = int(np.clip(start, 0, total_rows - 1))
@@ -48,9 +64,9 @@ def generate(filename, n_cycles, seed,
         base = c * CYCLE_MS
         cyc  = c + 1
 
-        # ── ProA (供給工程) ──────────────────────────────────
+        # ── Assembly.ProA (供給工程) ─────────────────────────────
         pa_base = base
-        pulse('ProA_CycleStart', pa_base)
+        pulse('Assembly.ProA_CycleStart', pa_base)
 
         pa_extra  = 150 if cyc in anomaly_pa_slow else 0
         pa_load   = pa_base + int(rng.normal(50,  5))
@@ -63,10 +79,10 @@ def generate(filename, n_cycles, seed,
         pa_detect = max(pa_slider + 20, pa_detect)
         pa_clamp  = max(pa_detect + 20, pa_clamp)
 
-        pulse('ProA_LoadReq',    pa_load)
-        pulse('ProA_SliderFwd',  pa_slider)
-        pulse('ProA_PartDetect', pa_detect)
-        pulse('ProA_ClampON',    pa_clamp)
+        pulse('Assembly.ProA_LoadReq',    pa_load)
+        pulse('Assembly.ProA_SliderFwd',  pa_slider)
+        pulse('Assembly.ProA_PartDetect', pa_detect)
+        pulse('Assembly.ProA_ClampON',    pa_clamp)
 
         # ClampPressure: 0 → 8MPa → 0 (180ms台形)
         for t in range(pa_clamp, min(pa_clamp + 180, base + CYCLE_MS)):
@@ -75,11 +91,11 @@ def generate(filename, n_cycles, seed,
             if   p < 0.25: v = 8.0 * p / 0.25
             elif p < 0.75: v = 8.0
             else:          v = 8.0 * (1.0 - (p - 0.75) / 0.25)
-            data['ProA_ClampPressure'][t] = max(0.0, v + rng.normal(0, 0.12))
+            data['Assembly.ProA_ClampPressure'][t] = max(0.0, v + rng.normal(0, 0.12))
 
-        # ── ProB (圧入工程) ──────────────────────────────────
+        # ── Assembly.ProB (圧入工程) ─────────────────────────────
         pb_base = base + 450
-        pulse('ProB_CycleStart', pb_base)
+        pulse('Assembly.ProB_CycleStart', pb_base)
 
         pb_extra   = 200 if cyc in anomaly_pb_slow    else 0
         pb_extreme = 700 if cyc in anomaly_pb_extreme else 0
@@ -94,10 +110,10 @@ def generate(filename, n_cycles, seed,
         pb_complete = max(pb_contact + 20,  pb_complete)
         pb_up       = max(pb_complete + 20, pb_up)
 
-        pulse('ProB_PressDown',     pb_down)
-        pulse('ProB_PressContact',  pb_contact)
-        pulse('ProB_PressComplete', pb_complete)
-        pulse('ProB_PressUp',       pb_up)
+        pulse('Assembly.ProB_PressDown',     pb_down)
+        pulse('Assembly.ProB_PressContact',  pb_contact)
+        pulse('Assembly.ProB_PressComplete', pb_complete)
+        pulse('Assembly.ProB_PressUp',       pb_up)
 
         peak_f = 25.0 + (1.5 if (cyc in anomaly_pb_slow or cyc in anomaly_pb_extreme) else 0.0)
         span   = max(1, pb_complete - pb_contact)
@@ -107,11 +123,11 @@ def generate(filename, n_cycles, seed,
             if   p < 0.20: v = peak_f * p / 0.20
             elif p < 0.85: v = peak_f
             else:          v = peak_f * max(0.0, 1.0 - (p - 0.85) / 0.15) * 0.5
-            data['ProB_PressForce'][t] = max(0.0, v + rng.normal(0, 0.25))
+            data['Assembly.ProB_PressForce'][t] = max(0.0, v + rng.normal(0, 0.25))
 
-        # ── ProC (検査排出工程) ──────────────────────────────
+        # ── Assembly.ProC (検査排出工程) ────────────────────────
         pc_base = base + 1050
-        pulse('ProC_CycleStart', pc_base)
+        pulse('Assembly.ProC_CycleStart', pc_base)
 
         pc_extra   = 80 if cyc in anomaly_pc_slow else 0
         is_ng      = cyc in anomaly_pc_slow
@@ -126,32 +142,33 @@ def generate(filename, n_cycles, seed,
         pc_gate    = max(pc_inspect + 10, pc_gate)
         pc_eject   = max(pc_gate   + 20,  pc_eject)
 
-        pulse('ProC_CamTrigger',  pc_cam)
-        pulse('ProC_InspectDone', pc_inspect)
-        pulse('ProC_GateOpen',    pc_gate)
-        pulse('ProC_EjectDone',   pc_eject)
+        pulse('Assembly.ProC_CamTrigger',  pc_cam)
+        pulse('Assembly.ProC_InspectDone', pc_inspect)
+        pulse('Assembly.ProC_GateOpen',    pc_gate)
+        pulse('Assembly.ProC_EjectDone',   pc_eject)
 
         score_base = 58.0 if is_ng else 94.0
         score_std  =  4.0 if is_ng else  2.0
         for t in range(pc_cam, min(pc_inspect + 30, base + CYCLE_MS)):
             if t >= total_rows: break
-            data['ProC_InspectScore'][t] = float(
+            data['Assembly.ProC_InspectScore'][t] = float(
                 np.clip(rng.normal(score_base, score_std), 0, 100))
 
     # ─── DataFrame構築 ─────────────────────────────────────────
+    # 実機フォーマット: "2026-02-06 08:00:00.000000"（マイクロ秒、ハイフン区切り）
     cur = t0
     ts_list = []
     for _ in range(total_rows):
-        ms = cur.microsecond // 1000
-        ts_list.append(cur.strftime('%Y/%m/%d %H:%M:%S.') + f'{ms:03d}')
+        ts_list.append(cur.strftime('%Y-%m-%d %H:%M:%S.%f'))
         cur += timedelta(milliseconds=1)
 
-    df = pd.DataFrame({'Timestamp': ts_list})
+    # 列名 "Date Time"（実機ログに準拠）
+    df = pd.DataFrame({'Date Time': ts_list})
     for c in bool_cols:
-        df[c] = data[c]
-    df['ProA_ClampPressure'] = np.round(data['ProA_ClampPressure'], 3)
-    df['ProB_PressForce']    = np.round(data['ProB_PressForce'],    3)
-    df['ProC_InspectScore']  = np.round(data['ProC_InspectScore'],  2)
+        df[c] = data[c].astype(int)   # 0/1 整数（TRUE/FALSE文字列ではなく）
+    df['Assembly.ProA_ClampPressure'] = np.round(data['Assembly.ProA_ClampPressure'], 3)
+    df['Assembly.ProB_PressForce']    = np.round(data['Assembly.ProB_PressForce'],    3)
+    df['Assembly.ProC_InspectScore']  = np.round(data['Assembly.ProC_InspectScore'],  2)
 
     df.to_csv(filename, index=False)
     print(f"OK {filename}  ({len(df):,} rows, {n_cycles} cycles)")
@@ -180,8 +197,9 @@ generate(
 for fname in ['sample_playback.csv', 'sample_playback_ng.csv']:
     df = pd.read_csv(fname)
     print(f"\n--- {fname} ---")
-    print("columns:", df.columns.tolist())
-    print("shape  :", df.shape)
+    print("columns[:5]:", df.columns.tolist()[:5])
+    print("shape      :", df.shape)
+    print("timestamp  :", df['Date Time'].iloc[0], "→", df['Date Time'].iloc[-1])
     CYCLE_MS = 1600
     print("cyc | ProA_PartDetect | ProB_PressComplete | ProC_InspectDone")
     for c in range(min(5, 30)):
@@ -190,6 +208,6 @@ for fname in ['sample_playback.csv', 'sample_playback_ng.csv']:
             s = df[col].iloc[b:b+CYCLE_MS]
             rs = s[s.diff().fillna(0) > 0].index
             return (int(rs[0]) - b) if len(rs) else -1
-        print(f"  {c+1:2d} | {rise('ProA_PartDetect'):5d} ms"
-              f"         | {rise('ProB_PressComplete'):5d} ms"
-              f"           | {rise('ProC_InspectDone'):5d} ms")
+        print(f"  {c+1:2d} | {rise('Assembly.ProA_PartDetect'):5d} ms"
+              f"         | {rise('Assembly.ProB_PressComplete'):5d} ms"
+              f"           | {rise('Assembly.ProC_InspectDone'):5d} ms")

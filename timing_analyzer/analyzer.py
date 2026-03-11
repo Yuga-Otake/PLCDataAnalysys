@@ -7,23 +7,48 @@ from math import log10
 
 
 def load_csv(file) -> pd.DataFrame:
-    """CSVを読み込み、タイムスタンプを変換して返す"""
+    """CSVを読み込み、タイムスタンプを変換して返す。
+
+    対応フォーマット:
+      - APB Variableロガー形式: 列名 "Date Time"、フォーマット "2026-02-06 13:26:00.088848"
+      - 旧形式:                 列名 "Timestamp"、フォーマット "2024/03/01 08:00:00.000"
+    いずれも内部では "Timestamp" 列として統一して扱う。
+    """
     df = pd.read_csv(file)
-    try:
-        df["Timestamp"] = pd.to_datetime(df["Timestamp"], format="%Y/%m/%d %H:%M:%S.%f")
-    except Exception:
+
+    # 列名正規化: "Date Time" → "Timestamp"
+    if "Date Time" in df.columns and "Timestamp" not in df.columns:
+        df = df.rename(columns={"Date Time": "Timestamp"})
+
+    if "Timestamp" not in df.columns:
+        # 最初の列がタイムスタンプであると推定
+        df = df.rename(columns={df.columns[0]: "Timestamp"})
+
+    # フォーマット順に試行
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f",   # APB形式  2026-02-06 13:26:00.088848
+                "%Y/%m/%d %H:%M:%S.%f",   # 旧形式   2024/03/01 08:00:00.000
+                None):                     # pandas 自動推定
         try:
-            df["Timestamp"] = pd.to_datetime(df["Timestamp"])
-        except Exception as e:
-            raise ValueError(f"タイムスタンプのフォーマットが認識できません: {e}")
+            if fmt:
+                df["Timestamp"] = pd.to_datetime(df["Timestamp"], format=fmt)
+            else:
+                df["Timestamp"] = pd.to_datetime(df["Timestamp"])
+            break
+        except Exception:
+            if fmt is None:
+                raise ValueError(
+                    "タイムスタンプのフォーマットが認識できません。"
+                    "「Date Time」または「Timestamp」列が必要です。"
+                )
     return df
 
 
 def detect_bool_columns(df: pd.DataFrame) -> dict:
     """各列がBool変数か数値変数かを自動判定する"""
     result = {}
+    _ts_cols = {"Timestamp", "Date Time"}
     for col in df.columns:
-        if col == "Timestamp":
+        if col in _ts_cols:
             continue
         series = df[col].dropna()
         if series.dtype == object:
