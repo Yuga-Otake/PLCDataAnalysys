@@ -288,6 +288,126 @@ def build_gantt_v2(result_df: pd.DataFrame, steps_list: list, takt_target: int):
 
 
 # ═══════════════════════════════════════════════════════════════
+# B-1: トレンドチャート（サイクルごとの推移）
+# ═══════════════════════════════════════════════════════════════
+
+def build_trend_chart(result_df: pd.DataFrame, step_stats: list, takt_target: int):
+    """サイクルごとの遅れ時間トレンドチャートを生成する"""
+    if result_df is None or len(result_df) == 0 or not step_stats:
+        return None
+    cycle_col = "サイクル#"
+    if cycle_col not in result_df.columns:
+        return None
+
+    x = result_df[cycle_col].values
+    fig = go.Figure()
+
+    for s in step_stats:
+        name  = s["name"]
+        color = s["color"]
+        mode  = s.get("mode", "single")
+        dcol  = f"{name}_遅れ[ms]" if mode == "single" else f"{name}_dur[ms]"
+        if dcol not in result_df.columns:
+            continue
+
+        y = result_df[dcol].values.astype(float)
+        mean_y = float(np.nanmean(y))
+        std_y  = float(np.nanstd(y))
+
+        # 散布点
+        fig.add_trace(go.Scatter(
+            x=x, y=y, mode="markers",
+            marker=dict(size=5, color=color, opacity=0.55),
+            name=name, legendgroup=name,
+        ))
+
+        # 5サイクル移動平均
+        ma = pd.Series(y).rolling(5, min_periods=1).mean().values
+        fig.add_trace(go.Scatter(
+            x=x, y=ma, mode="lines",
+            line=dict(color=color, width=2),
+            name=f"{name} 移動平均", legendgroup=name, showlegend=False,
+        ))
+
+        # 外れ値マーカー（|val - mean| > 2σ）
+        if std_y > 0:
+            outlier_mask = np.abs(y - mean_y) > 2 * std_y
+            if np.any(outlier_mask):
+                fig.add_trace(go.Scatter(
+                    x=x[outlier_mask], y=y[outlier_mask], mode="markers",
+                    marker=dict(size=11, color="red", symbol="circle-open",
+                                line=dict(width=2, color="red")),
+                    name=f"{name} 外れ値", legendgroup=name, showlegend=False,
+                ))
+
+            # mean+3σ ライン
+            fig.add_hline(
+                y=mean_y + 3 * std_y,
+                line_dash="dot", line_color=color, line_width=1,
+                annotation_text=f"{name} 3σ上限",
+                annotation_font_size=9,
+            )
+
+    if takt_target > 0:
+        fig.add_hline(y=takt_target, line_dash="dash", line_color="red", line_width=1.5,
+                      annotation_text=f"タクト目標 {takt_target}ms")
+
+    fig.update_layout(
+        xaxis_title="サイクル番号",
+        yaxis_title="時間 [ms]",
+        height=400,
+        margin=dict(t=16, b=36),
+        showlegend=True,
+        plot_bgcolor="white",
+        legend=dict(orientation="h", y=-0.15),
+    )
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════
+# B-2: IQR外れ値検出
+# ═══════════════════════════════════════════════════════════════
+
+def detect_outliers_iqr(result_df: pd.DataFrame, step_stats: list) -> list:
+    """IQR法で各ステップの外れ値サイクルを検出する"""
+    if result_df is None or len(result_df) == 0:
+        return []
+    cycle_col = "サイクル#"
+    results = []
+    for s in step_stats:
+        name = s["name"]
+        mode = s.get("mode", "single")
+        dcol = f"{name}_遅れ[ms]" if mode == "single" else f"{name}_dur[ms]"
+        if dcol not in result_df.columns:
+            continue
+        col = result_df[dcol].dropna()
+        if len(col) < 4:
+            continue
+        Q1  = col.quantile(0.25)
+        Q3  = col.quantile(0.75)
+        IQR = Q3 - Q1
+        if IQR == 0:
+            continue
+        lo = Q1 - 1.5 * IQR
+        hi = Q3 + 1.5 * IQR
+        mask = (col < lo) | (col > hi)
+        outlier_rows = result_df.loc[col[mask].index]
+        if cycle_col in outlier_rows.columns:
+            cycles = [int(c) for c in outlier_rows[cycle_col].tolist()]
+        else:
+            cycles = [int(i) for i in outlier_rows.index.tolist()]
+        if cycles:
+            results.append({
+                "name":   name,
+                "color":  s["color"],
+                "cycles": cycles,
+                "hi":     round(hi, 1),
+                "lo":     round(lo, 1),
+            })
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════
 # ステップ詳細
 # ═══════════════════════════════════════════════════════════════
 
@@ -718,6 +838,7 @@ def add_step_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
                 })
             st.session_state[pk(pname, "steps_list")] = steps
             st.session_state[f"_clear_srch_{pname}"] = True
+            st.toast(f"+ {len(_new)}件のステップを追加しました", icon="✅")
             st.rerun()
 
     if steps:
@@ -769,6 +890,7 @@ def edit_step_dialog(pname: str, step_idx: int, bool_cols: list, df: pd.DataFram
         if st.button("🗑", use_container_width=True, key=f"_edel_{pname}_{step_idx}"):
             steps.pop(step_idx)
             st.session_state[pk(pname, "steps_list")] = steps
+            st.toast(f"🗑 {name} を削除しました")
             st.rerun()
 
     # モード切替
@@ -920,6 +1042,16 @@ with st.sidebar:
     bool_cols = [c for c, t in col_types.items() if t == "bool"]
     num_cols  = [c for c, t in col_types.items() if t == "numeric"]
 
+    # A-3: データ概要カード
+    with st.container():
+        _n_bool = len(bool_cols)
+        _n_num  = len(num_cols)
+        if "Timestamp" in df.columns and len(df) > 0:
+            _ts0 = str(df["Timestamp"].iloc[0])[:19]
+            _ts1 = str(df["Timestamp"].iloc[-1])[:19]
+            st.caption(f"📅 {_ts0}  〜  {_ts1}")
+        st.caption(f"🔀 Bool列: **{_n_bool}**　　📊 アナログ列: **{_n_num}**")
+
     # CSV 変更検知 → 工程を自動登録
     csv_hash = hashlib.md5(df.iloc[:, 0].astype(str).str.cat().encode()).hexdigest()[:8]
     if st.session_state.get("_csv_hash") != csv_hash:
@@ -1012,7 +1144,19 @@ if _proc_items:
         max((p["takt"] for p in _proc_items if p["takt"] > 0), default=0),
     ) * 1.06 or 1.0
 
-    st.markdown("**⏱ 工程タイムライン概要**")
+    _sum_hdr, _ea, _ca = st.columns([8, 1, 1])
+    with _sum_hdr:
+        st.markdown("**⏱ 工程タイムライン概要**")
+    with _ea:
+        if st.button("▼ 全展開", key="_expand_all", use_container_width=True):
+            for _p in _proc_items:
+                st.session_state[f"_sum_exp_{_p['proc']}"] = True
+            st.rerun()
+    with _ca:
+        if st.button("▶ 全折畳", key="_collapse_all", use_container_width=True):
+            for _p in _proc_items:
+                st.session_state[f"_sum_exp_{_p['proc']}"] = False
+            st.rerun()
     st.caption(
         "▶ をクリックするとステップ詳細ガントが展開されます　"
         "｜　ガントバーをダブルクリックするとヒストグラムが別タブで開きます"
@@ -1173,6 +1317,7 @@ for pname, pinfo in list(processes.items()):
                 new_name_stripped != pname and
                 new_name_stripped not in processes):
             rename_process(pname, new_name_stripped)
+            st.toast(f"✏️ 工程名を {pname} → {new_name_stripped} に変更しました")
             st.rerun()
 
         # ── ステップチップ（クリックで編集ダイアログ）──────────
@@ -1194,6 +1339,13 @@ for pname, pinfo in list(processes.items()):
                     safe_id = "cm_" + "".join(
                         c if c.isalnum() else "_" for c in f"{pname}_{ci}"
                     )
+                    _is_sel = (lbl == st.session_state.get(f"sel_step_{pname}", ""))
+                    _sel_css = (
+                        f'    background: linear-gradient(90deg,{clr}55 0%,{clr}22 55%) !important;'
+                        f'    box-shadow: 0 0 0 2px {clr}88 !important;'
+                    ) if _is_sel else (
+                        f'    background: linear-gradient(90deg,{clr}28 0%,transparent 55%) !important;'
+                    )
                     st.markdown(
                         f'<span id="{safe_id}"></span>'
                         f'<style>'
@@ -1201,7 +1353,7 @@ for pname, pinfo in list(processes.items()):
                         f'[data-testid="stElementContainer"] button'
                         f' {{ border-left: 5px solid {clr} !important;'
                         f'    padding-left: 10px !important;'
-                        f'    background: linear-gradient(90deg,{clr}28 0%,transparent 55%) !important;}}'
+                        f'{_sel_css}}}'
                         f'</style>',
                         unsafe_allow_html=True,
                     )
@@ -1251,6 +1403,7 @@ for pname, pinfo in list(processes.items()):
                                 key=lambda sl: sort_map.get(sl.get("name", ""), 0),
                             )
                             st.session_state[pk(pname, "steps_list")] = sorted_steps
+                            st.toast("⇅ ステップを時系列順に並び替えました")
                             st.rerun()
 
                 if fig_gantt:
@@ -1336,22 +1489,51 @@ for pname, pinfo in list(processes.items()):
 }})();
 </script>""", height=0)
 
-                    # ── ステップ統計テーブル ──────────────────────
+                    # ── ステップ統計テーブル（B-3: Cpk含む）──────────
                     total_t = sum(s["mean"] for s in step_stats) or 1.0
                     rows = []
                     for s in step_stats:
+                        mean_v = s["mean"]
+                        std_v  = s["abs_std"]
+                        # B-3: Cpk 計算 (USL=takt_target, LSL=0)
+                        if takt_target > 0 and std_v > 0:
+                            cpk = min(
+                                (takt_target - mean_v) / (3 * std_v),
+                                mean_v / (3 * std_v)
+                            )
+                            if cpk >= 1.33:
+                                cpk_str = f"🟢 {cpk:.2f}"
+                            elif cpk >= 1.0:
+                                cpk_str = f"🟡 {cpk:.2f}"
+                            else:
+                                cpk_str = f"🔴 {cpk:.2f}"
+                        else:
+                            cpk_str = "—"
                         row = {
                             "ステップ名": s["name"],
                             "モード":    "範囲" if s["mode"] == "range" else "単一",
-                            "平均[ms]":  round(s["mean"], 2),
-                            "σ[ms]":    round(s["abs_std"], 2),
+                            "平均[ms]":  round(mean_v, 2),
+                            "σ[ms]":    round(std_v, 2),
                             "min[ms]":  round(s.get("abs_min", s["min"]), 2),
                             "max[ms]":  round(s.get("abs_max", s["max"]), 2),
-                            "タクト比率": f"{s['mean']/total_t*100:.1f}%",
+                            "タクト比率": f"{mean_v/total_t*100:.1f}%",
+                            "Cpk":      cpk_str,
                         }
                         rows.append(row)
                     st.dataframe(pd.DataFrame(rows), hide_index=True,
                                  use_container_width=True)
+                    if takt_target == 0:
+                        st.caption("💡 Cpk を表示するにはサイクル設定でタクト目標を設定してください")
+
+                    # ── B-2: IQR外れ値検出 警告カード ───────────────
+                    _outliers = detect_outliers_iqr(result_df, step_stats)
+                    if _outliers:
+                        for _ov in _outliers:
+                            _cyc_str = ", ".join(str(c) for c in _ov["cycles"])
+                            st.warning(
+                                f"⚠️ **{_ov['name']}**: サイクル {_cyc_str} で外れ値検出"
+                                f"（IQR境界: {_ov['lo']:.1f}〜{_ov['hi']:.1f} ms）"
+                            )
 
                     st.divider()
 
@@ -1555,7 +1737,7 @@ for pname, pinfo in list(processes.items()):
                 except Exception:
                     cycle_starts = []
 
-                tabs = st.tabs(["サイクル一覧", "ヒストグラム", "時系列波形"])
+                tabs = st.tabs(["サイクル一覧", "ヒストグラム", "時系列波形", "📈 トレンド"])
 
                 with tabs[0]:
                     st.dataframe(result_df, use_container_width=True)
@@ -1625,6 +1807,24 @@ for pname, pinfo in list(processes.items()):
                                               line=dict(color="green", width=0.5, dash="dash"))
                         fig.update_layout(xaxis_title="時刻", height=420)
                         st.plotly_chart(fig, use_container_width=True, key=f"t3_{pname}")
+
+                with tabs[3]:
+                    # B-1: トレンドチャート
+                    _trend_step_stats = []
+                    try:
+                        _, _trend_step_stats = build_gantt_v2(result_df, steps_list, 0)
+                    except Exception:
+                        pass
+                    _trend_fig = build_trend_chart(result_df, _trend_step_stats, takt_target)
+                    if _trend_fig:
+                        st.caption(
+                            "各サイクルの遅れ時間推移。赤丸は外れ値（|値-平均| > 2σ）、"
+                            "点線は mean+3σ 上限。"
+                        )
+                        st.plotly_chart(_trend_fig, use_container_width=True,
+                                        key=f"trend_{pname}")
+                    else:
+                        st.info("トレンドを表示するにはステップを追加してください")
 
     st.markdown("")
 
