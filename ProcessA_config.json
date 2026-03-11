@@ -1,0 +1,28 @@
+{
+  "process_name": "ProcessA",
+  "trigger_col": "ProcessA_Start",
+  "edge": "RISE",
+  "takt_target_ms": 0,
+  "steps": [
+    {
+      "variable": "RobotArm_Down",
+      "label": "RobotArm_Down",
+      "color": "#4472C4"
+    },
+    {
+      "variable": "Clamp_ON",
+      "label": "Clamp_ON",
+      "color": "#4472C4"
+    },
+    {
+      "variable": "Sensor_Part",
+      "label": "Sensor_Part",
+      "color": "#4472C4"
+    },
+    {
+      "variable": "RobotArm_Up",
+      "label": "RobotArm_Up",
+      "color": "#4472C4"
+    }
+  ]
+}
