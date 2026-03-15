@@ -170,6 +170,61 @@ def calc_sturges_bins(n: int) -> int:
     return max(5, int(1 + 3.32 * log10(n)))
 
 
+_NUMERIC_OPS = {
+    "==": lambda a, b: a == b,
+    ">=": lambda a, b: a >= b,
+    "<=": lambda a, b: a <= b,
+    ">":  lambda a, b: a > b,
+    "<":  lambda a, b: a < b,
+}
+
+
+def find_numeric_condition_time(
+    cycle_df: pd.DataFrame, var: str, op: str, value: float, start_time
+) -> tuple:
+    """数値条件が最初にTrueになる時刻[ms]と継続時間[ms]を返す。
+    条件未検出の場合は (None, None)。
+
+    op: '==', '>=', '<=', '>', '<'
+    """
+    if var not in cycle_df.columns:
+        return None, None
+    fn = _NUMERIC_OPS.get(op)
+    if fn is None:
+        return None, None
+
+    series = cycle_df[var].values
+    cond   = np.array([bool(fn(v, value)) for v in series], dtype=bool)
+
+    # 条件が True になる最初のインデックスを探す
+    rising = np.where(~cond[:-1] & cond[1:])[0] + 1  # False→True 遷移
+    if len(rising) == 0:
+        # 最初の行から既に True の場合
+        if cond[0]:
+            rising = np.array([0])
+        else:
+            return None, None
+
+    entry_pos  = rising[0]
+    entry_idx  = cycle_df.index[entry_pos]
+    entry_time = cycle_df.loc[entry_idx, "Timestamp"]
+    entry_ms   = round((entry_time - start_time).total_seconds() * 1000, 3)
+
+    # その条件が False に戻るまでの継続時間を計算
+    falling = np.where(cond[entry_pos:] & ~np.append(cond[entry_pos + 1:], [False]))[0]
+    if len(falling) > 0:
+        exit_pos  = entry_pos + falling[0]
+        exit_idx  = cycle_df.index[exit_pos]
+        exit_time = cycle_df.loc[exit_idx, "Timestamp"]
+        dur_ms    = round((exit_time - entry_time).total_seconds() * 1000, 3)
+    else:
+        # サイクル末まで条件が続く
+        last_ts = cycle_df["Timestamp"].iloc[-1]
+        dur_ms  = round((last_ts - entry_time).total_seconds() * 1000, 3)
+
+    return entry_ms, dur_ms
+
+
 def find_edge_time(cycle_df: pd.DataFrame, var: str, edge: str, start_time) -> float:
     """指定変数・エッジの最初の発生時刻[ms]を返す（サイクル開始基準）。未検出はNone。"""
     if var not in cycle_df.columns:
@@ -220,6 +275,8 @@ def calculate_delays_v2(
       範囲モード:     {"name":str, "mode":"range",
                        "start_var":str, "start_edge":"RISE"|"FALL",
                        "end_var":str,   "end_edge":"RISE"|"FALL"}
+      数値条件モード: {"name":str, "mode":"numeric",
+                       "variable":str, "op":"=="|">="|"<="|">"|"<", "value":float}
     """
     records = []
     for i in range(len(cycle_starts)):
@@ -252,7 +309,7 @@ def calculate_delays_v2(
                 t = find_edge_time(cycle_df, var, edge, start_time)
                 record[f"{name}_遅れ[ms]"] = t
 
-            else:  # range
+            elif mode == "range":
                 sv = step.get("start_var", "")
                 se = step.get("start_edge", "RISE")
                 ev = step.get("end_var", "")
@@ -265,6 +322,28 @@ def calculate_delays_v2(
                     record[f"{name}_dur[ms]"] = round(t_e - t_s, 3)
                 else:
                     record[f"{name}_dur[ms]"] = None
+
+            elif mode == "on_period":
+                # 単一 Bool 変数の ON 期間（RISE → FALL）を計測
+                var = step.get("variable", "")
+                t_s = find_edge_time(cycle_df, var, "RISE", start_time)
+                t_e = find_edge_time(cycle_df, var, "FALL", start_time)
+                record[f"{name}_start[ms]"] = t_s
+                record[f"{name}_end[ms]"]   = t_e
+                if t_s is not None and t_e is not None:
+                    record[f"{name}_dur[ms]"] = round(t_e - t_s, 3)
+                else:
+                    record[f"{name}_dur[ms]"] = None
+
+            else:  # numeric
+                var   = step.get("variable", "")
+                op    = step.get("op", "==")
+                value = float(step.get("value", 0))
+                t_entry, t_dur = find_numeric_condition_time(
+                    cycle_df, var, op, value, start_time
+                )
+                record[f"{name}_start[ms]"] = t_entry
+                record[f"{name}_dur[ms]"]   = t_dur
 
         records.append(record)
     return pd.DataFrame(records)
