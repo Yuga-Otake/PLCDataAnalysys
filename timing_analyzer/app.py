@@ -1513,7 +1513,7 @@ if not processes:
 # ページタブ
 # ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═
 
-_page_tabs = st.tabs(["📊 解析", "🔴 NG比較", "📐 新データ評価"])
+_page_tabs = st.tabs(["⚙️ 画面設定", "📐 新データ評価"])
 
 with _page_tabs[0]:
 
@@ -2104,13 +2104,8 @@ with _page_tabs[0]:
 
         st.markdown("")
 
-    # ═══════════════════════════════════════════════════════════════
-    # 工程間タイムライン比較（ボトルネック分析用）
-    # ═══════════════════════════════════════════════════════════════
-
-    if len(processes) >= 1:
-        st.divider()
-        with st.expander("📊 工程間タイムライン比較（ボトルネック分析）", expanded=False):
+    if False:  # 工程間タイムライン比較（削除）
+        with st.expander("", expanded=False):
             proc_names = list(processes.keys())
             selected_procs = st.multiselect(
                 "比較する工程",
@@ -2235,171 +2230,10 @@ with _page_tabs[0]:
                     st.info("比較対象の工程にステップが設定されていません。")
 
 
-# ═══════════════════════════════════════════════════════════════
-# Tab 1: NG比較
-# ═══════════════════════════════════════════════════════════════
-
-with _page_tabs[1]:
-    st.subheader("🔴 NG比較")
-
-    if not processes:
-        st.info("「解析」タブで工程を設定してください")
-    else:
-        _ng_proc_list = list(processes.keys())
-        _ng_pname = st.selectbox("工程を選択", _ng_proc_list, key="ng_page_proc")
-        _ng_trigger = st.session_state.get(pk(_ng_pname, "trigger"), bool_cols[0] if bool_cols else "")
-        _ng_edge    = st.session_state.get(pk(_ng_pname, "edge"), "RISE")
-        _ng_steps   = st.session_state.get(pk(_ng_pname, "steps_list"), [])
-
-        if not _ng_steps:
-            st.info("「解析」タブでこの工程のステップを設定してください")
-        else:
-            ng_page_key = f"_ngpage_df_{_ng_pname}"
-            _ngh, _ngc = st.columns([5, 1])
-            with _ngh:
-                ng_page_file = st.file_uploader(
-                    "NGデータCSVをここにドロップ", type=["csv"],
-                    key=f"ng_page_up_{_ng_pname}", label_visibility="collapsed",
-                )
-            with _ngc:
-                if ng_page_key in st.session_state:
-                    if st.button("✕ クリア", key=f"ng_page_clr_{_ng_pname}",
-                                 use_container_width=True):
-                        del st.session_state[ng_page_key]
-                        st.rerun()
-
-            if ng_page_file:
-                try:
-                    st.session_state[ng_page_key] = load_csv(ng_page_file)
-                    st.rerun()
-                except Exception as _e:
-                    st.error(f"読み込みエラー: {_e}")
-
-            if ng_page_key in st.session_state:
-                ng_page_df = st.session_state[ng_page_key]
-                st.success(f"✓ NGデータ {len(ng_page_df):,}行　vs　正常データ {len(df):,}行")
-
-                _ng_all_vars = steps_all_vars(_ng_steps, bool_cols)
-                try:
-                    nr, ar = compare_normal_abnormal(
-                        df, ng_page_df, _ng_trigger, _ng_edge, _ng_all_vars
-                    )
-                    anoms = detect_anomalous_variables(nr, ar, _ng_all_vars)
-                    if anoms:
-                        st.warning("⚠️ 異常候補: " + " ／ ".join(
-                            f"**{a['variable']}** ({a['exceed_rate']*100:.0f}%超過)"
-                            for a in anoms
-                        ))
-                    else:
-                        st.info("異常候補変数は検出されませんでした")
-
-                    ng_ctabs = st.tabs(["📊 重ねヒストグラム", "📈 ずれランキング", "〰️ 波形重ね比較"])
-
-                    with ng_ctabs[0]:
-                        st.caption("X軸は正常データの平均値を0としたずれ量。")
-                        for _col in _ng_all_vars:
-                            _dcol = f"{_col}_遅れ[ms]"
-                            if _dcol not in nr.columns:
-                                continue
-                            _nd = nr[_dcol].dropna().values
-                            _ad = ar[_dcol].dropna().values if _dcol in ar.columns else np.array([])
-                            if len(_nd) == 0:
-                                continue
-                            _nm = float(np.mean(_nd))
-                            _ns = float(np.std(_nd))
-                            _nd_d = _nd - _nm
-                            _ad_d = _ad - _nm
-                            _all_d = np.concatenate([_nd_d, _ad_d]) if len(_ad_d) > 0 else _nd_d
-                            _nb = calc_nice_bins(_all_d)
-                            _fig = go.Figure()
-                            if len(_nd_d):
-                                _fig.add_trace(go.Histogram(x=_nd_d, name="正常", opacity=0.65,
-                                                            marker_color="royalblue", nbinsx=_nb))
-                            if len(_ad_d):
-                                _fig.add_trace(go.Histogram(x=_ad_d, name="異常", opacity=0.65,
-                                                            marker_color="crimson", nbinsx=_nb))
-                            _fig.add_vline(x=0, line_color="green",
-                                           annotation_text=f"正常平均 {_nm:.1f}ms",
-                                           annotation_position="top left")
-                            for _sg, _ds, _cv in [(3, "dash", "orange"), (4, "dot", "red")]:
-                                for _sgn in [1, -1]:
-                                    _v = _sgn * _sg * _ns
-                                    _lbl = f"+{_sg}σ" if _sgn > 0 else f"-{_sg}σ"
-                                    _fig.add_vline(
-                                        x=_v, line_dash=_ds, line_color=_cv,
-                                        annotation_text=f"{_lbl} ({_v:+.1f}ms)",
-                                        annotation_position="top right" if _sgn > 0 else "top left",
-                                    )
-                            _fig.update_layout(
-                                barmode="overlay",
-                                title=f"{_col}　正常平均: {_nm:.1f}ms　σ: {_ns:.1f}ms",
-                                xaxis_title="正常平均からのずれ [ms]",
-                                height=280, margin=dict(t=36, b=28), showlegend=True,
-                            )
-                            st.plotly_chart(_fig, use_container_width=True,
-                                            key=f"ngpage_hist_{_ng_pname}_{_col}")
-                            if len(_ad_d) > 0 and _ns > 0:
-                                _e3 = np.mean(np.abs(_ad_d) > 3 * _ns) * 100
-                                st.caption(f"異常データの 3σ超過率: {_e3:.1f}%")
-                            st.markdown("---")
-
-                    with ng_ctabs[1]:
-                        _ddf = calc_diff_ranking(nr, ar, _ng_all_vars)
-                        if len(_ddf) > 0:
-                            _fig = px.bar(_ddf, x="変数名", y="遅れ差分[ms]",
-                                          color="遅れ差分[ms]",
-                                          color_continuous_scale=["royalblue", "yellow", "crimson"])
-                            _fig.update_layout(height=300)
-                            st.plotly_chart(_fig, use_container_width=True,
-                                            key=f"ngpage_rank_{_ng_pname}")
-                            st.dataframe(_ddf, use_container_width=True, hide_index=True)
-
-                    with ng_ctabs[2]:
-                        _wv = st.selectbox("比較する変数", _ng_all_vars,
-                                           key=f"ngpage_wv_{_ng_pname}")
-                        if _wv:
-                            _ncs = pd.Index(cached_detect_cycles(df, _ng_trigger, _ng_edge))
-                            _acs = pd.Index(cached_detect_cycles(ng_page_df, _ng_trigger, _ng_edge))
-                            _nw  = get_cycle_waveforms(df, _ncs, [_wv])
-                            _aw  = get_cycle_waveforms(ng_page_df, _acs, [_wv])
-                            _fig = go.Figure()
-                            for _c in _nw:
-                                _fig.add_trace(go.Scatter(
-                                    x=_c["time_offset_ms"],
-                                    y=normalize_bool_series(_c[_wv]),
-                                    mode="lines", showlegend=False,
-                                    line=dict(color="rgba(65,105,225,0.15)")))
-                            for _c in _aw:
-                                _fig.add_trace(go.Scatter(
-                                    x=_c["time_offset_ms"],
-                                    y=normalize_bool_series(_c[_wv]),
-                                    mode="lines", showlegend=False,
-                                    line=dict(color="rgba(220,20,60,0.15)")))
-                            _nt, _nm2 = mean_waveform(_nw, _wv)
-                            _at, _am  = mean_waveform(_aw, _wv)
-                            if _nm2:
-                                _fig.add_trace(go.Scatter(x=_nt, y=_nm2, mode="lines",
-                                                          line=dict(color="royalblue", width=3),
-                                                          name="正常 平均"))
-                            if _am:
-                                _fig.add_trace(go.Scatter(x=_at, y=_am, mode="lines",
-                                                          line=dict(color="crimson", width=3),
-                                                          name="異常 平均"))
-                            _fig.update_layout(title=f"{_wv} 波形重ね比較",
-                                               xaxis_title="経過時間[ms]", height=420)
-                            st.plotly_chart(_fig, use_container_width=True,
-                                            key=f"ngpage_wave_{_ng_pname}")
-                except Exception as _e:
-                    st.error(f"比較エラー: {_e}")
-            else:
-                st.caption("NGデータCSVをアップロードすると即座に比較が始まります")
-
-
-# ═══════════════════════════════════════════════════════════════
 # Tab 2: 新データ評価
 # ═══════════════════════════════════════════════════════════════
 
-with _page_tabs[2]:
+with _page_tabs[1]:
     st.subheader("📐 新データ評価")
 
     if not processes:
