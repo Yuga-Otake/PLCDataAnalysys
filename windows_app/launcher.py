@@ -3,21 +3,38 @@ APB タイミング解析 - Windows アプリランチャー
 
 起動フロー:
   1. 空きポートを取得
-  2. Streamlit サーバーをバックグラウンドで起動
+  2. Streamlit サーバーをデーモンスレッドで起動
   3. サーバーが応答するまで待機（スプラッシュ表示）
   4. pywebview でネイティブウィンドウを開く
-  5. ウィンドウを閉じると Streamlit プロセスも終了
+  5. ウィンドウを閉じるとプロセス全体を終了
 """
+
+# ============================================================
+# CRITICAL: freeze_support を最初に呼ぶ（multiprocessing spawn ループ防止）
+# PyInstaller が子プロセスを起動するとき、このモジュールを import するが
+# freeze_support() がここで処理を止める
+# ============================================================
+import multiprocessing
+multiprocessing.freeze_support()
 
 import sys
 import os
 import socket
 import time
 import threading
-import subprocess
+
 import webview
 
+# PyInstaller が streamlit を確実にバンドルするようトップレベルで import
+import streamlit                       # noqa: F401
+import streamlit.web.cli               # noqa: F401
+import streamlit.web.bootstrap         # noqa: F401
+import streamlit.runtime.scriptrunner  # noqa: F401
 
+
+# --------------------------------------------------------------------------- #
+# Utilities
+# --------------------------------------------------------------------------- #
 def resource_path(*parts: str) -> str:
     """PyInstaller の _MEIPASS に対応したパス解決"""
     if hasattr(sys, "_MEIPASS"):
@@ -44,6 +61,52 @@ def wait_for_server(port: int, timeout: float = 60.0) -> bool:
     return False
 
 
+# --------------------------------------------------------------------------- #
+# Streamlit をスレッドで起動（bootstrap.run() を直接呼び出す）
+# cli.main() → Click 経由だと PyInstaller 環境で問題が起きるため直接呼ぶ
+# --------------------------------------------------------------------------- #
+def _run_streamlit(app_py: str, port: int) -> None:
+    """デーモンスレッドで Streamlit bootstrap を実行"""
+    # bootstrap.run() がシグナルハンドラーを設定しようとするが、
+    # スレッド内では signal.signal() が使えないのでパッチする
+    import signal
+    import threading as _threading
+    _orig_signal = signal.signal
+
+    def _thread_safe_signal(sig, handler):
+        if _threading.current_thread() is _threading.main_thread():
+            return _orig_signal(sig, handler)
+        # サブスレッドではシグナル設定を無視（例外を出さない）
+
+    signal.signal = _thread_safe_signal
+
+    # config.set_option() で直接設定（env var / flag_options より確実）
+    from streamlit import config as st_config
+    st_config.set_option("server.port",              port)
+    st_config.set_option("server.address",           "127.0.0.1")
+    st_config.set_option("server.headless",          True)
+    st_config.set_option("browser.gatherUsageStats", False)
+    st_config.set_option("server.fileWatcherType",   "none")
+    # Node dev server を無効化（デフォルト True になる場合があるため明示的に False）
+    st_config.set_option("global.developmentMode",   False)
+
+    from streamlit.web.bootstrap import run as st_bootstrap_run
+    try:
+        st_bootstrap_run(
+            main_script_path=app_py,
+            is_hello=False,
+            args=[],
+            flag_options={},
+        )
+    except SystemExit:
+        pass
+    finally:
+        signal.signal = _orig_signal
+
+
+# --------------------------------------------------------------------------- #
+# Splash HTML
+# --------------------------------------------------------------------------- #
 SPLASH_HTML = """
 <!DOCTYPE html>
 <html>
@@ -74,7 +137,7 @@ SPLASH_HTML = """
 </style>
 </head>
 <body>
-  <div class="title">🏭 APB タイミング解析</div>
+  <div class="title">&#127981; APB タイミング解析</div>
   <div class="sub">アプリを起動しています...</div>
   <div class="spinner"></div>
 </body>
@@ -82,30 +145,18 @@ SPLASH_HTML = """
 """
 
 
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
 def main() -> None:
     port = find_free_port()
     app_py = resource_path("timing_analyzer", "app.py")
 
-    # --- Streamlit サーバー起動 ---
-    env = os.environ.copy()
-    # Streamlit のブラウザ自動起動を無効化
-    env["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
-    env["STREAMLIT_SERVER_HEADLESS"] = "true"
-
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m", "streamlit", "run", app_py,
-            "--server.port", str(port),
-            "--server.address", "127.0.0.1",
-            "--server.headless", "true",
-            "--browser.gatherUsageStats", "false",
-        ],
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    # Streamlit をデーモンスレッドで起動
+    st_thread = threading.Thread(
+        target=_run_streamlit, args=(app_py, port), daemon=True
     )
+    st_thread.start()
 
     # --- スプラッシュウィンドウ ---
     splash = webview.create_window(
@@ -117,8 +168,11 @@ def main() -> None:
         frameless=False,
     )
 
+    _main_window_created = threading.Event()
+
     def on_splash_loaded():
-        # サーバー待機（別スレッド）
+        if _main_window_created.is_set():
+            return  # 複数回 fired された場合は無視
         ready = wait_for_server(port, timeout=60)
         if not ready:
             splash.load_html(
@@ -129,30 +183,24 @@ def main() -> None:
             )
             return
 
-        # メインウィンドウに切り替え
-        splash.destroy()
-        main_win = webview.create_window(
+        _main_window_created.set()
+        # メインウィンドウを先に作ってから splash を閉じる
+        # （splash を先に destroy すると webview.start() が即終了するため）
+        webview.create_window(
             "APB タイミング解析",
             url=f"http://127.0.0.1:{port}",
             width=1440,
             height=900,
             min_size=(900, 600),
         )
-
-        def on_main_closed():
-            proc.terminate()
-
-        main_win.events.closed += on_main_closed
+        time.sleep(0.3)   # メインウィンドウが登録されるまで少し待つ
+        splash.destroy()
 
     splash.events.loaded += lambda: threading.Thread(
         target=on_splash_loaded, daemon=True
     ).start()
 
-    webview.start(debug=False)
-
-    # ウィンドウが全て閉じられた後のクリーンアップ
-    if proc.poll() is None:
-        proc.terminate()
+    webview.start(gui="edgechromium", debug=False)
 
 
 if __name__ == "__main__":

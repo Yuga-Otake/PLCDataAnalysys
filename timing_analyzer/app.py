@@ -153,6 +153,14 @@ def cached_waveforms(df: pd.DataFrame, trigger_col: str, edge: str,
     return get_cycle_waveforms(df, idx, list(target_vars))
 
 @st.cache_data
+def cached_build_gantt(result_df: pd.DataFrame, steps_json: str, takt_target: int):
+    """build_gantt_v2 のキャッシュラッパー（result_df + steps_json が同一なら再計算しない）"""
+    import json as _json
+    steps_list = _json.loads(steps_json)
+    return build_gantt_v2(result_df, steps_list, takt_target)
+
+
+@st.cache_data
 def make_mini_chart(df: pd.DataFrame, var: str, height: int = 65) -> go.Figure:
     sample = df.head(2000)
     try:
@@ -579,8 +587,10 @@ def _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_
         view_start = max(0.0, event_t - half_win)
         view_end   = event_t + half_win
 
+        _MAX_WAVE = 60   # 表示サイクル上限（多いと描画が重くなるため）
         fig_w   = go.Figure()
         all_t, all_v = [], []
+        _shown = 0
         for cyc in waveforms:
             mask = ((cyc["time_offset_ms"] >= view_start) &
                     (cyc["time_offset_ms"] <= view_end))
@@ -590,9 +600,11 @@ def _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_
             t = sl["time_offset_ms"].values
             v = normalize_bool_series(sl[var]).values
             all_t.append(t); all_v.append(v)
-            fig_w.add_trace(go.Scatter(x=t, y=v, mode="lines",
-                                       line=dict(color="rgba(100,100,200,0.10)", width=1),
-                                       showlegend=False))
+            if _shown < _MAX_WAVE:
+                fig_w.add_trace(go.Scatter(x=t, y=v, mode="lines",
+                                           line=dict(color="rgba(100,100,200,0.10)", width=1),
+                                           showlegend=False))
+                _shown += 1
         if all_t:
             tmin = min(t[0]  for t in all_t if len(t) > 0)
             tmax = max(t[-1] for t in all_t if len(t) > 0)
@@ -740,12 +752,16 @@ def _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_d
         view_start = max(0.0, mean_s - mean_d * 0.5)
         view_end   = mean_s + mean_d * 2.5
 
-        fig_w = go.Figure()
+        _MAX_WAVE = 60   # 表示サイクル上限
+        fig_w  = go.Figure()
+        _shown = 0
         for cyc in waveforms:
             mask = ((cyc["time_offset_ms"] >= view_start) &
                     (cyc["time_offset_ms"] <= view_end))
             sl = cyc[mask]
             if len(sl) < 2:
+                continue
+            if _shown >= _MAX_WAVE:
                 continue
             t = sl["time_offset_ms"].values
             if start_var and start_var in sl.columns:
@@ -756,6 +772,7 @@ def _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_d
                 fig_w.add_trace(go.Scatter(x=t, y=normalize_bool_series(sl[end_var]).values,
                                            mode="lines", showlegend=False,
                                            line=dict(color="rgba(220,100,60,0.10)", width=1)))
+            _shown += 1
 
         # 平均波形
         if start_var:
@@ -857,8 +874,9 @@ def _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result
 
     with h_col:
         st.markdown("**継続時間ヒストグラム**")
-        n_bins = calc_sturges_bins(len(durs))
-        fig_h  = go.Figure()
+        _bkey_n = f"{pname}_{name}_n"
+        n_bins  = calc_nice_bins(durs, _bkey_n)   # Freedman-Diaconis で自動算出
+        fig_h   = go.Figure()
         if threshold > 0:
             below = [d for d in durs if d <= threshold]
             above = [d for d in durs if d > threshold]
@@ -879,6 +897,8 @@ def _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result
                              barmode="overlay", height=260, margin=dict(t=8, b=32),
                              showlegend=threshold > 0)
         st.plotly_chart(fig_h, use_container_width=True, key=f"hist_{pname}_{name}")
+        st.slider("ビン数", 3, 60, n_bins, key=f"_bins_{_bkey_n}",
+                  help="ヒストグラムのビン数を手動調整（Freedman-Diaconis による自動算出が既定値）")
         sc = st.columns(4)
         sc[0].metric("N",        len(durs))
         sc[1].metric("平均継続",  f"{mean_d:.1f}ms")
@@ -903,7 +923,10 @@ def _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result
         view_start = max(0.0, mean_s - half_win * 0.5)
         view_end   = mean_s + mean_d + half_win
 
-        fig_w = go.Figure()
+        _MAX_WAVE = 60   # 表示サイクル上限
+        fig_w  = go.Figure()
+        _shown = 0
+        all_slices = []
         for cyc in waveforms:
             mask = ((cyc["time_offset_ms"] >= view_start) &
                     (cyc["time_offset_ms"] <= view_end))
@@ -912,16 +935,12 @@ def _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result
                 continue
             t = sl["time_offset_ms"].values
             v = sl[var].values
-            fig_w.add_trace(go.Scatter(x=t, y=v, mode="lines", showlegend=False,
-                                       line=dict(color="rgba(100,100,200,0.12)", width=1)))
+            all_slices.append((t, v))    # 平均計算用（全サイクル使用）
+            if _shown < _MAX_WAVE:
+                fig_w.add_trace(go.Scatter(x=t, y=v, mode="lines", showlegend=False,
+                                           line=dict(color="rgba(100,100,200,0.12)", width=1)))
+                _shown += 1
         # 平均ライン（数値なので簡易的に各時刻の平均を取る）
-        all_slices = []
-        for cyc in waveforms:
-            mask = ((cyc["time_offset_ms"] >= view_start) &
-                    (cyc["time_offset_ms"] <= view_end))
-            sl = cyc[mask]
-            if len(sl) >= 2:
-                all_slices.append((sl["time_offset_ms"].values, sl[var].values))
         if all_slices:
             ct = np.linspace(view_start, view_end, 200)
             mv = [np.mean([np.interp(t, ts, vs) for ts, vs in all_slices]) for t in ct]
@@ -1317,9 +1336,21 @@ def baseline_dialog(pname: str, step_stats: list, result_df: pd.DataFrame):
     existing = st.session_state.get(pk(pname, "baseline"), {})
 
     src_lbl = st.radio(
-        "算出方法", ["平均値", "最小値", "手動入力"],
+        "算出方法", ["平均値", "最小値", "特定サイクル", "手動入力"],
         horizontal=True, key=f"_bl_src_{pname}",
     )
+
+    # 特定サイクル選択
+    _sel_cyc_row = None
+    if src_lbl == "特定サイクル" and "サイクル#" in result_df.columns:
+        _cyc_nums = result_df["サイクル#"].dropna().astype(int).tolist()
+        _sel_cyc = st.selectbox(
+            "サイクルを選択", _cyc_nums,
+            format_func=lambda x: f"サイクル {x}",
+            key=f"_bl_cyc_sel_{pname}",
+        )
+        _cyc_mask = result_df["サイクル#"].astype(int) == _sel_cyc
+        _sel_cyc_row = result_df[_cyc_mask].iloc[0] if _cyc_mask.any() else None
 
     new_vals = {}
     st.divider()
@@ -1338,6 +1369,10 @@ def baseline_dialog(pname: str, step_stats: list, result_df: pd.DataFrame):
                 default = float(np.mean(vals))
             elif src_lbl == "最小値":
                 default = float(np.min(vals))
+            elif src_lbl == "特定サイクル":
+                default = (float(_sel_cyc_row[dcol])
+                           if _sel_cyc_row is not None and dcol in _sel_cyc_row and pd.notna(_sel_cyc_row[dcol])
+                           else float(np.mean(vals)))
             else:
                 default = float(ex.get("ref_ms", np.mean(vals)))
 
@@ -1345,7 +1380,7 @@ def baseline_dialog(pname: str, step_stats: list, result_df: pd.DataFrame):
             ref_ms = st.number_input(
                 "基準値 [ms]", value=default, step=0.5,
                 key=f"_bl_{pname}_{name}_rm",
-                disabled=(src_lbl != "手動入力"),
+                disabled=(src_lbl not in ("手動入力", "特定サイクル")),
                 label_visibility="collapsed",
             )
             new_vals[name] = {
@@ -1367,6 +1402,13 @@ def baseline_dialog(pname: str, step_stats: list, result_df: pd.DataFrame):
             elif src_lbl == "最小値":
                 default_dur   = float(np.min(dvals))
                 default_start = float(np.min(svals)) if len(svals) > 0 else 0.0
+            elif src_lbl == "特定サイクル":
+                default_dur = (float(_sel_cyc_row[dcol])
+                               if _sel_cyc_row is not None and dcol in _sel_cyc_row and pd.notna(_sel_cyc_row[dcol])
+                               else float(np.mean(dvals)))
+                default_start = (float(_sel_cyc_row[scol])
+                                 if _sel_cyc_row is not None and scol in _sel_cyc_row and pd.notna(_sel_cyc_row[scol])
+                                 else float(np.mean(svals)) if len(svals) > 0 else 0.0)
             else:
                 default_dur   = float(ex.get("ref_dur_ms",   np.mean(dvals)))
                 default_start = float(ex.get("ref_start_ms", float(np.mean(svals)) if len(svals) > 0 else 0.0))
@@ -1377,13 +1419,13 @@ def baseline_dialog(pname: str, step_stats: list, result_df: pd.DataFrame):
                 ref_start = st.number_input(
                     "開始 [ms]", value=default_start, step=0.5,
                     key=f"_bl_{pname}_{name}_rs",
-                    disabled=(src_lbl != "手動入力"),
+                    disabled=(src_lbl not in ("手動入力", "特定サイクル")),
                 )
             with c2:
                 ref_dur = st.number_input(
                     "継続 [ms]", value=default_dur, step=0.5,
                     key=f"_bl_{pname}_{name}_rd",
-                    disabled=(src_lbl != "手動入力"),
+                    disabled=(src_lbl not in ("手動入力", "特定サイクル")),
                 )
             new_vals[name] = {
                 "mode":         mode,
@@ -1395,7 +1437,12 @@ def baseline_dialog(pname: str, step_stats: list, result_df: pd.DataFrame):
         st.divider()
 
     n_cyc = len(result_df)
-    if st.button(f"✅ 登録（{n_cyc} サイクルの{src_lbl}）", type="primary", use_container_width=True):
+    _btn_label = (
+        f"✅ 登録（サイクル {st.session_state.get(f'_bl_cyc_sel_{pname}', '?')} の値）"
+        if src_lbl == "特定サイクル" and _sel_cyc_row is not None
+        else f"✅ 登録（{n_cyc} サイクルの{src_lbl}）"
+    )
+    if st.button(_btn_label, type="primary", use_container_width=True):
         st.session_state[pk(pname, "baseline")] = new_vals
         st.session_state[pk(pname, "baseline_meta")] = {
             "source":    src_lbl,
@@ -1435,6 +1482,8 @@ with st.sidebar:
         try:
             df, col_types = cached_load_sample(sample_path)
             st.success(f"sample_playback.csv（{len(df):,}行）")
+            st.session_state["df"] = df
+            st.session_state["uploaded_filename"] = "sample_playback.csv"
         except FileNotFoundError:
             st.error("sample_playback.csv が見つかりません")
             st.stop()
@@ -1445,6 +1494,8 @@ with st.sidebar:
                 df       = load_csv(uploaded)
                 col_types = detect_bool_columns(df)
                 st.success(f"{len(df):,}行 読み込み完了")
+                st.session_state["df"] = df
+                st.session_state["uploaded_filename"] = uploaded.name
             except Exception as e:
                 st.error(f"読み込みエラー: {e}")
                 st.stop()
@@ -1489,6 +1540,77 @@ with st.sidebar:
     for pname, pinfo in st.session_state["processes"].items():
         init_proc_widgets(pname, pinfo, bool_cols)
 
+    # ─── 設定ファイル 保存 / 読み込み ───────────────────────────
+    st.divider()
+    st.markdown("#### 💾 設定ファイル")
+
+    # 保存（現在の全工程設定をJSONに）
+    if st.session_state.get("processes"):
+        _exp_procs = {}
+        for _ep in st.session_state["processes"]:
+            _exp_procs[_ep] = {
+                "trigger":        st.session_state.get(pk(_ep, "trigger"), ""),
+                "edge":           st.session_state.get(pk(_ep, "edge"), "RISE"),
+                "takt_target_ms": st.session_state.get(pk(_ep, "takt"), 0),
+                "steps":          st.session_state.get(pk(_ep, "steps_list"), []),
+                "baseline":       st.session_state.get(pk(_ep, "baseline"), {}),
+                "baseline_meta":  st.session_state.get(pk(_ep, "baseline_meta"), {}),
+            }
+        _exp_json = json.dumps(
+            {"version": "1.0",
+             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+             "processes": _exp_procs},
+            ensure_ascii=False, indent=2,
+        )
+        st.download_button(
+            "📥 設定を保存 (JSON)",
+            data=_exp_json,
+            file_name=f"apb_settings_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+            mime="application/json",
+            use_container_width=True,
+            key="_settings_export_btn",
+        )
+
+    # 読み込み
+    _imp_file = st.file_uploader(
+        "📤 設定JSONを読み込む", type=["json"],
+        key="_settings_import", label_visibility="visible",
+    )
+    if _imp_file is not None:
+        try:
+            _imp = json.load(_imp_file)
+            if "processes" not in _imp:
+                st.error("有効な設定JSONではありません（'processes'キーが見つかりません）")
+            else:
+                _new_procs: dict = {}
+                for _ip, _ipd in _imp["processes"].items():
+                    _new_procs[_ip] = {
+                        "trigger_col":   _ipd.get("trigger", ""),
+                        "edge":          _ipd.get("edge", "RISE"),
+                        "takt_target_ms": _ipd.get("takt_target_ms", 0),
+                        "steps":         _ipd.get("steps", []),
+                    }
+                    # session_state を直接セット（rerun後に init_proc_widgets が上書きしないよう先行設定）
+                    st.session_state[pk(_ip, "trigger")]    = _ipd.get("trigger", "")
+                    st.session_state[pk(_ip, "edge")]       = _ipd.get("edge", "RISE")
+                    st.session_state[pk(_ip, "takt")]       = int(_ipd.get("takt_target_ms", 0))
+                    st.session_state[pk(_ip, "steps_list")] = _ipd.get("steps", [])
+                    if _ipd.get("baseline"):
+                        st.session_state[pk(_ip, "baseline")] = _ipd["baseline"]
+                    if _ipd.get("baseline_meta"):
+                        st.session_state[pk(_ip, "baseline_meta")] = _ipd["baseline_meta"]
+                st.session_state["processes"]   = _new_procs
+                st.session_state["_expand_new"] = next(iter(_new_procs), None)
+                st.toast("✅ 設定を読み込みました")
+                st.rerun()
+        except Exception as _imp_e:
+            st.error(f"読み込みエラー: {_imp_e}")
+
+    # ─── ページナビゲーション ─────────────────────────────────
+    st.divider()
+    st.page_link("pages/4_ロガー設定ナビ.py",   label="📋 ロガー設定ナビ")
+    st.page_link("pages/0_このツールについて.py", label="ℹ️ このツールについて")
+
 
 # ═══════════════════════════════════════════════════════════════
 # メインコンテンツ
@@ -1513,7 +1635,7 @@ if not processes:
 # ページタブ
 # ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═
 
-_page_tabs = st.tabs(["⚙️ 画面設定", "📐 新データ評価"])
+_page_tabs = st.tabs(["⚙️ 画面設定", "📐 新データ評価", "📈 傾向解析"])
 
 with _page_tabs[0]:
 
@@ -2023,11 +2145,12 @@ with _page_tabs[0]:
 
                     with tabs[1]:
                         for col in delay_cols:
-                            vn = col.replace("_遅れ[ms]", "").replace("_dur[ms]", " (所要時間)")
-                            dl = result_df[col].dropna().values
+                            vn    = col.replace("_遅れ[ms]", "").replace("_dur[ms]", " (所要時間)")
+                            dl    = result_df[col].dropna().values
                             if len(dl) == 0:
                                 continue
-                            nb  = calc_nice_bins(dl)
+                            _bkey_t = f"{pname}_{col}_t"
+                            nb  = calc_nice_bins(dl, _bkey_t)   # Freedman-Diaconis 自動算出
                             st_ = calc_statistics(dl)
                             sg3 = st_.get("3σ上限[ms]", 0)
                             fig = go.Figure()
@@ -2050,6 +2173,8 @@ with _page_tabs[0]:
                             fig.update_layout(title=vn, xaxis_title="時間[ms]",
                                               barmode="overlay", height=250, margin=dict(t=28))
                             st.plotly_chart(fig, use_container_width=True, key=f"t2_{pname}_{vn}")
+                            st.slider("ビン数", 3, 60, nb, key=f"_bins_{_bkey_t}",
+                                      help="ヒストグラムのビン数を手動調整（Freedman-Diaconis による自動算出が既定値）")
                             if st_:
                                 sc = st.columns(min(6, len(st_)))
                                 for i, (k, v) in enumerate(list(st_.items())[:6]):
@@ -2271,14 +2396,19 @@ with _page_tabs[1]:
                     if st.button("✕ クリア", key=f"ev_page_clr_{_ev_pname}",
                                  use_container_width=True):
                         del st.session_state[ev_page_key]
+                        st.session_state.pop(f"{ev_page_key}_sig", None)
                         st.rerun()
 
             if ev_page_file:
-                try:
-                    st.session_state[ev_page_key] = load_csv(ev_page_file)
-                    st.rerun()
-                except Exception as _e:
-                    st.error(f"読み込みエラー: {_e}")
+                # ファイル名+サイズをシグネチャとして使い、同一ファイルの再読み込みを防ぐ
+                _ev_sig = f"{ev_page_file.name}_{ev_page_file.size}"
+                _ev_sig_key = f"{ev_page_key}_sig"
+                if st.session_state.get(_ev_sig_key) != _ev_sig:
+                    try:
+                        st.session_state[ev_page_key] = load_csv(ev_page_file)
+                        st.session_state[_ev_sig_key] = _ev_sig
+                    except Exception as _e:
+                        st.error(f"読み込みエラー: {_e}")
 
             if ev_page_key in st.session_state:
                 _ev_df = st.session_state[ev_page_key]
@@ -2292,8 +2422,10 @@ with _page_tabs[1]:
                     _ev_result = None
 
                 if _ev_result is not None and len(_ev_result) > 0:
-                    # ガントチャート
-                    _ev_fig, _ev_step_stats = build_gantt_v2(_ev_result, _ev_steps, _ev_takt)
+                    # ガントチャート（キャッシュ済みラッパーで再計算を抑止）
+                    _ev_fig, _ev_step_stats = cached_build_gantt(
+                        _ev_result, _ev_steps_json, _ev_takt
+                    )
                     if _ev_fig:
                         st.markdown("**ガントチャート（評価データ）**")
                         st.plotly_chart(_ev_fig, use_container_width=True,
@@ -2364,32 +2496,40 @@ with _page_tabs[1]:
                                 _ev_stat, _ev_step_cfg, _pname_ev, _ev_result,
                             )
 
-                    # サイクル別判定テーブル
+                    # サイクル別判定テーブル（ベクトル化で高速化）
                     st.divider()
                     st.markdown("**サイクル別判定**")
-                    _ev_cyc_rows = []
-                    for _, _row in _ev_result.iterrows():
-                        _rec = {"サイクル#": int(_row.get("サイクル#", 0))}
-                        _ng_cyc = False
-                        for _s in (_ev_step_stats or []):
-                            _sn = _s["name"]
-                            _sm = _s["mode"]
-                            _ble = _ev_bl.get(_sn, {})
-                            _col = f"{_sn}_遅れ[ms]" if _sm == "single" else f"{_sn}_dur[ms]"
-                            _ref = _ble.get("ref_ms") if _sm == "single" else _ble.get("ref_dur_ms")
-                            _std = _ble.get("std_ms", 0.0) if _sm == "single" else _ble.get("std_dur_ms", 0.0)
-                            if _col not in _row or _ref is None or pd.isna(_row[_col]):
-                                continue
-                            _delta = _row[_col] - _ref
-                            _thresh = _ev_sigma * _std if _std > 0 else None
-                            _is_ng = _thresh is not None and abs(_delta) > _thresh
-                            if _is_ng:
-                                _ng_cyc = True
-                            _rec[_sn] = f"{'🔴 ' if _is_ng else ''}{_delta:+.1f}ms"
-                        _rec["総合判定"] = "🔴 NG" if _ng_cyc else "🟢 OK"
-                        _ev_cyc_rows.append(_rec)
-                    if _ev_cyc_rows:
-                        _ev_cyc_df = pd.DataFrame(_ev_cyc_rows)
+                    _ev_cyc_df = pd.DataFrame({"サイクル#": _ev_result["サイクル#"].astype(int)})
+                    _ng_any = pd.Series(False, index=_ev_result.index)
+                    for _s in (_ev_step_stats or []):
+                        _sn = _s["name"]
+                        _sm = _s["mode"]
+                        _ble = _ev_bl.get(_sn, {})
+                        _col = (f"{_sn}_遅れ[ms]" if _sm == "single"
+                                else f"{_sn}_dur[ms]")
+                        _ref = (_ble.get("ref_ms") if _sm == "single"
+                                else _ble.get("ref_dur_ms"))
+                        _std = (_ble.get("std_ms", 0.0) if _sm == "single"
+                                else _ble.get("std_dur_ms", 0.0))
+                        if _col not in _ev_result.columns or _ref is None:
+                            continue
+                        _delta_s = _ev_result[_col] - _ref          # Series演算（高速）
+                        _thresh = _ev_sigma * _std if _std > 0 else None
+                        _is_ng_s = (
+                            _delta_s.abs() > _thresh
+                            if _thresh is not None
+                            else pd.Series(False, index=_ev_result.index)
+                        )
+                        _ng_any |= _is_ng_s
+                        # 書式はリスト内包表記で（行ループより大幅に速い）
+                        _ev_cyc_df[_sn] = [
+                            f"{'🔴 ' if ng else ''}{d:+.1f}ms" if pd.notna(d) else ""
+                            for d, ng in zip(_delta_s, _is_ng_s)
+                        ]
+                    _ev_cyc_df["総合判定"] = [
+                        "🔴 NG" if ng else "🟢 OK" for ng in _ng_any
+                    ]
+                    if not _ev_cyc_df.empty:
                         st.dataframe(_ev_cyc_df, hide_index=True, use_container_width=True)
                         st.download_button(
                             "サイクル判定CSVダウンロード",
@@ -2399,3 +2539,278 @@ with _page_tabs[1]:
                         )
             else:
                 st.caption("評価したいCSVをアップロードしてください")
+
+
+# ═══════════════════════════════════════════════════════════════
+# 傾向解析タブ
+# ═══════════════════════════════════════════════════════════════
+
+with _page_tabs[2]:
+    import re as _re
+
+    st.subheader("📈 傾向解析")
+    st.caption("複数時期のCSVを登録し、ステップ毎のタイミング傾向を可視化します")
+
+    if not processes:
+        st.info("「⚙️ 画面設定」タブで工程を設定してください")
+    else:
+        _tr_pname = st.selectbox(
+            "工程を選択", list(processes.keys()), key="tr_page_proc"
+        )
+        _tr_trigger = st.session_state.get(pk(_tr_pname, "trigger"), bool_cols[0] if bool_cols else "")
+        _tr_edge    = st.session_state.get(pk(_tr_pname, "edge"), "RISE")
+        _tr_steps   = st.session_state.get(pk(_tr_pname, "steps_list"), [])
+        _tr_bl      = st.session_state.get(pk(_tr_pname, "baseline"), {})
+
+        if not _tr_steps:
+            st.info("ステップが設定されていません。「⚙️ 画面設定」タブでステップを追加してください")
+        else:
+            # ── ファイル管理 ────────────────────────────────────────
+            st.markdown("#### 📂 時期別CSVの登録")
+            st.caption("時系列順に複数のCSVをアップロードしてください。ファイル名から日付を自動検出します。")
+
+            _tr_uploaded = st.file_uploader(
+                "CSVを選択（複数可）", type=["csv"],
+                accept_multiple_files=True, key=f"tr_files_{_tr_pname}",
+            )
+
+            # ラベル管理（session_stateで保持）
+            _tr_labels_key = f"_tr_labels_{_tr_pname}"
+            if _tr_labels_key not in st.session_state:
+                st.session_state[_tr_labels_key] = {}
+
+            if _tr_uploaded:
+                st.markdown("**ファイルラベル設定**")
+                st.caption("各ファイルの時期ラベルを編集できます（グラフの X 軸に使用）")
+                _n_cols = min(len(_tr_uploaded), 4)
+                _label_cols = st.columns(_n_cols)
+                for _ti, _tf in enumerate(_tr_uploaded):
+                    _lk = _tf.name
+                    if _lk not in st.session_state[_tr_labels_key]:
+                        _dm = _re.search(r"(\d{4}[-_/]?\d{2}[-_/]?\d{2})", _tf.name)
+                        _auto = (
+                            _dm.group(1).replace("_", "-").replace("/", "-")
+                            if _dm else _tf.name.replace(".csv", "")
+                        )
+                        st.session_state[_tr_labels_key][_lk] = _auto
+                    with _label_cols[_ti % _n_cols]:
+                        st.session_state[_tr_labels_key][_lk] = st.text_input(
+                            _tf.name,
+                            value=st.session_state[_tr_labels_key][_lk],
+                            key=f"tr_lbl_{_tr_pname}_{_tf.name}",
+                        )
+
+                # ── 解析実行 ────────────────────────────────────────
+                st.divider()
+                if st.button(
+                    "📊 傾向解析を実行", type="primary",
+                    use_container_width=True, key=f"tr_run_{_tr_pname}",
+                ):
+                    _tr_steps_json = json.dumps(_tr_steps)
+                    _res_list = []
+                    _prog = st.progress(0, text="解析中...")
+                    for _ti, _tf in enumerate(_tr_uploaded):
+                        _prog.progress(
+                            (_ti + 1) / len(_tr_uploaded),
+                            text=f"解析中 {_ti + 1}/{len(_tr_uploaded)}: {_tf.name}",
+                        )
+                        try:
+                            _tdf = load_csv(_tf)
+                            _tres = cached_analyze_v2(
+                                _tdf, _tr_trigger, _tr_edge, _tr_steps_json
+                            )
+                            _lbl = st.session_state[_tr_labels_key].get(_tf.name, _tf.name)
+                            _res_list.append(
+                                {"label": _lbl, "fname": _tf.name, "result": _tres}
+                            )
+                        except Exception as _te:
+                            st.warning(f"{_tf.name}: 解析失敗 ({_te})")
+                    _prog.empty()
+                    st.session_state[f"_tr_results_{_tr_pname}"] = _res_list
+                    st.toast(f"✅ {len(_res_list)} ファイルの解析が完了しました")
+                    st.rerun()
+
+                # ── 結果表示 ────────────────────────────────────────
+                _tr_res_list = st.session_state.get(f"_tr_results_{_tr_pname}", [])
+                if _tr_res_list:
+                    st.divider()
+                    st.markdown("#### 📊 傾向チャート")
+
+                    _tr_sigma = st.slider(
+                        "異常判定 σ 倍数", 1.0, 5.0, 3.0, 0.5,
+                        key=f"tr_sigma_{_tr_pname}",
+                        help="基準値±Nσ を超えたポイントを 🔴 でマーク",
+                    )
+
+                    _tr_summary_rows = []
+
+                    for _ts in _tr_steps:
+                        _tsn  = _ts["name"]
+                        _tsm  = _ts["mode"]
+                        _tsc  = _ts.get("color", "#1f77b4")
+                        _dcol = (
+                            f"{_tsn}_遅れ[ms]" if _tsm == "single"
+                            else f"{_tsn}_dur[ms]"
+                        )
+
+                        _tr_lbls, _tr_means, _tr_stds = [], [], []
+                        for _r in _tr_res_list:
+                            _rdf = _r["result"]
+                            if _dcol not in _rdf.columns:
+                                continue
+                            _rv = _rdf[_dcol].dropna().values
+                            if len(_rv) == 0:
+                                continue
+                            _tr_lbls.append(_r["label"])
+                            _tr_means.append(float(np.mean(_rv)))
+                            _tr_stds.append(float(np.std(_rv)))
+
+                        if not _tr_lbls:
+                            continue
+
+                        # 基準値
+                        _tbl  = _tr_bl.get(_tsn, {})
+                        _tref = (
+                            _tbl.get("ref_ms") if _tsm == "single"
+                            else _tbl.get("ref_dur_ms")
+                        )
+                        _tbls = (
+                            _tbl.get("std_ms", 0.0) if _tsm == "single"
+                            else _tbl.get("std_dur_ms", 0.0)
+                        )
+
+                        # 異常判定
+                        _is_ng = [
+                            bool(
+                                _tref is not None and _tbls > 0
+                                and abs(m - _tref) > _tr_sigma * _tbls
+                            )
+                            for m in _tr_means
+                        ]
+
+                        # サマリー行
+                        _sr = {"ステップ": _tsn, "モード": _tsm}
+                        for _li, (_lbl, _m, _s) in enumerate(
+                            zip(_tr_lbls, _tr_means, _tr_stds)
+                        ):
+                            _sr[_lbl] = f"{'🔴 ' if _is_ng[_li] else ''}{_m:.1f} ± {_s:.1f}"
+                        _tr_summary_rows.append(_sr)
+
+                        # ── チャート ─────────────────────────────────
+                        _fig_tr = go.Figure()
+
+                        # ±1σ 帯
+                        _hex = _tsc.lstrip("#")
+                        _rgb = tuple(int(_hex[i:i+2], 16) for i in (0, 2, 4)) if len(_hex) == 6 else (31, 119, 180)
+                        _fill_col = f"rgba({_rgb[0]},{_rgb[1]},{_rgb[2]},0.15)"
+                        _fig_tr.add_trace(go.Scatter(
+                            x=_tr_lbls + _tr_lbls[::-1],
+                            y=(
+                                [m + s for m, s in zip(_tr_means, _tr_stds)]
+                                + [m - s for m, s in zip(_tr_means[::-1], _tr_stds[::-1])]
+                            ),
+                            fill="toself",
+                            fillcolor=_fill_col,
+                            line=dict(width=0),
+                            showlegend=True, name="±1σ",
+                        ))
+
+                        # 平均値ライン（NG点は赤マーカー）
+                        _pt_colors = ["#e74c3c" if ng else _tsc for ng in _is_ng]
+                        _pt_symbols = ["x" if ng else "circle" for ng in _is_ng]
+                        _fig_tr.add_trace(go.Scatter(
+                            x=_tr_lbls, y=_tr_means,
+                            mode="lines+markers",
+                            line=dict(color=_tsc, width=2),
+                            marker=dict(
+                                color=_pt_colors, size=10,
+                                symbol=_pt_symbols,
+                                line=dict(width=2, color="white"),
+                            ),
+                            name="平均値",
+                            hovertemplate=(
+                                "%{x}<br>平均: %{y:.2f} ms"
+                                "<br>σ: %{customdata:.2f} ms<extra></extra>"
+                            ),
+                            customdata=_tr_stds,
+                        ))
+
+                        # 基準値ライン & ±Nσ 帯
+                        if _tref is not None:
+                            _fig_tr.add_hline(
+                                y=_tref,
+                                line_dash="dash", line_color="#27ae60",
+                                annotation_text=f"基準 {_tref:.1f} ms",
+                                annotation_position="bottom right",
+                            )
+                            if _tbls > 0:
+                                _fig_tr.add_hrect(
+                                    y0=_tref - _tr_sigma * _tbls,
+                                    y1=_tref + _tr_sigma * _tbls,
+                                    fillcolor="#27ae60", opacity=0.08,
+                                    line_width=0,
+                                    annotation_text=f"±{_tr_sigma:.0f}σ",
+                                    annotation_position="top right",
+                                )
+
+                        _fig_tr.update_layout(
+                            title=dict(
+                                text=f"<b>{_tsn}</b>　傾向",
+                                font=dict(size=14),
+                            ),
+                            xaxis_title="時期",
+                            yaxis_title="[ms]",
+                            height=290,
+                            margin=dict(t=48, b=40, l=60, r=20),
+                            legend=dict(
+                                orientation="h", y=1.05, x=1, xanchor="right"
+                            ),
+                            hovermode="x unified",
+                        )
+                        st.plotly_chart(_fig_tr, use_container_width=True)
+
+                    # ── サマリーテーブル ────────────────────────────
+                    if _tr_summary_rows:
+                        st.divider()
+                        st.markdown("#### 📋 サマリーテーブル（平均 ± σ）")
+                        st.caption("🔴 は基準値から±Nσ 以上の逸脱")
+                        _tr_sum_df = pd.DataFrame(_tr_summary_rows)
+                        st.dataframe(_tr_sum_df, hide_index=True, use_container_width=True)
+
+                        # CSV ダウンロード
+                        _tr_dl_rows = []
+                        for _ts2 in _tr_steps:
+                            _tsn2  = _ts2["name"]
+                            _tsm2  = _ts2["mode"]
+                            _dcol2 = (
+                                f"{_tsn2}_遅れ[ms]" if _tsm2 == "single"
+                                else f"{_tsn2}_dur[ms]"
+                            )
+                            for _r2 in _tr_res_list:
+                                _rdf2 = _r2["result"]
+                                if _dcol2 not in _rdf2.columns:
+                                    continue
+                                _rv2 = _rdf2[_dcol2].dropna().values
+                                if len(_rv2) == 0:
+                                    continue
+                                _tr_dl_rows.append({
+                                    "時期":         _r2["label"],
+                                    "ステップ":       _tsn2,
+                                    "サイクル数":     len(_rv2),
+                                    "平均[ms]":      round(float(np.mean(_rv2)), 3),
+                                    "標準偏差[ms]":   round(float(np.std(_rv2)), 3),
+                                    "最小[ms]":      round(float(np.min(_rv2)), 3),
+                                    "最大[ms]":      round(float(np.max(_rv2)), 3),
+                                })
+                        if _tr_dl_rows:
+                            st.download_button(
+                                "📥 傾向データCSVダウンロード",
+                                pd.DataFrame(_tr_dl_rows).to_csv(
+                                    index=False, encoding="utf-8-sig"
+                                ),
+                                f"{_tr_pname}_trend.csv",
+                                key=f"tr_dl_{_tr_pname}",
+                                use_container_width=True,
+                            )
+            else:
+                st.info("CSVファイルをアップロードして「傾向解析を実行」を押してください")

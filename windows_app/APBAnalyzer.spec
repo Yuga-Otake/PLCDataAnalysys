@@ -13,16 +13,17 @@ block_cipher = None
 # ── Streamlit の静的ファイル・データをすべて収集 ──────────────────
 st_datas, st_binaries, st_hiddenimports = collect_all("streamlit")
 plotly_datas, _, _ = collect_all("plotly")
+wv_datas, wv_binaries, wv_hiddenimports = collect_all("webview")
 
 # timing_analyzer ディレクトリを丸ごと同梱
 app_datas = [
     (os.path.join("..", "timing_analyzer"), "timing_analyzer"),
 ]
 
-all_datas    = app_datas + st_datas + plotly_datas
-all_binaries = st_binaries
+all_datas    = app_datas + st_datas + plotly_datas + wv_datas
+all_binaries = st_binaries + wv_binaries
 
-hidden_imports = st_hiddenimports + [
+hidden_imports = st_hiddenimports + wv_hiddenimports + [
     # analyzer / app 内で使う主要パッケージ
     "pandas",
     "numpy",
@@ -32,9 +33,9 @@ hidden_imports = st_hiddenimports + [
     # Streamlit 内部
     "streamlit.runtime.scriptrunner.magic_funcs",
     "streamlit.web.cli",
-    # pywebview バックエンド（Windows は mshtml/edgechromium）
+    # pywebview バックエンド（edgechromium = WebView2、pythonnet 不要）
     "webview",
-    "webview.platforms.winforms",
+    "webview.platforms.edgechromium",
     # その他
     "altair",
     "pyarrow",
@@ -72,7 +73,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,                  # コンソールウィンドウを非表示
+    console=True,                   # デバッグ用: コンソール表示
     icon=None,                      # アイコンを設定する場合: icon="icon.ico"
 )
 
