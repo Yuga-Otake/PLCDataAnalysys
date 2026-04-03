@@ -12,6 +12,46 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+from plotly.subplots import make_subplots
+
+# ── Xbar-R / Xbar-S 管理図定数テーブル ─────────────────────────────
+# n: (A2, D3, D4, c4, B3, B4)
+#   A2, D3, D4 → Xbar-R 用
+#   c4, B3, B4 → Xbar-S 用（n>10 推奨）
+_SPC_CONSTS = {
+    2:  (1.880, 0,     3.267, 0.7979, 0,     3.267),
+    3:  (1.023, 0,     2.574, 0.8862, 0,     2.568),
+    4:  (0.729, 0,     2.282, 0.9213, 0,     2.266),
+    5:  (0.577, 0,     2.114, 0.9400, 0,     2.089),
+    6:  (0.483, 0,     2.004, 0.9515, 0.030, 1.970),
+    7:  (0.419, 0.076, 1.924, 0.9594, 0.118, 1.882),
+    8:  (0.373, 0.136, 1.864, 0.9650, 0.185, 1.815),
+    9:  (0.337, 0.184, 1.816, 0.9693, 0.239, 1.761),
+    10: (0.308, 0.223, 1.777, 0.9727, 0.284, 1.716),
+    11: (0.285, 0.256, 1.744, 0.9754, 0.321, 1.679),
+    12: (0.266, 0.284, 1.717, 0.9776, 0.354, 1.646),
+    13: (0.249, 0.308, 1.692, 0.9794, 0.382, 1.618),
+    14: (0.235, 0.329, 1.671, 0.9810, 0.406, 1.594),
+    15: (0.223, 0.347, 1.653, 0.9823, 0.428, 1.572),
+    16: (0.212, 0.363, 1.637, 0.9835, 0.448, 1.552),
+    17: (0.203, 0.378, 1.622, 0.9845, 0.466, 1.534),
+    18: (0.194, 0.391, 1.608, 0.9854, 0.482, 1.518),
+    19: (0.187, 0.403, 1.597, 0.9862, 0.497, 1.503),
+    20: (0.180, 0.415, 1.585, 0.9869, 0.510, 1.490),
+    21: (0.173, 0.425, 1.575, 0.9876, 0.523, 1.477),
+    22: (0.167, 0.434, 1.566, 0.9882, 0.534, 1.466),
+    23: (0.162, 0.443, 1.557, 0.9887, 0.545, 1.455),
+    24: (0.157, 0.452, 1.548, 0.9892, 0.555, 1.445),
+    25: (0.153, 0.459, 1.541, 0.9896, 0.565, 1.435),
+}
+
+def _spc_consts(n: int):
+    """サブグループサイズ n に最も近い SPC 定数 (A2,D3,D4,c4,B3,B4) を返す"""
+    n = max(2, int(round(n)))
+    if n in _SPC_CONSTS:
+        return _SPC_CONSTS[n]
+    keys = sorted(_SPC_CONSTS.keys())
+    return _SPC_CONSTS[min(keys, key=lambda k: abs(k - n))]
 
 from analyzer import (
     load_csv, detect_bool_columns, detect_cycles,
@@ -2644,140 +2684,339 @@ with _page_tabs[2]:
                 _tr_res_list = st.session_state.get(f"_tr_results_{_tr_pname}", [])
                 if _tr_res_list:
                     st.divider()
-                    st.markdown("#### 📊 傾向チャート")
 
-                    _tr_sigma = st.slider(
-                        "異常判定 σ 倍数", 1.0, 5.0, 3.0, 0.5,
-                        key=f"tr_sigma_{_tr_pname}",
-                        help="基準値±Nσ を超えたポイントを 🔴 でマーク",
+                    # ── チャートタイプ切り替え ────────────────────────
+                    _chart_mode = st.radio(
+                        "表示形式",
+                        ["📈 傾向チャート（平均 ± σ）", "📊 Xbar-R 管理図"],
+                        horizontal=True,
+                        key=f"tr_chart_mode_{_tr_pname}",
                     )
 
                     _tr_summary_rows = []
 
-                    for _ts in _tr_steps:
-                        _tsn  = _ts["name"]
-                        _tsm  = _ts["mode"]
-                        _tsc  = _ts.get("color", "#1f77b4")
-                        _dcol = (
-                            f"{_tsn}_遅れ[ms]" if _tsm == "single"
-                            else f"{_tsn}_dur[ms]"
+                    # ══════════════════════════════════════════════════
+                    # A) 傾向チャート（従来）
+                    # ══════════════════════════════════════════════════
+                    if _chart_mode == "📈 傾向チャート（平均 ± σ）":
+                        st.markdown("#### 📈 傾向チャート")
+                        _tr_sigma = st.slider(
+                            "異常判定 σ 倍数", 1.0, 5.0, 3.0, 0.5,
+                            key=f"tr_sigma_{_tr_pname}",
+                            help="基準値±Nσ を超えたポイントを 🔴 でマーク",
                         )
 
-                        _tr_lbls, _tr_means, _tr_stds = [], [], []
-                        for _r in _tr_res_list:
-                            _rdf = _r["result"]
-                            if _dcol not in _rdf.columns:
-                                continue
-                            _rv = _rdf[_dcol].dropna().values
-                            if len(_rv) == 0:
-                                continue
-                            _tr_lbls.append(_r["label"])
-                            _tr_means.append(float(np.mean(_rv)))
-                            _tr_stds.append(float(np.std(_rv)))
-
-                        if not _tr_lbls:
-                            continue
-
-                        # 基準値
-                        _tbl  = _tr_bl.get(_tsn, {})
-                        _tref = (
-                            _tbl.get("ref_ms") if _tsm == "single"
-                            else _tbl.get("ref_dur_ms")
-                        )
-                        _tbls = (
-                            _tbl.get("std_ms", 0.0) if _tsm == "single"
-                            else _tbl.get("std_dur_ms", 0.0)
-                        )
-
-                        # 異常判定
-                        _is_ng = [
-                            bool(
-                                _tref is not None and _tbls > 0
-                                and abs(m - _tref) > _tr_sigma * _tbls
+                        for _ts in _tr_steps:
+                            _tsn  = _ts["name"]
+                            _tsm  = _ts["mode"]
+                            _tsc  = _ts.get("color", "#1f77b4")
+                            _dcol = (
+                                f"{_tsn}_遅れ[ms]" if _tsm == "single"
+                                else f"{_tsn}_dur[ms]"
                             )
-                            for m in _tr_means
-                        ]
 
-                        # サマリー行
-                        _sr = {"ステップ": _tsn, "モード": _tsm}
-                        for _li, (_lbl, _m, _s) in enumerate(
-                            zip(_tr_lbls, _tr_means, _tr_stds)
-                        ):
-                            _sr[_lbl] = f"{'🔴 ' if _is_ng[_li] else ''}{_m:.1f} ± {_s:.1f}"
-                        _tr_summary_rows.append(_sr)
+                            _tr_lbls, _tr_means, _tr_stds = [], [], []
+                            for _r in _tr_res_list:
+                                _rdf = _r["result"]
+                                if _dcol not in _rdf.columns:
+                                    continue
+                                _rv = _rdf[_dcol].dropna().values
+                                if len(_rv) == 0:
+                                    continue
+                                _tr_lbls.append(_r["label"])
+                                _tr_means.append(float(np.mean(_rv)))
+                                _tr_stds.append(float(np.std(_rv)))
 
-                        # ── チャート ─────────────────────────────────
-                        _fig_tr = go.Figure()
+                            if not _tr_lbls:
+                                continue
 
-                        # ±1σ 帯
-                        _hex = _tsc.lstrip("#")
-                        _rgb = tuple(int(_hex[i:i+2], 16) for i in (0, 2, 4)) if len(_hex) == 6 else (31, 119, 180)
-                        _fill_col = f"rgba({_rgb[0]},{_rgb[1]},{_rgb[2]},0.15)"
-                        _fig_tr.add_trace(go.Scatter(
-                            x=_tr_lbls + _tr_lbls[::-1],
-                            y=(
-                                [m + s for m, s in zip(_tr_means, _tr_stds)]
-                                + [m - s for m, s in zip(_tr_means[::-1], _tr_stds[::-1])]
-                            ),
-                            fill="toself",
-                            fillcolor=_fill_col,
-                            line=dict(width=0),
-                            showlegend=True, name="±1σ",
-                        ))
-
-                        # 平均値ライン（NG点は赤マーカー）
-                        _pt_colors = ["#e74c3c" if ng else _tsc for ng in _is_ng]
-                        _pt_symbols = ["x" if ng else "circle" for ng in _is_ng]
-                        _fig_tr.add_trace(go.Scatter(
-                            x=_tr_lbls, y=_tr_means,
-                            mode="lines+markers",
-                            line=dict(color=_tsc, width=2),
-                            marker=dict(
-                                color=_pt_colors, size=10,
-                                symbol=_pt_symbols,
-                                line=dict(width=2, color="white"),
-                            ),
-                            name="平均値",
-                            hovertemplate=(
-                                "%{x}<br>平均: %{y:.2f} ms"
-                                "<br>σ: %{customdata:.2f} ms<extra></extra>"
-                            ),
-                            customdata=_tr_stds,
-                        ))
-
-                        # 基準値ライン & ±Nσ 帯
-                        if _tref is not None:
-                            _fig_tr.add_hline(
-                                y=_tref,
-                                line_dash="dash", line_color="#27ae60",
-                                annotation_text=f"基準 {_tref:.1f} ms",
-                                annotation_position="bottom right",
+                            _tbl  = _tr_bl.get(_tsn, {})
+                            _tref = (
+                                _tbl.get("ref_ms") if _tsm == "single"
+                                else _tbl.get("ref_dur_ms")
                             )
-                            if _tbls > 0:
-                                _fig_tr.add_hrect(
-                                    y0=_tref - _tr_sigma * _tbls,
-                                    y1=_tref + _tr_sigma * _tbls,
-                                    fillcolor="#27ae60", opacity=0.08,
-                                    line_width=0,
-                                    annotation_text=f"±{_tr_sigma:.0f}σ",
-                                    annotation_position="top right",
+                            _tbls = (
+                                _tbl.get("std_ms", 0.0) if _tsm == "single"
+                                else _tbl.get("std_dur_ms", 0.0)
+                            )
+
+                            _is_ng = [
+                                bool(
+                                    _tref is not None and _tbls > 0
+                                    and abs(m - _tref) > _tr_sigma * _tbls
+                                )
+                                for m in _tr_means
+                            ]
+
+                            _sr = {"ステップ": _tsn, "モード": _tsm}
+                            for _li, (_lbl, _m, _s) in enumerate(
+                                zip(_tr_lbls, _tr_means, _tr_stds)
+                            ):
+                                _sr[_lbl] = f"{'🔴 ' if _is_ng[_li] else ''}{_m:.1f} ± {_s:.1f}"
+                            _tr_summary_rows.append(_sr)
+
+                            _fig_tr = go.Figure()
+                            _hex = _tsc.lstrip("#")
+                            _rgb = tuple(int(_hex[i:i+2], 16) for i in (0, 2, 4)) if len(_hex) == 6 else (31, 119, 180)
+                            _fill_col = f"rgba({_rgb[0]},{_rgb[1]},{_rgb[2]},0.15)"
+                            _fig_tr.add_trace(go.Scatter(
+                                x=_tr_lbls + _tr_lbls[::-1],
+                                y=(
+                                    [m + s for m, s in zip(_tr_means, _tr_stds)]
+                                    + [m - s for m, s in zip(_tr_means[::-1], _tr_stds[::-1])]
+                                ),
+                                fill="toself", fillcolor=_fill_col,
+                                line=dict(width=0), showlegend=True, name="±1σ",
+                            ))
+                            _pt_colors  = ["#e74c3c" if ng else _tsc for ng in _is_ng]
+                            _pt_symbols = ["x" if ng else "circle" for ng in _is_ng]
+                            _fig_tr.add_trace(go.Scatter(
+                                x=_tr_lbls, y=_tr_means,
+                                mode="lines+markers",
+                                line=dict(color=_tsc, width=2),
+                                marker=dict(color=_pt_colors, size=10,
+                                            symbol=_pt_symbols,
+                                            line=dict(width=2, color="white")),
+                                name="平均値",
+                                hovertemplate="%{x}<br>平均: %{y:.2f} ms<br>σ: %{customdata:.2f} ms<extra></extra>",
+                                customdata=_tr_stds,
+                            ))
+                            if _tref is not None:
+                                _fig_tr.add_hline(
+                                    y=_tref, line_dash="dash", line_color="#27ae60",
+                                    annotation_text=f"基準 {_tref:.1f} ms",
+                                    annotation_position="bottom right",
+                                )
+                                if _tbls > 0:
+                                    _fig_tr.add_hrect(
+                                        y0=_tref - _tr_sigma * _tbls,
+                                        y1=_tref + _tr_sigma * _tbls,
+                                        fillcolor="#27ae60", opacity=0.08, line_width=0,
+                                        annotation_text=f"±{_tr_sigma:.0f}σ",
+                                        annotation_position="top right",
+                                    )
+                            _fig_tr.update_layout(
+                                title=dict(text=f"<b>{_tsn}</b>　傾向", font=dict(size=14)),
+                                xaxis_title="時期", yaxis_title="[ms]",
+                                height=290, margin=dict(t=48, b=40, l=60, r=20),
+                                legend=dict(orientation="h", y=1.05, x=1, xanchor="right"),
+                                hovermode="x unified",
+                            )
+                            st.plotly_chart(_fig_tr, use_container_width=True)
+
+                    # ══════════════════════════════════════════════════
+                    # B) Xbar-R 管理図
+                    # ══════════════════════════════════════════════════
+                    else:
+                        st.markdown("#### 📊 Xbar-R 管理図")
+                        st.caption(
+                            "各時期のデータをサブグループとして管理限界線（UCL/CL/LCL）を算出。"
+                            "n ≤ 25 は Xbar-R、n > 25 は Xbar-S（s̄ベース）で算出します。"
+                        )
+
+                        for _ts in _tr_steps:
+                            _tsn  = _ts["name"]
+                            _tsm  = _ts["mode"]
+                            _tsc  = _ts.get("color", "#1f77b4")
+                            _dcol = (
+                                f"{_tsn}_遅れ[ms]" if _tsm == "single"
+                                else f"{_tsn}_dur[ms]"
+                            )
+
+                            # ── サブグループデータ収集 ────────────────
+                            _sg_lbls, _sg_xbar, _sg_r, _sg_s, _sg_n = [], [], [], [], []
+                            for _r in _tr_res_list:
+                                _rdf = _r["result"]
+                                if _dcol not in _rdf.columns:
+                                    continue
+                                _rv = _rdf[_dcol].dropna().values
+                                if len(_rv) < 2:
+                                    continue
+                                _sg_lbls.append(_r["label"])
+                                _sg_xbar.append(float(np.mean(_rv)))
+                                _sg_r.append(float(np.max(_rv) - np.min(_rv)))
+                                _sg_s.append(float(np.std(_rv, ddof=1)))
+                                _sg_n.append(len(_rv))
+
+                            if len(_sg_lbls) < 2:
+                                st.info(f"{_tsn}: データが 2 時期以上必要です")
+                                continue
+
+                            # ── サマリー行（共通）────────────────────
+                            _sr = {"ステップ": _tsn, "モード": _tsm}
+                            for _lbl, _m, _s in zip(_sg_lbls, _sg_xbar, _sg_s):
+                                _sr[_lbl] = f"{_m:.1f} ± {_s:.1f}"
+                            _tr_summary_rows.append(_sr)
+
+                            # ── 管理限界計算 ──────────────────────────
+                            _xbar_bar = float(np.mean(_sg_xbar))
+                            _r_bar    = float(np.mean(_sg_r))
+                            _s_bar    = float(np.mean(_sg_s))
+                            _n_avg    = float(np.mean(_sg_n))
+                            _n_rep    = int(round(_n_avg))
+
+                            _A2, _D3, _D4, _c4, _B3, _B4 = _spc_consts(_n_rep)
+                            _use_s = (_n_rep > 25)   # n>25 は S チャートの方が有効
+
+                            if _use_s:
+                                # Xbar-S 管理限界
+                                _sigma_hat = _s_bar / _c4
+                                _UCL_x = _xbar_bar + 3 * _sigma_hat / (_n_avg ** 0.5)
+                                _LCL_x = _xbar_bar - 3 * _sigma_hat / (_n_avg ** 0.5)
+                                _UCL_sub = _B4 * _s_bar
+                                _LCL_sub = _B3 * _s_bar
+                                _sub_vals  = _sg_s
+                                _sub_label = "S（標準偏差）[ms]"
+                                _sub_cl    = _s_bar
+                                _cl_label  = f"S̄ = {_s_bar:.2f} ms"
+                            else:
+                                # Xbar-R 管理限界
+                                _UCL_x = _xbar_bar + _A2 * _r_bar
+                                _LCL_x = _xbar_bar - _A2 * _r_bar
+                                _UCL_sub = _D4 * _r_bar
+                                _LCL_sub = _D3 * _r_bar
+                                _sub_vals  = _sg_r
+                                _sub_label = "R（範囲）[ms]"
+                                _sub_cl    = _r_bar
+                                _cl_label  = f"R̄ = {_r_bar:.2f} ms"
+
+                            # 管理外判定（UCL/LCL を超えたら NG）
+                            _xbar_ng = [v > _UCL_x or v < _LCL_x for v in _sg_xbar]
+                            _sub_ng  = [v > _UCL_sub or (_LCL_sub > 0 and v < _LCL_sub)
+                                        for v in _sub_vals]
+
+                            # ── サブプロット（上: Xbar / 下: R or S）────
+                            _fig_xbr = make_subplots(
+                                rows=2, cols=1,
+                                shared_xaxes=True,
+                                subplot_titles=(
+                                    f"X̄ 管理図  （UCL={_UCL_x:.2f}  CL={_xbar_bar:.2f}  LCL={_LCL_x:.2f}）",
+                                    f"{'S' if _use_s else 'R'} 管理図  "
+                                    f"（UCL={_UCL_sub:.2f}  CL={_sub_cl:.2f}"
+                                    + (f"  LCL={_LCL_sub:.2f}" if _LCL_sub > 0 else "  LCL=0") + "）",
+                                ),
+                                vertical_spacing=0.14,
+                                row_heights=[0.6, 0.4],
+                            )
+
+                            # X̄ チャート ──────────────────────────────
+                            _xc  = ["#e74c3c" if ng else _tsc for ng in _xbar_ng]
+                            _xs  = ["x-thin" if ng else "circle" for ng in _xbar_ng]
+                            _fig_xbr.add_trace(go.Scatter(
+                                x=_sg_lbls, y=_sg_xbar,
+                                mode="lines+markers",
+                                name="X̄",
+                                line=dict(color=_tsc, width=2),
+                                marker=dict(color=_xc, size=11, symbol=_xs,
+                                            line=dict(width=2, color="white")),
+                                hovertemplate="%{x}<br>X̄ = %{y:.3f} ms<extra></extra>",
+                            ), row=1, col=1)
+
+                            # X̄ 管理限界線
+                            for _yv, _dash, _col, _ann in [
+                                (_UCL_x,    "dash",  "#e74c3c", f"UCL={_UCL_x:.2f}"),
+                                (_xbar_bar, "solid", "#27ae60", f"X̄̄={_xbar_bar:.2f}"),
+                                (_LCL_x,    "dash",  "#e74c3c", f"LCL={_LCL_x:.2f}"),
+                            ]:
+                                _fig_xbr.add_hline(
+                                    y=_yv, line_dash=_dash, line_color=_col,
+                                    line_width=1.5,
+                                    annotation_text=_ann,
+                                    annotation_position="right",
+                                    row=1, col=1,
                                 )
 
-                        _fig_tr.update_layout(
-                            title=dict(
-                                text=f"<b>{_tsn}</b>　傾向",
-                                font=dict(size=14),
-                            ),
-                            xaxis_title="時期",
-                            yaxis_title="[ms]",
-                            height=290,
-                            margin=dict(t=48, b=40, l=60, r=20),
-                            legend=dict(
-                                orientation="h", y=1.05, x=1, xanchor="right"
-                            ),
-                            hovermode="x unified",
-                        )
-                        st.plotly_chart(_fig_tr, use_container_width=True)
+                            # ±1σ 帯（X̄ チャート）
+                            _hex2 = _tsc.lstrip("#")
+                            _rgb2 = tuple(int(_hex2[i:i+2], 16) for i in (0, 2, 4)) if len(_hex2) == 6 else (31, 119, 180)
+                            _sigma_x = (_UCL_x - _xbar_bar) / 3
+                            _fig_xbr.add_hrect(
+                                y0=_xbar_bar - _sigma_x,
+                                y1=_xbar_bar + _sigma_x,
+                                fillcolor=f"rgba({_rgb2[0]},{_rgb2[1]},{_rgb2[2]},0.10)",
+                                line_width=0,
+                                annotation_text="±1σ帯",
+                                annotation_position="right",
+                                row=1, col=1,
+                            )
+
+                            # R / S チャート ──────────────────────────
+                            _rc  = ["#e74c3c" if ng else "#7f8c8d" for ng in _sub_ng]
+                            _fig_xbr.add_trace(go.Scatter(
+                                x=_sg_lbls, y=_sub_vals,
+                                mode="lines+markers",
+                                name="S" if _use_s else "R",
+                                line=dict(color="#7f8c8d", width=2),
+                                marker=dict(color=_rc, size=10,
+                                            symbol=["x-thin" if ng else "circle" for ng in _sub_ng],
+                                            line=dict(width=2, color="white")),
+                                hovertemplate="%{x}<br>" + ("S" if _use_s else "R") + " = %{y:.3f} ms<extra></extra>",
+                            ), row=2, col=1)
+
+                            # R/S 管理限界線
+                            _sub_lines = [
+                                (_UCL_sub, "dash",  "#e74c3c", f"UCL={_UCL_sub:.2f}"),
+                                (_sub_cl,  "solid", "#27ae60", _cl_label),
+                            ]
+                            if _LCL_sub > 0:
+                                _sub_lines.append(
+                                    (_LCL_sub, "dash", "#e74c3c", f"LCL={_LCL_sub:.2f}")
+                                )
+                            for _yv, _dash, _col, _ann in _sub_lines:
+                                _fig_xbr.add_hline(
+                                    y=_yv, line_dash=_dash, line_color=_col,
+                                    line_width=1.5,
+                                    annotation_text=_ann,
+                                    annotation_position="right",
+                                    row=2, col=1,
+                                )
+
+                            # 基準値ライン（X̄ チャートに重ねる）
+                            _tbl  = _tr_bl.get(_tsn, {})
+                            _tref = (
+                                _tbl.get("ref_ms") if _tsm == "single"
+                                else _tbl.get("ref_dur_ms")
+                            )
+                            if _tref is not None:
+                                _fig_xbr.add_hline(
+                                    y=_tref,
+                                    line_dash="dot", line_color="#8e44ad", line_width=2,
+                                    annotation_text=f"基準値 {_tref:.1f} ms",
+                                    annotation_position="left",
+                                    row=1, col=1,
+                                )
+
+                            _fig_xbr.update_layout(
+                                title=dict(
+                                    text=(
+                                        f"<b>{_tsn}</b>　"
+                                        f"Xbar-{'S' if _use_s else 'R'} 管理図"
+                                        + (f"　（n={_n_rep}、Xbar-S で算出）" if _use_s else f"　（n={_n_rep}）")
+                                    ),
+                                    font=dict(size=14),
+                                ),
+                                height=480,
+                                margin=dict(t=60, b=48, l=80, r=120),
+                                showlegend=True,
+                                legend=dict(orientation="h", y=1.04, x=1, xanchor="right"),
+                                hovermode="x unified",
+                            )
+                            _fig_xbr.update_yaxes(title_text="X̄ [ms]", row=1, col=1)
+                            _fig_xbr.update_yaxes(title_text=_sub_label, row=2, col=1)
+                            _fig_xbr.update_xaxes(title_text="時期", row=2, col=1)
+
+                            # NG 点サマリー
+                            _xbar_ng_cnt = sum(_xbar_ng)
+                            _sub_ng_cnt  = sum(_sub_ng)
+                            if _xbar_ng_cnt > 0 or _sub_ng_cnt > 0:
+                                st.warning(
+                                    f"**{_tsn}**: "
+                                    f"X̄ 管理外 {_xbar_ng_cnt} 点　"
+                                    f"{'S' if _use_s else 'R'} 管理外 {_sub_ng_cnt} 点"
+                                )
+
+                            st.plotly_chart(_fig_xbr, use_container_width=True,
+                                            key=f"xbr_{_tr_pname}_{_tsn}")
 
                     # ── サマリーテーブル ────────────────────────────
                     if _tr_summary_rows:
