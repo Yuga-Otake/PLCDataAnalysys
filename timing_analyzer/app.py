@@ -138,14 +138,15 @@ def rename_process(old_name: str, new_name: str):
 def mean_waveform(waves: list, var: str):
     if not waves:
         return [], []
-    mt  = max(c["time_offset_ms"].max() for c in waves)
+    mt  = max(float(c["time_offset_ms"].iloc[-1]) for c in waves)
     ta  = np.linspace(0, mt, 300)
-    mv  = [np.mean([normalize_bool_series(c[var]).values[
-                        np.searchsorted(c["time_offset_ms"].values, t)]
-                    for c in waves
-                    if np.searchsorted(c["time_offset_ms"].values, t) < len(c)])
-           for t in ta]
-    return ta, mv
+    mat = np.zeros((len(waves), len(ta)), dtype=np.float32)
+    for j, c in enumerate(waves):
+        t_arr = c["time_offset_ms"].values
+        v_arr = c[var].values.astype(np.float32)
+        idx   = np.searchsorted(t_arr, ta).clip(0, len(t_arr) - 1)
+        mat[j] = v_arr[idx]
+    return ta, mat.mean(axis=0)
 
 
 def steps_all_vars(steps_list: list, bool_cols: list) -> list:
