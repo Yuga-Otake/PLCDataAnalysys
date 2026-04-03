@@ -818,13 +818,13 @@ def _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_d
         # 平均波形
         if start_var:
             ta, mv = mean_waveform(waveforms, start_var)
-            if mv:
+            if len(mv) > 0:
                 fig_w.add_trace(go.Scatter(x=ta, y=mv, mode="lines",
                                            line=dict(color="royalblue", width=2.5),
                                            name=f"開始変数 {start_var}"))
         if end_var and end_var != start_var:
             ta2, mv2 = mean_waveform(waveforms, end_var)
-            if mv2:
+            if len(mv2) > 0:
                 fig_w.add_trace(go.Scatter(x=ta2, y=mv2, mode="lines",
                                            line=dict(color="tomato", width=2.5),
                                            name=f"終了変数 {end_var}"))
