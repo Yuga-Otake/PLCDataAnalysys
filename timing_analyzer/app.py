@@ -1950,17 +1950,20 @@ with _page_tabs[0]:
                                 st.rerun()
 
                     if fig_gantt:
-                        # ── ヒストグラム URL マップ（ダブルクリック別タブ用）──
-                        _steps_enc = urllib.parse.quote(
-                            json.dumps(steps_list, ensure_ascii=False, sort_keys=True))
+                        # ── ヒストグラム詳細ページ用コンテキストを保存 ─────
+                        st.session_state[f"_hist_ctx_{pname}"] = {
+                            "step_stats": step_stats,
+                            "steps_list": steps_list,
+                            "result_df":  result_df,
+                            "baseline":   st.session_state.get(pk(pname, "baseline"), {}),
+                        }
+
+                        # ── ヒストグラム URL マップ（ダブルクリック遷移用）──
                         _hist_urls = {
                             s["name"]: (
                                 f"/histogram"
                                 f"?proc={urllib.parse.quote(pname)}"
-                                f"&trigger={urllib.parse.quote(trigger_col)}"
-                                f"&edge={edge}"
                                 f"&step_name={urllib.parse.quote(s['name'])}"
-                                f"&steps={_steps_enc}"
                             )
                             for s in step_stats
                         }
@@ -1995,7 +1998,12 @@ with _page_tabs[0]:
     (function(){{
       var URLS={_urls_js};
       var MID="{_gm_id}";
-      var lastT=0,lastN="";
+      // ダブルクリック状態を親ウィンドウに保持
+      // → Streamlit の rerun でiframeがリロードされても状態が消えない
+      if(!window.parent._dbl) window.parent._dbl={{}};
+      if(!window.parent._dbl[MID]) window.parent._dbl[MID]={{t:0,n:""}};
+      var _st=window.parent._dbl[MID];
+
       function findGd(){{
         var m=window.parent.document.getElementById(MID);
         if(!m) return null;
@@ -2019,11 +2027,13 @@ with _page_tabs[0]:
           if(!ev||!ev.points||!ev.points.length) return;
           var name=ev.points[0].data.name||"";
           var now=Date.now();
-          if(now-lastT<450&&name===lastN&&URLS[name]){{
-            try{{window.parent.open(URLS[name],'_blank');}}
-            catch(e){{window.open(URLS[name],'_blank');}}
+          // 500ms以内に同じステップを2回クリック → ヒストグラムページへ遷移
+          if(now-_st.t<500&&name===_st.n&&URLS[name]){{
+            window.parent.location.href=URLS[name];
+            _st.t=0;
+          }} else {{
+            _st.t=now; _st.n=name;
           }}
-          lastT=now; lastN=name;
         }});
       }}
       attach();
