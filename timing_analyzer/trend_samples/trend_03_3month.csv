@@ -1,4 +1,4 @@
-Date Time,Assembly.ProB_Step,Assembly.LineStep,Assembly.ProA_CycleStart,Assembly.ProA_LoadReq,Assembly.ProA_SliderFwd,Assembly.ProA_PartDetect,Assembly.ProA_ClampON,Assembly.ProB_CycleStart,Assembly.ProB_PressDown,Assembly.ProB_PressContact,Assembly.ProB_PressComplete,Assembly.ProB_PressUp,Assembly.ProC_CycleStart,Assembly.ProC_CamTrigger,Assembly.ProC_InspectDone,Assembly.ProC_GateOpen,Assembly.ProC_EjectDone,Assembly.ProA_Running,Assembly.ProB_Running,Assembly.ProC_Running,Assembly.ProA_ClampPressure,Assembly.ProB_PressForce,Assembly.ProC_InspectScore
+Date Time,圧入工程.ステップ番号,ライン.稼働工程数,供給工程.サイクル開始,供給工程.投入要求,供給工程.スライダ前進,供給工程.部品検出,供給工程.クランプON,圧入工程.サイクル開始,圧入工程.プレス下降,圧入工程.プレス接触,圧入工程.圧入完了,圧入工程.プレス上昇,検査排出工程.サイクル開始,検査排出工程.カメラトリガ,検査排出工程.検査完了,検査排出工程.ゲート開,検査排出工程.排出完了,供給工程.実行中,圧入工程.実行中,検査排出工程.実行中,供給工程.クランプ圧力[MPa],圧入工程.プレス力[kN],検査排出工程.検査スコア
 2025-07-01 08:00:00.000000,1,3,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,1,1,0.0,0.0,0.0
 2025-07-01 08:00:00.001000,1,3,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,1,1,0.0,0.0,0.0
 2025-07-01 08:00:00.002000,1,3,1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,1,1,0.0,0.0,0.0

@@ -28,21 +28,21 @@ OUT_DIR.mkdir(exist_ok=True)
 CYCLE_MS = 600
 PULSE_MS = 50
 BOOL_COLS = [
-    'Assembly.ProA_CycleStart',
-    'Assembly.ProA_LoadReq',
-    'Assembly.ProA_SliderFwd',
-    'Assembly.ProA_PartDetect',
-    'Assembly.ProA_ClampON',
-    'Assembly.ProB_CycleStart',
-    'Assembly.ProB_PressDown',
-    'Assembly.ProB_PressContact',
-    'Assembly.ProB_PressComplete',
-    'Assembly.ProB_PressUp',
-    'Assembly.ProC_CycleStart',
-    'Assembly.ProC_CamTrigger',
-    'Assembly.ProC_InspectDone',
-    'Assembly.ProC_GateOpen',
-    'Assembly.ProC_EjectDone',
+    '供給工程.サイクル開始',
+    '供給工程.投入要求',
+    '供給工程.スライダ前進',
+    '供給工程.部品検出',
+    '供給工程.クランプON',
+    '圧入工程.サイクル開始',
+    '圧入工程.プレス下降',
+    '圧入工程.プレス接触',
+    '圧入工程.圧入完了',
+    '圧入工程.プレス上昇',
+    '検査排出工程.サイクル開始',
+    '検査排出工程.カメラトリガ',
+    '検査排出工程.検査完了',
+    '検査排出工程.ゲート開',
+    '検査排出工程.排出完了',
 ]
 
 
@@ -67,14 +67,14 @@ def generate(filename: str, n_cycles: int, seed: int, start_dt: datetime,
     total_rows = n_cycles * CYCLE_MS
 
     data = {c: np.zeros(total_rows, dtype=np.int8) for c in BOOL_COLS}
-    data['Assembly.ProA_Running']        = np.zeros(total_rows, dtype=np.int8)
-    data['Assembly.ProB_Running']        = np.zeros(total_rows, dtype=np.int8)
-    data['Assembly.ProC_Running']        = np.zeros(total_rows, dtype=np.int8)
-    data['Assembly.ProB_Step']           = np.zeros(total_rows, dtype=np.int8)
-    data['Assembly.LineStep']            = np.zeros(total_rows, dtype=np.int8)
-    data['Assembly.ProA_ClampPressure']  = np.zeros(total_rows)
-    data['Assembly.ProB_PressForce']     = np.zeros(total_rows)
-    data['Assembly.ProC_InspectScore']   = np.zeros(total_rows)
+    data['供給工程.実行中']             = np.zeros(total_rows, dtype=np.int8)
+    data['圧入工程.実行中']             = np.zeros(total_rows, dtype=np.int8)
+    data['検査排出工程.実行中']         = np.zeros(total_rows, dtype=np.int8)
+    data['圧入工程.ステップ番号']       = np.zeros(total_rows, dtype=np.int8)
+    data['ライン.稼働工程数']           = np.zeros(total_rows, dtype=np.int8)
+    data['供給工程.クランプ圧力[MPa]']  = np.zeros(total_rows)
+    data['圧入工程.プレス力[kN]']       = np.zeros(total_rows)
+    data['検査排出工程.検査スコア']     = np.zeros(total_rows)
 
     def pulse(col, start, dur=PULSE_MS):
         s = int(np.clip(start, 0, total_rows - 1))
@@ -91,9 +91,9 @@ def generate(filename: str, n_cycles: int, seed: int, start_dt: datetime,
         base = c * CYCLE_MS
         cyc  = c + 1
 
-        # ── ProA ─────────────────────────────────────────────────
+        # ── 供給工程 ─────────────────────────────────────────────
         pa_base  = base
-        pulse('Assembly.ProA_CycleStart', pa_base)
+        pulse('供給工程.サイクル開始', pa_base)
 
         pa_extra  = 80 if cyc in anomaly_pa_slow else 0
         pa_load   = pa_base + int(rng.normal(50,  5))
@@ -107,10 +107,10 @@ def generate(filename: str, n_cycles: int, seed: int, start_dt: datetime,
         pa_clamp  = max(pa_detect + 20, pa_clamp)
 
         pa_end = min(pa_clamp + PULSE_MS, base + CYCLE_MS)
-        fill_range('Assembly.ProA_LoadReq',    pa_load,   pa_slider)
-        fill_range('Assembly.ProA_SliderFwd',  pa_slider, pa_detect)
-        fill_range('Assembly.ProA_PartDetect', pa_detect, pa_clamp)
-        fill_range('Assembly.ProA_ClampON',    pa_clamp,  pa_end)
+        fill_range('供給工程.投入要求',   pa_load,   pa_slider)
+        fill_range('供給工程.スライダ前進', pa_slider, pa_detect)
+        fill_range('供給工程.部品検出',   pa_detect, pa_clamp)
+        fill_range('供給工程.クランプON', pa_clamp,  pa_end)
 
         for t in range(pa_clamp, min(pa_clamp + 150, base + CYCLE_MS)):
             if t >= total_rows: break
@@ -118,11 +118,11 @@ def generate(filename: str, n_cycles: int, seed: int, start_dt: datetime,
             if   p < 0.25: v = 8.0 * p / 0.25
             elif p < 0.75: v = 8.0
             else:          v = 8.0 * (1.0 - (p - 0.75) / 0.25)
-            data['Assembly.ProA_ClampPressure'][t] = max(0.0, v + rng.normal(0, 0.12))
+            data['供給工程.クランプ圧力[MPa]'][t] = max(0.0, v + rng.normal(0, 0.12))
 
-        # ── ProB ─────────────────────────────────────────────────
+        # ── 圧入工程 ─────────────────────────────────────────────
         pb_base = base
-        pulse('Assembly.ProB_CycleStart', pb_base)
+        pulse('圧入工程.サイクル開始', pb_base)
 
         pb_extra   = 60  if cyc in anomaly_pb_slow    else 0
         pb_extreme = 150 if cyc in anomaly_pb_extreme else 0
@@ -139,10 +139,10 @@ def generate(filename: str, n_cycles: int, seed: int, start_dt: datetime,
         pb_up       = max(pb_complete + 20, pb_up)
 
         pb_end = min(pb_up + PULSE_MS, base + CYCLE_MS)
-        fill_range('Assembly.ProB_PressDown',     pb_down,     pb_contact)
-        fill_range('Assembly.ProB_PressContact',  pb_contact,  pb_complete)
-        fill_range('Assembly.ProB_PressComplete', pb_complete, pb_up)
-        fill_range('Assembly.ProB_PressUp',       pb_up,       pb_end)
+        fill_range('圧入工程.プレス下降', pb_down,     pb_contact)
+        fill_range('圧入工程.プレス接触', pb_contact,  pb_complete)
+        fill_range('圧入工程.圧入完了',  pb_complete, pb_up)
+        fill_range('圧入工程.プレス上昇', pb_up,       pb_end)
 
         peak_f = 25.0 + (1.5 if (cyc in anomaly_pb_slow or cyc in anomaly_pb_extreme) else 0.0)
         span   = max(1, pb_complete - pb_contact)
@@ -152,11 +152,11 @@ def generate(filename: str, n_cycles: int, seed: int, start_dt: datetime,
             if   p < 0.20: v = peak_f * p / 0.20
             elif p < 0.85: v = peak_f
             else:          v = peak_f * max(0.0, 1.0 - (p - 0.85) / 0.15) * 0.5
-            data['Assembly.ProB_PressForce'][t] = max(0.0, v + rng.normal(0, 0.25))
+            data['圧入工程.プレス力[kN]'][t] = max(0.0, v + rng.normal(0, 0.25))
 
-        # ── ProC ─────────────────────────────────────────────────
+        # ── 検査排出工程 ─────────────────────────────────────────
         pc_base = base
-        pulse('Assembly.ProC_CycleStart', pc_base)
+        pulse('検査排出工程.サイクル開始', pc_base)
 
         pc_extra = 50 if cyc in anomaly_pc_slow else 0
         is_ng    = cyc in anomaly_pc_slow
@@ -172,34 +172,34 @@ def generate(filename: str, n_cycles: int, seed: int, start_dt: datetime,
         pc_eject   = max(pc_gate   + 20,  pc_eject)
 
         pc_end = min(pc_eject + PULSE_MS, base + CYCLE_MS)
-        fill_range('Assembly.ProC_CamTrigger',  pc_cam,     pc_inspect)
-        fill_range('Assembly.ProC_InspectDone', pc_inspect, pc_gate)
-        fill_range('Assembly.ProC_GateOpen',    pc_gate,    pc_eject)
-        fill_range('Assembly.ProC_EjectDone',   pc_eject,   pc_end)
+        fill_range('検査排出工程.カメラトリガ', pc_cam,     pc_inspect)
+        fill_range('検査排出工程.検査完了',     pc_inspect, pc_gate)
+        fill_range('検査排出工程.ゲート開',     pc_gate,    pc_eject)
+        fill_range('検査排出工程.排出完了',     pc_eject,   pc_end)
 
         score_base = 58.0 if is_ng else 94.0
         score_std  =  4.0 if is_ng else  2.0
         for t in range(pc_cam, min(pc_inspect + 30, base + CYCLE_MS)):
             if t >= total_rows: break
-            data['Assembly.ProC_InspectScore'][t] = float(
+            data['検査排出工程.検査スコア'][t] = float(
                 np.clip(rng.normal(score_base, score_std), 0, 100))
 
-        # ── Running & Step ────────────────────────────────────────
+        # ── 実行中信号 & ステップカウンタ ────────────────────────
         def _c(v): return int(np.clip(v, 0, total_rows))
 
-        data['Assembly.ProA_Running'][_c(base):_c(pa_end)] = 1
-        data['Assembly.ProB_Running'][_c(base):_c(pb_end)] = 1
-        data['Assembly.ProC_Running'][_c(base):_c(pc_end)] = 1
+        data['供給工程.実行中'][_c(base):_c(pa_end)] = 1
+        data['圧入工程.実行中'][_c(base):_c(pb_end)] = 1
+        data['検査排出工程.実行中'][_c(base):_c(pc_end)] = 1
 
-        data['Assembly.ProB_Step'][_c(base)       : _c(pb_down)    ] = 1
-        data['Assembly.ProB_Step'][_c(pb_down)    : _c(pb_contact) ] = 2
-        data['Assembly.ProB_Step'][_c(pb_contact) : _c(pb_complete)] = 3
-        data['Assembly.ProB_Step'][_c(pb_complete): _c(pb_end)     ] = 4
+        data['圧入工程.ステップ番号'][_c(base)       : _c(pb_down)    ] = 1
+        data['圧入工程.ステップ番号'][_c(pb_down)    : _c(pb_contact) ] = 2
+        data['圧入工程.ステップ番号'][_c(pb_contact) : _c(pb_complete)] = 3
+        data['圧入工程.ステップ番号'][_c(pb_complete): _c(pb_end)     ] = 4
 
         ends = sorted([pa_end, pb_end, pc_end])
-        data['Assembly.LineStep'][_c(base)    : _c(ends[0])] = 3
-        data['Assembly.LineStep'][_c(ends[0]) : _c(ends[1])] = 2
-        data['Assembly.LineStep'][_c(ends[1]) : _c(ends[2])] = 1
+        data['ライン.稼働工程数'][_c(base)    : _c(ends[0])] = 3
+        data['ライン.稼働工程数'][_c(ends[0]) : _c(ends[1])] = 2
+        data['ライン.稼働工程数'][_c(ends[1]) : _c(ends[2])] = 1
 
     # ── DataFrame 構築 ─────────────────────────────────────────
     ts_list = []
@@ -209,16 +209,16 @@ def generate(filename: str, n_cycles: int, seed: int, start_dt: datetime,
         cur += timedelta(milliseconds=1)
 
     df = pd.DataFrame({'Date Time': ts_list})
-    df['Assembly.ProB_Step'] = data['Assembly.ProB_Step'].astype(int)
-    df['Assembly.LineStep']  = data['Assembly.LineStep'].astype(int)
+    df['圧入工程.ステップ番号'] = data['圧入工程.ステップ番号'].astype(int)
+    df['ライン.稼働工程数']     = data['ライン.稼働工程数'].astype(int)
     for c in BOOL_COLS:
         df[c] = data[c].astype(int)
-    df['Assembly.ProA_Running']       = data['Assembly.ProA_Running'].astype(int)
-    df['Assembly.ProB_Running']       = data['Assembly.ProB_Running'].astype(int)
-    df['Assembly.ProC_Running']       = data['Assembly.ProC_Running'].astype(int)
-    df['Assembly.ProA_ClampPressure'] = np.round(data['Assembly.ProA_ClampPressure'], 3)
-    df['Assembly.ProB_PressForce']    = np.round(data['Assembly.ProB_PressForce'],    3)
-    df['Assembly.ProC_InspectScore']  = np.round(data['Assembly.ProC_InspectScore'],  2)
+    df['供給工程.実行中']             = data['供給工程.実行中'].astype(int)
+    df['圧入工程.実行中']             = data['圧入工程.実行中'].astype(int)
+    df['検査排出工程.実行中']         = data['検査排出工程.実行中'].astype(int)
+    df['供給工程.クランプ圧力[MPa]']  = np.round(data['供給工程.クランプ圧力[MPa]'], 3)
+    df['圧入工程.プレス力[kN]']       = np.round(data['圧入工程.プレス力[kN]'],      3)
+    df['検査排出工程.検査スコア']     = np.round(data['検査排出工程.検査スコア'],     2)
 
     out = OUT_DIR / filename
     df.to_csv(out, index=False)
