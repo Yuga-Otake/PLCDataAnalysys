@@ -72,9 +72,13 @@ def generate(filename: str, n_cycles: int, seed: int, start_dt: datetime,
     data['検査排出工程.実行中']         = np.zeros(total_rows, dtype=np.int8)
     data['圧入工程.ステップ番号']       = np.zeros(total_rows, dtype=np.int8)
     data['ライン.稼働工程数']           = np.zeros(total_rows, dtype=np.int8)
-    data['供給工程.クランプ圧力[MPa]']  = np.zeros(total_rows)
-    data['圧入工程.プレス力[kN]']       = np.zeros(total_rows)
-    data['検査排出工程.検査スコア']     = np.zeros(total_rows)
+    data['供給工程.クランプ圧力[MPa]']   = np.zeros(total_rows)
+    data['供給工程.スライダ変位[mm]']    = np.zeros(total_rows)
+    data['圧入工程.プレス力[kN]']        = np.zeros(total_rows)
+    data['圧入工程.プレス変位[mm]']      = np.zeros(total_rows)
+    data['圧入工程.モータトルク[N·m]']  = np.zeros(total_rows)
+    data['検査排出工程.検査スコア']      = np.zeros(total_rows)
+    data['検査排出工程.照度センサ[lx]']  = np.zeros(total_rows)
 
     def pulse(col, start, dur=PULSE_MS):
         s = int(np.clip(start, 0, total_rows - 1))
@@ -120,6 +124,12 @@ def generate(filename: str, n_cycles: int, seed: int, start_dt: datetime,
             else:          v = 8.0 * (1.0 - (p - 0.75) / 0.25)
             data['供給工程.クランプ圧力[MPa]'][t] = max(0.0, v + rng.normal(0, 0.12))
 
+        slider_span = max(1, pa_detect - pa_slider)
+        for t in range(pa_slider, min(pa_end, base + CYCLE_MS)):
+            if t >= total_rows: break
+            progress = min(1.0, (t - pa_slider) / slider_span)
+            data['供給工程.スライダ変位[mm]'][t] = 120.0 * progress + rng.normal(0, 0.3)
+
         # ── 圧入工程 ─────────────────────────────────────────────
         pb_base = base
         pulse('圧入工程.サイクル開始', pb_base)
@@ -145,6 +155,8 @@ def generate(filename: str, n_cycles: int, seed: int, start_dt: datetime,
         fill_range('圧入工程.プレス上昇', pb_up,       pb_end)
 
         peak_f = 25.0 + (1.5 if (cyc in anomaly_pb_slow or cyc in anomaly_pb_extreme) else 0.0)
+        # 劣化でピーク力が上昇（摩擦増加）
+        peak_f += pb_contact_drift * 0.05
         span   = max(1, pb_complete - pb_contact)
         for t in range(pb_contact, min(pb_up + 30, base + CYCLE_MS)):
             if t >= total_rows: break
@@ -152,7 +164,27 @@ def generate(filename: str, n_cycles: int, seed: int, start_dt: datetime,
             if   p < 0.20: v = peak_f * p / 0.20
             elif p < 0.85: v = peak_f
             else:          v = peak_f * max(0.0, 1.0 - (p - 0.85) / 0.15) * 0.5
-            data['圧入工程.プレス力[kN]'][t] = max(0.0, v + rng.normal(0, 0.25))
+            data['圧入工程.プレス力[kN]'][t] = max(0.0, v + rng.normal(0, 0.25 * pb_noise_scale))
+
+        disp_peak = 40.0 + (3.0 if cyc in anomaly_pb_extreme else 0.0)
+        press_span = max(1, pb_up - pb_down)
+        for t in range(pb_down, min(pb_up + 50, base + CYCLE_MS)):
+            if t >= total_rows: break
+            p = min(1.0, (t - pb_down) / press_span)
+            if p < 0.6:
+                disp = disp_peak * np.sin(p / 0.6 * np.pi / 2)
+            else:
+                disp = disp_peak * (1.0 - (p - 0.6) / 0.4)
+            data['圧入工程.プレス変位[mm]'][t] = max(0.0, disp + rng.normal(0, 0.15 * pb_noise_scale))
+
+        torque_peak = 12.0 + pb_contact_drift * 0.08 + (1.0 if (cyc in anomaly_pb_slow or cyc in anomaly_pb_extreme) else 0.0)
+        for t in range(pb_contact, min(pb_complete + 20, base + CYCLE_MS)):
+            if t >= total_rows: break
+            p = (t - pb_contact) / max(1, pb_complete - pb_contact)
+            if   p < 0.15: v = torque_peak * p / 0.15
+            elif p < 0.90: v = torque_peak * (1.0 + 0.1 * np.sin(p * np.pi))
+            else:          v = torque_peak * (1.0 - (p - 0.90) / 0.10)
+            data['圧入工程.モータトルク[N·m]'][t] = max(0.0, v + rng.normal(0, 0.2 * pb_noise_scale))
 
         # ── 検査排出工程 ─────────────────────────────────────────
         pc_base = base
@@ -177,12 +209,22 @@ def generate(filename: str, n_cycles: int, seed: int, start_dt: datetime,
         fill_range('検査排出工程.ゲート開',     pc_gate,    pc_eject)
         fill_range('検査排出工程.排出完了',     pc_eject,   pc_end)
 
-        score_base = 58.0 if is_ng else 94.0
-        score_std  =  4.0 if is_ng else  2.0
+        score_base = 58.0 if is_ng else 94.0 - pc_inspect_drift * 0.3
+        score_std  =  4.0 if is_ng else  2.0 + pc_inspect_drift * 0.05
         for t in range(pc_cam, min(pc_inspect + 30, base + CYCLE_MS)):
             if t >= total_rows: break
             data['検査排出工程.検査スコア'][t] = float(
                 np.clip(rng.normal(score_base, score_std), 0, 100))
+
+        illum_peak = 850.0 - pc_inspect_drift * 2.0 if not is_ng else 820.0
+        illum_span = max(1, pc_inspect - pc_cam)
+        for t in range(pc_cam, min(pc_inspect + 10, base + CYCLE_MS)):
+            if t >= total_rows: break
+            p = (t - pc_cam) / illum_span
+            if   p < 0.05: v = illum_peak * p / 0.05
+            elif p < 0.95: v = illum_peak
+            else:          v = illum_peak * (1.0 - (p - 0.95) / 0.05)
+            data['検査排出工程.照度センサ[lx]'][t] = max(0.0, v + rng.normal(0, 5.0))
 
         # ── 実行中信号 & ステップカウンタ ────────────────────────
         def _c(v): return int(np.clip(v, 0, total_rows))
@@ -216,9 +258,13 @@ def generate(filename: str, n_cycles: int, seed: int, start_dt: datetime,
     df['供給工程.実行中']             = data['供給工程.実行中'].astype(int)
     df['圧入工程.実行中']             = data['圧入工程.実行中'].astype(int)
     df['検査排出工程.実行中']         = data['検査排出工程.実行中'].astype(int)
-    df['供給工程.クランプ圧力[MPa]']  = np.round(data['供給工程.クランプ圧力[MPa]'], 3)
-    df['圧入工程.プレス力[kN]']       = np.round(data['圧入工程.プレス力[kN]'],      3)
-    df['検査排出工程.検査スコア']     = np.round(data['検査排出工程.検査スコア'],     2)
+    df['供給工程.クランプ圧力[MPa]']   = np.round(data['供給工程.クランプ圧力[MPa]'],   3)
+    df['供給工程.スライダ変位[mm]']    = np.round(data['供給工程.スライダ変位[mm]'],    2)
+    df['圧入工程.プレス力[kN]']        = np.round(data['圧入工程.プレス力[kN]'],        3)
+    df['圧入工程.プレス変位[mm]']      = np.round(data['圧入工程.プレス変位[mm]'],      2)
+    df['圧入工程.モータトルク[N·m]']  = np.round(data['圧入工程.モータトルク[N·m]'],   3)
+    df['検査排出工程.検査スコア']      = np.round(data['検査排出工程.検査スコア'],       2)
+    df['検査排出工程.照度センサ[lx]']  = np.round(data['検査排出工程.照度センサ[lx]'],  1)
 
     out = OUT_DIR / filename
     df.to_csv(out, index=False)

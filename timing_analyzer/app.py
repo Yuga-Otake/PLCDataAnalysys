@@ -498,6 +498,304 @@ def detect_outliers_iqr(result_df: pd.DataFrame, step_stats: list) -> list:
 
 
 # ═══════════════════════════════════════════════════════════════
+# 波形監視オーバーレイ
+# ═══════════════════════════════════════════════════════════════
+
+def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
+                              step_stat: dict, step: dict, pname: str,
+                              result_df: pd.DataFrame):
+    """アナログ波形重ね合わせ表示（ステップ開始基準）"""
+    mode         = step.get("mode", "single")
+    name         = step_stat["name"]
+    waveform_vars = [v for v in step.get("waveform_vars", []) if v in df.columns]
+
+    if not waveform_vars:
+        st.info("波形監視変数が未設定です。ステップ設定の「📈 波形監視変数」でアナログ変数を選択してください。")
+        return
+
+    # ステップ開始時刻列（サイクル開始からのオフセット[ms]）
+    if mode == "single":
+        start_col = f"{name}_遅れ[ms]"
+    else:
+        start_col = f"{name}_start[ms]"
+
+    if start_col not in result_df.columns:
+        st.warning(f"ステップ開始時刻列 `{start_col}` が見つかりません（解析を実行してください）")
+        return
+
+    start_offsets = result_df[start_col].values  # ms, per cycle
+
+    # 全サイクル波形取得
+    try:
+        waveforms = cached_waveforms(df, trigger_col, edge, tuple(waveform_vars))
+    except Exception as e:
+        st.error(f"波形データ取得エラー: {e}")
+        return
+
+    n_cyc = min(len(waveforms), len(start_offsets))
+    if n_cyc == 0:
+        st.warning("波形データがありません")
+        return
+
+    # 基準登録データ取得
+    _baseline = st.session_state.get(pk(pname, "baseline"), {})
+    _wv_bl    = st.session_state.get(pk(pname, "wv_baseline"), {})  # 波形専用基準
+
+    for var in waveform_vars:
+        st.markdown(f"---\n#### 📈 {var}")
+        _vkey = f"wvol_{pname}_{name}_{var}"
+
+        # ── コントロールパネル ─────────────────────────────────
+        ctrl_c1, ctrl_c2, ctrl_c3 = st.columns([3, 3, 3])
+
+        with ctrl_c1:
+            st.markdown("**表示ウィンドウ（ステップ開始基準）**")
+            win_pre  = st.number_input("開始前 [ms]", min_value=0, max_value=500,
+                                        value=50, step=10, key=f"{_vkey}_wpre")
+            win_post = st.number_input("終了後 [ms]", min_value=10, max_value=2000,
+                                        value=300, step=10, key=f"{_vkey}_wpost")
+
+        with ctrl_c2:
+            st.markdown("**検査ウィンドウ**")
+            insp_type = st.radio("種別", ["時間軸", "値トリガ"],
+                                  horizontal=True, key=f"{_vkey}_itype")
+            if insp_type == "時間軸":
+                insp_s = st.number_input("開始 [ms]", min_value=-500, max_value=2000,
+                                          value=0, step=5, key=f"{_vkey}_is")
+                insp_e = st.number_input("終了 [ms]", min_value=-500, max_value=2000,
+                                          value=200, step=5, key=f"{_vkey}_ie")
+                insp_e = max(insp_e, insp_s + 1)
+                insp_trig_var = None; insp_trig_val = None; insp_trig_post = None
+            else:
+                st.caption("この変数が閾値を超えた瞬間を起点にウィンドウを設定")
+                insp_trig_val  = st.number_input("トリガ閾値", value=1.0, step=0.5,
+                                                  key=f"{_vkey}_itv")
+                insp_trig_pre  = st.number_input("前 [ms]", min_value=0, max_value=500,
+                                                  value=10, step=5, key=f"{_vkey}_itpre")
+                insp_trig_post = st.number_input("後 [ms]", min_value=1, max_value=2000,
+                                                  value=150, step=5, key=f"{_vkey}_itpost")
+                insp_s = None; insp_e = None; insp_trig_var = var
+
+        with ctrl_c3:
+            st.markdown("**良品範囲**")
+            good_mode = st.radio("種別", ["手動入力", "自動（基準±Nσ）"],
+                                  horizontal=True, key=f"{_vkey}_gmode")
+            if good_mode == "手動入力":
+                good_lo = st.number_input("下限", value=0.0, step=0.5,
+                                           key=f"{_vkey}_glo")
+                good_hi = st.number_input("上限", value=0.0, step=0.5,
+                                           key=f"{_vkey}_ghi")
+                use_manual_range = good_lo < good_hi
+                good_nsig = None
+            else:
+                good_nsig = st.number_input("N（±Nσ）", min_value=1.0, max_value=6.0,
+                                             value=3.0, step=0.5, key=f"{_vkey}_nsig")
+                use_manual_range = False
+                good_lo = good_hi = None
+
+        # ── 波形データ抽出（ステップ開始基準に変換）─────────────
+        step_waves = []   # list of (t_step_rel, v_arr)
+        for i in range(n_cyc):
+            cyc        = waveforms[i]
+            step_off   = float(start_offsets[i]) if not np.isnan(start_offsets[i]) else None
+            if step_off is None or var not in cyc.columns:
+                continue
+            t_abs  = cyc["time_offset_ms"].values          # cycle-relative [ms]
+            t_step = t_abs - step_off                       # step-relative [ms]
+            v_arr  = cyc[var].values.astype(np.float64)
+
+            # 表示ウィンドウでクリップ
+            mask = (t_step >= -win_pre) & (t_step <= win_post)
+            if mask.sum() < 2:
+                continue
+            step_waves.append((t_step[mask], v_arr[mask]))
+
+        if not step_waves:
+            st.warning(f"{var}: 有効な波形データがありません")
+            continue
+
+        # ── 基準エンベロープ計算 ─────────────────────────────────
+        t_common = np.linspace(-win_pre, win_post, 500)
+        mat = np.full((len(step_waves), len(t_common)), np.nan)
+        for j, (t_sw, v_sw) in enumerate(step_waves):
+            idx = np.searchsorted(t_sw, t_common).clip(0, len(t_sw) - 1)
+            # 範囲外はNaN
+            in_range = (t_common >= t_sw[0]) & (t_common <= t_sw[-1])
+            mat[j, in_range] = v_sw[idx[in_range]]
+
+        mean_v = np.nanmean(mat, axis=0)
+        std_v  = np.nanstd(mat, axis=0)
+
+        # 良品範囲の確定
+        if good_mode == "自動（基準±Nσ）":
+            bl_key = f"{pname}_{name}_{var}"
+            bl     = _wv_bl.get(bl_key, {})
+            if bl:
+                mean_v_bl = np.array(bl["mean"])
+                std_v_bl  = np.array(bl["std"])
+                t_bl      = np.array(bl["t"])
+                # t_bl → t_common に補間
+                mean_v_bl_i = np.interp(t_common, t_bl, mean_v_bl, left=np.nan, right=np.nan)
+                std_v_bl_i  = np.interp(t_common, t_bl, std_v_bl,  left=np.nan, right=np.nan)
+                env_hi = mean_v_bl_i + good_nsig * std_v_bl_i
+                env_lo = mean_v_bl_i - good_nsig * std_v_bl_i
+                has_envelope = True
+            else:
+                # 基準未登録時は現データの平均±Nσで仮表示
+                env_hi = mean_v + good_nsig * std_v
+                env_lo = mean_v - good_nsig * std_v
+                has_envelope = True
+                st.caption("⚠️ 基準未登録のため現データ平均±Nσを仮表示")
+        else:
+            has_envelope = use_manual_range
+            env_hi = np.full_like(t_common, good_hi) if use_manual_range else None
+            env_lo = np.full_like(t_common, good_lo) if use_manual_range else None
+
+        # ── 検査ウィンドウの確定（値トリガ対応）────────────────
+        # 各サイクルの実際の検査ウィンドウ [t_start, t_end] (step-relative)
+        insp_windows = []
+        for (t_sw, v_sw) in step_waves:
+            if insp_type == "時間軸":
+                insp_windows.append((insp_s, insp_e))
+            else:
+                # 値トリガ: この波形でtrig_valを超えた最初の点を起点
+                over = np.where(v_sw >= insp_trig_val)[0]
+                if len(over) > 0:
+                    t0_trig = float(t_sw[over[0]])
+                    insp_windows.append((t0_trig - insp_trig_pre, t0_trig + insp_trig_post))
+                else:
+                    insp_windows.append(None)
+
+        # ── NG判定 ───────────────────────────────────────────────
+        ng_flags = []
+        if has_envelope:
+            for j, (t_sw, v_sw) in enumerate(step_waves):
+                win = insp_windows[j]
+                if win is None:
+                    ng_flags.append(False)
+                    continue
+                ws, we = win
+                # 検査ウィンドウ内のみ
+                mask_insp = (t_sw >= ws) & (t_sw <= we)
+                if mask_insp.sum() == 0:
+                    ng_flags.append(False)
+                    continue
+                t_insp = t_sw[mask_insp]
+                v_insp = v_sw[mask_insp]
+                hi_insp = np.interp(t_insp, t_common, env_hi)
+                lo_insp = np.interp(t_insp, t_common, env_lo)
+                is_ng = bool(np.any(v_insp > hi_insp) or np.any(v_insp < lo_insp))
+                ng_flags.append(is_ng)
+        else:
+            ng_flags = [False] * len(step_waves)
+
+        # ── グラフ描画 ─────────────────────────────────────────
+        fig = go.Figure()
+
+        _MAX_WAVE = 80
+        for j, (t_sw, v_sw) in enumerate(step_waves):
+            if j >= _MAX_WAVE:
+                break
+            color_cyc = "rgba(220,50,50,0.25)" if (ng_flags[j] if j < len(ng_flags) else False) \
+                        else "rgba(100,120,200,0.12)"
+            fig.add_trace(go.Scatter(
+                x=t_sw, y=v_sw, mode="lines",
+                line=dict(color=color_cyc, width=1),
+                showlegend=False,
+            ))
+
+        # 平均波形
+        fig.add_trace(go.Scatter(
+            x=t_common, y=mean_v, mode="lines",
+            line=dict(color="royalblue", width=2.5),
+            name="平均波形",
+        ))
+
+        # 良品範囲エンベロープ
+        if has_envelope and env_hi is not None:
+            fig.add_trace(go.Scatter(
+                x=np.concatenate([t_common, t_common[::-1]]),
+                y=np.concatenate([env_hi, env_lo[::-1]]),
+                fill="toself",
+                fillcolor="rgba(0,200,100,0.10)",
+                line=dict(color="rgba(0,0,0,0)"),
+                name="良品範囲",
+                showlegend=True,
+            ))
+            fig.add_trace(go.Scatter(
+                x=t_common, y=env_hi, mode="lines",
+                line=dict(color="green", width=1.5, dash="dash"),
+                name="上限", showlegend=False,
+            ))
+            fig.add_trace(go.Scatter(
+                x=t_common, y=env_lo, mode="lines",
+                line=dict(color="green", width=1.5, dash="dash"),
+                name="下限", showlegend=False,
+            ))
+
+        # ステップ開始基準線
+        fig.add_vline(x=0, line_color="gray", line_dash="dot",
+                      annotation_text="ステップ開始", annotation_position="top left")
+
+        # 検査ウィンドウ（代表: 最初の有効ウィンドウ）
+        _repr_win = next((w for w in insp_windows if w is not None), None)
+        if _repr_win is not None:
+            ws_r, we_r = _repr_win
+            fig.add_vrect(x0=ws_r, x1=we_r,
+                          fillcolor="rgba(255,200,0,0.08)",
+                          line_width=1, line_color="orange",
+                          annotation_text="検査ウィンドウ",
+                          annotation_position="top right")
+
+        # NGサイクルのみ凡例エントリ
+        ng_count = sum(ng_flags)
+        if ng_count > 0:
+            fig.add_trace(go.Scatter(
+                x=[None], y=[None], mode="lines",
+                line=dict(color="rgba(220,50,50,0.7)", width=2),
+                name=f"NG サイクル ({ng_count}/{len(step_waves)})",
+            ))
+
+        fig.update_layout(
+            xaxis_title="ステップ開始からの時間 [ms]",
+            yaxis_title=var,
+            height=340,
+            margin=dict(t=20, b=40, l=60, r=20),
+            legend=dict(orientation="h", y=1.05, x=1, xanchor="right"),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig, width="stretch", key=f"{_vkey}_fig")
+
+        # ── サマリー & 基準登録 ───────────────────────────────────
+        sm_c1, sm_c2, sm_c3, sm_c4 = st.columns(4)
+        sm_c1.metric("サイクル数", len(step_waves))
+        sm_c2.metric("NG数", ng_count, delta=None if ng_count == 0 else f"{ng_count/len(step_waves)*100:.1f}%")
+        sm_c3.metric("平均ピーク", f"{float(np.nanmax(mean_v)):.2f}")
+        sm_c4.metric("ピークσ", f"{float(np.nanstd([np.nanmax(v) for _, v in step_waves])):.2f}")
+
+        # 基準登録ボタン
+        bl_key = f"{pname}_{name}_{var}"
+        if st.button(f"📌 現データを基準として登録（{var}）",
+                     key=f"{_vkey}_bl_reg", type="secondary"):
+            _wv_bl[bl_key] = {
+                "t":    t_common.tolist(),
+                "mean": mean_v.tolist(),
+                "std":  std_v.tolist(),
+            }
+            st.session_state[pk(pname, "wv_baseline")] = _wv_bl
+            st.success(f"✅ {var} の波形基準を登録しました（{len(step_waves)} サイクル）")
+            st.rerun()
+
+        if bl_key in _wv_bl:
+            if st.button(f"🗑 基準をリセット（{var}）",
+                         key=f"{_vkey}_bl_del", type="secondary"):
+                _wv_bl.pop(bl_key, None)
+                st.session_state[pk(pname, "wv_baseline")] = _wv_bl
+                st.rerun()
+            st.caption(f"✅ 基準登録済み")
+
+
+# ═══════════════════════════════════════════════════════════════
 # ステップ詳細
 # ═══════════════════════════════════════════════════════════════
 
@@ -506,13 +804,26 @@ def render_step_detail(df: pd.DataFrame, trigger_col: str, edge: str,
                        result_df: pd.DataFrame):
     mode = step.get("mode", "single")
     name = step_stat["name"]
+    waveform_vars = [v for v in step.get("waveform_vars", []) if v in df.columns]
 
-    if mode == "single":
-        _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
-    elif mode == "numeric":
-        _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
-    else:  # range / on_period
-        _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
+    if waveform_vars:
+        tab_timing, tab_wave = st.tabs(["⏱ タイミング解析", "📈 波形監視"])
+        with tab_timing:
+            if mode == "single":
+                _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
+            elif mode == "numeric":
+                _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
+            else:
+                _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
+        with tab_wave:
+            _render_waveform_overlay(df, trigger_col, edge, step_stat, step, pname, result_df)
+    else:
+        if mode == "single":
+            _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
+        elif mode == "numeric":
+            _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
+        else:
+            _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
 
 
 def _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_df):
@@ -1325,6 +1636,21 @@ def edit_step_dialog(pname: str, step_idx: int, bool_cols: list, df: pd.DataFram
                             key=f"_enmini_{pname}_{step_idx}",
                             config={"displayModeBar": False})
         upd = {"mode": "numeric", "variable": new_nvar, "op": new_op, "value": new_val}
+
+    # 波形監視変数（アナログ）
+    st.markdown("**📈 波形監視変数**")
+    num_cols_wave = [c for c, t in col_types.items() if t == "numeric"]
+    cur_wvars     = [v for v in step.get("waveform_vars", []) if v in num_cols_wave]
+    new_wvars     = st.multiselect(
+        "波形監視変数（アナログ）",
+        options=num_cols_wave,
+        default=cur_wvars,
+        key=f"_ewvars_{pname}_{step_idx}",
+        placeholder="アナログ変数を選択（複数可）…",
+        label_visibility="collapsed",
+        help="ステップ開始を基準に各サイクルの波形を重ね合わせ表示します",
+    )
+    upd["waveform_vars"] = new_wvars
 
     # 名前 & 色
     nc1, nc2 = st.columns([4, 1])

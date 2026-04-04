@@ -63,10 +63,15 @@ def generate(filename, n_cycles, seed,
     # 数値変数（Case文シミュレーション / numeric 条件モード用）
     data['圧入工程.ステップ番号'] = np.zeros(total_rows, dtype=np.int8)
     data['ライン.稼働工程数']     = np.zeros(total_rows, dtype=np.int8)
-    # アナログ信号
+    # アナログ信号（既存）
     data['供給工程.クランプ圧力[MPa]'] = np.zeros(total_rows)
     data['圧入工程.プレス力[kN]']      = np.zeros(total_rows)
     data['検査排出工程.検査スコア']    = np.zeros(total_rows)
+    # アナログ信号（新規：波形監視用）
+    data['供給工程.スライダ変位[mm]']    = np.zeros(total_rows)
+    data['圧入工程.プレス変位[mm]']      = np.zeros(total_rows)
+    data['圧入工程.モータトルク[N·m]']  = np.zeros(total_rows)
+    data['検査排出工程.照度センサ[lx]']  = np.zeros(total_rows)
 
     def pulse(col, start, dur=PULSE_MS):
         s = int(np.clip(start, 0, total_rows - 1))
@@ -113,6 +118,13 @@ def generate(filename, n_cycles, seed,
             else:          v = 8.0 * (1.0 - (p - 0.75) / 0.25)
             data['供給工程.クランプ圧力[MPa]'][t] = max(0.0, v + rng.normal(0, 0.12))
 
+        # スライダ変位: 0 → 120mm（前進中に直線増加、前進後は120mm保持）
+        slider_span = max(1, pa_detect - pa_slider)
+        for t in range(pa_slider, min(pa_end, base + CYCLE_MS)):
+            if t >= total_rows: break
+            progress = min(1.0, (t - pa_slider) / slider_span)
+            data['供給工程.スライダ変位[mm]'][t] = 120.0 * progress + rng.normal(0, 0.3)
+
         # ── 圧入工程 — 0〜530ms ← ボトルネック ──────────────────
         pb_base = base
         pulse('圧入工程.サイクル開始', pb_base)
@@ -146,6 +158,30 @@ def generate(filename, n_cycles, seed,
             else:          v = peak_f * max(0.0, 1.0 - (p - 0.85) / 0.15) * 0.5
             data['圧入工程.プレス力[kN]'][t] = max(0.0, v + rng.normal(0, 0.25))
 
+        # プレス変位: 下降中 0→40mm（サイン曲線）、上昇中 40→0mm
+        disp_peak = 40.0 + (3.0 if cyc in anomaly_pb_extreme else 0.0)
+        press_span = max(1, pb_up - pb_down)
+        for t in range(pb_down, min(pb_up + 50, base + CYCLE_MS)):
+            if t >= total_rows: break
+            p = (t - pb_down) / press_span
+            p = min(p, 1.0)
+            # 下降（0→1）: sin曲線で0→disp_peak, 上昇（1以降）: 線形で戻る
+            if p < 0.6:
+                disp = disp_peak * np.sin(p / 0.6 * np.pi / 2)
+            else:
+                disp = disp_peak * (1.0 - (p - 0.6) / 0.4)
+            data['圧入工程.プレス変位[mm]'][t] = max(0.0, disp + rng.normal(0, 0.15))
+
+        # モータトルク: 圧入中にピーク（プレス力と相関）
+        torque_peak = 12.0 + (1.0 if (cyc in anomaly_pb_slow or cyc in anomaly_pb_extreme) else 0.0)
+        for t in range(pb_contact, min(pb_complete + 20, base + CYCLE_MS)):
+            if t >= total_rows: break
+            p = (t - pb_contact) / max(1, pb_complete - pb_contact)
+            if   p < 0.15: v = torque_peak * p / 0.15
+            elif p < 0.90: v = torque_peak * (1.0 + 0.1 * np.sin(p * np.pi))
+            else:          v = torque_peak * (1.0 - (p - 0.90) / 0.10)
+            data['圧入工程.モータトルク[N·m]'][t] = max(0.0, v + rng.normal(0, 0.2))
+
         # ── 検査排出工程 — 0〜310ms ──────────────────────────────
         pc_base = base
         pulse('検査排出工程.サイクル開始', pc_base)
@@ -175,6 +211,17 @@ def generate(filename, n_cycles, seed,
             if t >= total_rows: break
             data['検査排出工程.検査スコア'][t] = float(
                 np.clip(rng.normal(score_base, score_std), 0, 100))
+
+        # 照度センサ: カメラトリガ〜検査完了の間に一定照度（スパイク立ち上がり）
+        illum_peak = 850.0 if not is_ng else 820.0
+        illum_span = max(1, pc_inspect - pc_cam)
+        for t in range(pc_cam, min(pc_inspect + 10, base + CYCLE_MS)):
+            if t >= total_rows: break
+            p = (t - pc_cam) / illum_span
+            if   p < 0.05: v = illum_peak * p / 0.05
+            elif p < 0.95: v = illum_peak
+            else:          v = illum_peak * (1.0 - (p - 0.95) / 0.05)
+            data['検査排出工程.照度センサ[lx]'][t] = max(0.0, v + rng.normal(0, 5.0))
 
         # ── 実行中信号 & ステップカウンタ ────────────────────────
         def _c(v): return int(np.clip(v, 0, total_rows))
@@ -214,9 +261,13 @@ def generate(filename, n_cycles, seed,
     df['圧入工程.実行中']     = data['圧入工程.実行中'].astype(int)
     df['検査排出工程.実行中'] = data['検査排出工程.実行中'].astype(int)
     # アナログ信号
-    df['供給工程.クランプ圧力[MPa]'] = np.round(data['供給工程.クランプ圧力[MPa]'], 3)
-    df['圧入工程.プレス力[kN]']      = np.round(data['圧入工程.プレス力[kN]'],      3)
-    df['検査排出工程.検査スコア']    = np.round(data['検査排出工程.検査スコア'],     2)
+    df['供給工程.クランプ圧力[MPa]']   = np.round(data['供給工程.クランプ圧力[MPa]'],   3)
+    df['供給工程.スライダ変位[mm]']    = np.round(data['供給工程.スライダ変位[mm]'],    2)
+    df['圧入工程.プレス力[kN]']        = np.round(data['圧入工程.プレス力[kN]'],        3)
+    df['圧入工程.プレス変位[mm]']      = np.round(data['圧入工程.プレス変位[mm]'],      2)
+    df['圧入工程.モータトルク[N·m]']  = np.round(data['圧入工程.モータトルク[N·m]'],   3)
+    df['検査排出工程.検査スコア']      = np.round(data['検査排出工程.検査スコア'],       2)
+    df['検査排出工程.照度センサ[lx]']  = np.round(data['検査排出工程.照度センサ[lx]'],  1)
 
     df.to_csv(filename, index=False)
     print(f"OK {filename}  ({len(df):,} rows, {n_cycles} cycles, takt={CYCLE_MS}ms)")
