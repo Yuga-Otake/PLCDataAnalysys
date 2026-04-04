@@ -562,15 +562,18 @@ def _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_
             st.markdown("**ヒストグラム**")
         _bkey  = f"{pname}_{name}_h"
         n_bins = calc_nice_bins(delays_plot, _bkey)
+        _vmin_h = float(delays_plot.min()); _vmax_h = float(delays_plot.max())
+        _bsz_h  = (_vmax_h - _vmin_h) / n_bins if n_bins > 0 and _vmax_h > _vmin_h else 1.0
+        _xbins_h = dict(start=_vmin_h, end=_vmax_h + _bsz_h, size=_bsz_h)
         fig_h  = go.Figure()
         if threshold > 0 and not _delta_mode:
-            below = [d for d in delays_plot if d <= threshold]
-            above = [d for d in delays_plot if d > threshold]
-            if below:
-                fig_h.add_trace(go.Histogram(x=below, nbinsx=n_bins, name="閾値以内",
+            below = delays_plot[delays_plot <= threshold]
+            above = delays_plot[delays_plot >  threshold]
+            if len(below):
+                fig_h.add_trace(go.Histogram(x=below, xbins=_xbins_h, name="閾値以内",
                                              marker_color="royalblue", opacity=0.75))
-            if above:
-                fig_h.add_trace(go.Histogram(x=above, nbinsx=n_bins, name="閾値超過",
+            if len(above):
+                fig_h.add_trace(go.Histogram(x=above, xbins=_xbins_h, name="閾値超過",
                                              marker_color="crimson", opacity=0.75))
             fig_h.add_vline(x=threshold, line_dash="dash", line_color="orange",
                             annotation_text=f"閾値 {threshold}ms")
@@ -579,17 +582,17 @@ def _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_
             in_r  = delays_plot[np.abs(delays_plot) <= _t3]
             out_r = delays_plot[np.abs(delays_plot) > _t3]
             if len(in_r) > 0:
-                fig_h.add_trace(go.Histogram(x=in_r, nbinsx=n_bins, name="±3σ以内",
+                fig_h.add_trace(go.Histogram(x=in_r, xbins=_xbins_h, name="±3σ以内",
                                              marker_color="royalblue", opacity=0.75))
             if len(out_r) > 0:
-                fig_h.add_trace(go.Histogram(x=out_r, nbinsx=n_bins, name="±3σ超過",
+                fig_h.add_trace(go.Histogram(x=out_r, xbins=_xbins_h, name="±3σ超過",
                                              marker_color="crimson", opacity=0.75))
             fig_h.add_vline(x=_t3,  line_dash="dash", line_color="orange",
                             annotation_text=f"+3σ({_t3:.1f}ms)")
             fig_h.add_vline(x=-_t3, line_dash="dash", line_color="orange",
                             annotation_text=f"-3σ({_t3:.1f}ms)")
         else:
-            fig_h.add_trace(go.Histogram(x=delays_plot, nbinsx=n_bins,
+            fig_h.add_trace(go.Histogram(x=delays_plot, xbins=_xbins_h,
                                          marker_color="steelblue", opacity=0.8))
         if _delta_mode:
             fig_h.add_vline(x=0, line_color="green", annotation_text=f"基準 {_bl_ref:.1f}ms")
@@ -723,15 +726,18 @@ def _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_d
             st.markdown("**所要時間ヒストグラム**")
         _bkey  = f"{pname}_{name}_r"
         n_bins = calc_nice_bins(durs_plot, _bkey)
+        _vmin_r = float(durs_plot.min()); _vmax_r = float(durs_plot.max())
+        _bsz_r  = (_vmax_r - _vmin_r) / n_bins if n_bins > 0 and _vmax_r > _vmin_r else 1.0
+        _xbins_r = dict(start=_vmin_r, end=_vmax_r + _bsz_r, size=_bsz_r)
         fig_h  = go.Figure()
         if threshold > 0 and not _delta_mode:
-            below = [d for d in durs_plot if d <= threshold]
-            above = [d for d in durs_plot if d > threshold]
-            if below:
-                fig_h.add_trace(go.Histogram(x=below, nbinsx=n_bins, name="閾値以内",
+            below = durs_plot[durs_plot <= threshold]
+            above = durs_plot[durs_plot >  threshold]
+            if len(below):
+                fig_h.add_trace(go.Histogram(x=below, xbins=_xbins_r, name="閾値以内",
                                              marker_color="royalblue", opacity=0.75))
-            if above:
-                fig_h.add_trace(go.Histogram(x=above, nbinsx=n_bins, name="閾値超過",
+            if len(above):
+                fig_h.add_trace(go.Histogram(x=above, xbins=_xbins_r, name="閾値超過",
                                              marker_color="crimson", opacity=0.75))
             fig_h.add_vline(x=threshold, line_dash="dash", line_color="orange",
                             annotation_text=f"閾値 {threshold}ms")
@@ -740,17 +746,17 @@ def _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_d
             in_r  = durs_plot[np.abs(durs_plot) <= _t3]
             out_r = durs_plot[np.abs(durs_plot) > _t3]
             if len(in_r) > 0:
-                fig_h.add_trace(go.Histogram(x=in_r, nbinsx=n_bins, name="±3σ以内",
+                fig_h.add_trace(go.Histogram(x=in_r, xbins=_xbins_r, name="±3σ以内",
                                              marker_color="teal", opacity=0.75))
             if len(out_r) > 0:
-                fig_h.add_trace(go.Histogram(x=out_r, nbinsx=n_bins, name="±3σ超過",
+                fig_h.add_trace(go.Histogram(x=out_r, xbins=_xbins_r, name="±3σ超過",
                                              marker_color="crimson", opacity=0.75))
             fig_h.add_vline(x=_t3,  line_dash="dash", line_color="orange",
                             annotation_text=f"+3σ({_t3:.1f}ms)")
             fig_h.add_vline(x=-_t3, line_dash="dash", line_color="orange",
                             annotation_text=f"-3σ({_t3:.1f}ms)")
         else:
-            fig_h.add_trace(go.Histogram(x=durs_plot, nbinsx=n_bins,
+            fig_h.add_trace(go.Histogram(x=durs_plot, xbins=_xbins_r,
                                          marker_color="teal", opacity=0.8))
         if _delta_mode:
             fig_h.add_vline(x=0, line_color="green", annotation_text=f"基準 {_bl_ref_dur:.1f}ms")
@@ -917,20 +923,23 @@ def _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result
         st.markdown("**継続時間ヒストグラム**")
         _bkey_n = f"{pname}_{name}_n"
         n_bins  = calc_nice_bins(durs, _bkey_n)   # Freedman-Diaconis で自動算出
+        _vmin_n = float(durs.min()); _vmax_n = float(durs.max())
+        _bsz_n  = (_vmax_n - _vmin_n) / n_bins if n_bins > 0 and _vmax_n > _vmin_n else 1.0
+        _xbins_n = dict(start=_vmin_n, end=_vmax_n + _bsz_n, size=_bsz_n)
         fig_h   = go.Figure()
         if threshold > 0:
-            below = [d for d in durs if d <= threshold]
-            above = [d for d in durs if d > threshold]
-            if below:
-                fig_h.add_trace(go.Histogram(x=below, nbinsx=n_bins, name="閾値以内",
+            below = durs[durs <= threshold]
+            above = durs[durs >  threshold]
+            if len(below):
+                fig_h.add_trace(go.Histogram(x=below, xbins=_xbins_n, name="閾値以内",
                                              marker_color="royalblue", opacity=0.75))
-            if above:
-                fig_h.add_trace(go.Histogram(x=above, nbinsx=n_bins, name="閾値超過",
+            if len(above):
+                fig_h.add_trace(go.Histogram(x=above, xbins=_xbins_n, name="閾値超過",
                                              marker_color="crimson", opacity=0.75))
             fig_h.add_vline(x=threshold, line_dash="dash", line_color="orange",
                             annotation_text=f"閾値 {threshold}ms")
         else:
-            fig_h.add_trace(go.Histogram(x=durs, nbinsx=n_bins,
+            fig_h.add_trace(go.Histogram(x=durs, xbins=_xbins_n,
                                          marker_color="teal", opacity=0.8))
         fig_h.add_vline(x=sig3, line_dash="dot", line_color="gray",
                         annotation_text=f"3σ {sig3:.1f}ms")
@@ -2202,22 +2211,25 @@ with _page_tabs[0]:
                                 continue
                             _bkey_t = f"{pname}_{col}_t"
                             nb  = calc_nice_bins(dl, _bkey_t)   # Freedman-Diaconis 自動算出
+                            _vmin_t = float(dl.min()); _vmax_t = float(dl.max())
+                            _bsz_t  = (_vmax_t - _vmin_t) / nb if nb > 0 and _vmax_t > _vmin_t else 1.0
+                            _xbins_t = dict(start=_vmin_t, end=_vmax_t + _bsz_t, size=_bsz_t)
                             st_ = calc_statistics(dl)
                             sg3 = st_.get("3σ上限[ms]", 0)
                             fig = go.Figure()
                             if thr_tab > 0:
-                                bl = [d for d in dl if d <= thr_tab]
-                                ab = [d for d in dl if d > thr_tab]
-                                if bl:
-                                    fig.add_trace(go.Histogram(x=bl, nbinsx=nb, name="閾値以内",
+                                bl = dl[dl <= thr_tab]
+                                ab = dl[dl >  thr_tab]
+                                if len(bl):
+                                    fig.add_trace(go.Histogram(x=bl, xbins=_xbins_t, name="閾値以内",
                                                                marker_color="royalblue", opacity=0.7))
-                                if ab:
-                                    fig.add_trace(go.Histogram(x=ab, nbinsx=nb, name="閾値超過",
+                                if len(ab):
+                                    fig.add_trace(go.Histogram(x=ab, xbins=_xbins_t, name="閾値超過",
                                                                marker_color="crimson", opacity=0.7))
                                 fig.add_vline(x=thr_tab, line_dash="dash", line_color="orange",
                                               annotation_text=f"閾値 {thr_tab}ms")
                             else:
-                                fig.add_trace(go.Histogram(x=dl, nbinsx=nb,
+                                fig.add_trace(go.Histogram(x=dl, xbins=_xbins_t,
                                                            marker_color="steelblue", opacity=0.8))
                             fig.add_vline(x=sg3, line_dash="dot", line_color="gray",
                                           annotation_text=f"3σ {sg3:.1f}ms")
