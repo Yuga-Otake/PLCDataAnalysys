@@ -153,7 +153,7 @@ with hist_col:
             height=350,
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
         )
-        st.plotly_chart(fig_h, use_container_width=True)
+        st.plotly_chart(fig_h, width="stretch")
 
         # 統計テーブル
         stat_rows = [
@@ -167,13 +167,13 @@ with hist_col:
         if threshold > 0:
             stat_rows.append({"指標": "閾値達成率", "値": f"{np.mean(delays <= threshold)*100:.1f}%"})
 
-        st.dataframe(pd.DataFrame(stat_rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(stat_rows), hide_index=True, width="stretch")
 
         with st.expander("サイクル別 遅れ時間一覧"):
             if result is not None:
                 st.dataframe(
                     result[["サイクル#", "開始時刻", delay_col]],
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -233,5 +233,5 @@ with wave_col:
             height=350,
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
         )
-        st.plotly_chart(fig_w, use_container_width=True)
+        st.plotly_chart(fig_w, width="stretch")
         st.caption(f"{len(all_t)} サイクル重ね表示　表示範囲: {view_start:.1f} ～ {view_end:.1f} ms")

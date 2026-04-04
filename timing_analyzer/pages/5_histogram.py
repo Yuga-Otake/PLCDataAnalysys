@@ -207,7 +207,7 @@ fig.update_layout(
     hovermode="x unified",
 )
 
-st.plotly_chart(fig, use_container_width=True, key="hist_main")
+st.plotly_chart(fig, width="stretch", key="hist_main")
 
 # ── 統計サマリー ──────────────────────────────────────────────────
 st.divider()
@@ -244,10 +244,10 @@ with st.expander("📋 サイクル別データを表示", expanded=False):
     show_df.index = range(1, len(show_df) + 1)
     show_df.index.name = "サイクル番号"
     show_df.columns = [f"{step_name} [{xlabel}]"]
-    st.dataframe(show_df, use_container_width=True)
+    st.dataframe(show_df, width="stretch")
     st.download_button(
         "📥 CSVダウンロード",
         show_df.to_csv(encoding="utf-8-sig"),
         file_name=f"{proc}_{step_name}_histogram.csv",
-        use_container_width=True,
+        width="stretch",
     )

@@ -601,7 +601,7 @@ def _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_
         fig_h.update_layout(xaxis_title=xaxis_title, yaxis_title="頻度",
                              barmode="overlay", height=260, margin=dict(t=8, b=32),
                              showlegend=True)
-        st.plotly_chart(fig_h, use_container_width=True, key=f"hist_{pname}_{name}")
+        st.plotly_chart(fig_h, width="stretch", key=f"hist_{pname}_{name}")
         sc = st.columns(4)
         mean_plot = float(np.mean(delays_plot))
         std_plot  = float(np.std(delays_plot))
@@ -661,7 +661,7 @@ def _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_
                         annotation_text=f"平均 {abs_mean:.1f}ms")
         fig_w.update_layout(xaxis_title="サイクル開始からの経過時間 [ms]",
                             yaxis_title="変数値", height=260, margin=dict(t=8, b=32))
-        st.plotly_chart(fig_w, use_container_width=True, key=f"wave_{pname}_{name}")
+        st.plotly_chart(fig_w, width="stretch", key=f"wave_{pname}_{name}")
         st.caption(f"{len(all_t)} サイクル重ね　{view_start:.1f}〜{view_end:.1f} ms")
 
 
@@ -762,7 +762,7 @@ def _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_d
         fig_h.update_layout(xaxis_title=xaxis_title, yaxis_title="頻度",
                              barmode="overlay", height=260, margin=dict(t=8, b=32),
                              showlegend=True)
-        st.plotly_chart(fig_h, use_container_width=True, key=f"hist_{pname}_{name}")
+        st.plotly_chart(fig_h, width="stretch", key=f"hist_{pname}_{name}")
         sc = st.columns(4)
         mean_plot = float(np.mean(durs_plot))
         sc[0].metric("N",        len(durs_plot))
@@ -837,7 +837,7 @@ def _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_d
                             yaxis_title="変数値", height=260,
                             margin=dict(t=8, b=32), showlegend=True,
                             legend=dict(orientation="h", y=1.02))
-        st.plotly_chart(fig_w, use_container_width=True, key=f"wave_{pname}_{name}")
+        st.plotly_chart(fig_w, width="stretch", key=f"wave_{pname}_{name}")
         st.caption(f"開始変数: {start_var} {step.get('start_edge','RISE')}  ／  "
                    f"終了変数: {end_var} {step.get('end_edge','FALL')}")
 
@@ -937,7 +937,7 @@ def _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result
         fig_h.update_layout(xaxis_title="継続時間[ms]", yaxis_title="頻度",
                              barmode="overlay", height=260, margin=dict(t=8, b=32),
                              showlegend=threshold > 0)
-        st.plotly_chart(fig_h, use_container_width=True, key=f"hist_{pname}_{name}")
+        st.plotly_chart(fig_h, width="stretch", key=f"hist_{pname}_{name}")
         st.slider("ビン数", 3, 60, n_bins, key=f"_bins_{_bkey_n}",
                   help="ヒストグラムのビン数を手動調整（Freedman-Diaconis による自動算出が既定値）")
         sc = st.columns(4)
@@ -998,7 +998,7 @@ def _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result
                             yaxis_title=var, height=260,
                             margin=dict(t=8, b=32), showlegend=True,
                             legend=dict(orientation="h", y=1.02))
-        st.plotly_chart(fig_w, use_container_width=True, key=f"wave_{pname}_{name}")
+        st.plotly_chart(fig_w, width="stretch", key=f"wave_{pname}_{name}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1016,7 +1016,7 @@ def cycle_settings_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
 
     _, del_col = st.columns([4, 1])
     with del_col:
-        if st.button("🗑 削除", type="secondary", use_container_width=True,
+        if st.button("🗑 削除", type="secondary", width="stretch",
                      key=f"_cyc_del_{pname}"):
             del st.session_state["processes"][pname]
             if st.session_state.get("_expand_new") == pname:
@@ -1145,7 +1145,7 @@ def add_step_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
             disabled=(not _new),
             type="primary",
             key=f"bulk_add_{pname}",
-            use_container_width=True,
+            width="stretch",
         ):
             for v in _new:
                 if add_mode == "on_period":
@@ -1214,7 +1214,7 @@ def edit_step_dialog(pname: str, step_idx: int, bool_cols: list, df: pd.DataFram
     # 削除
     _, del_col = st.columns([5, 1])
     with del_col:
-        if st.button("🗑", use_container_width=True, key=f"_edel_{pname}_{step_idx}"):
+        if st.button("🗑", width="stretch", key=f"_edel_{pname}_{step_idx}"):
             steps.pop(step_idx)
             st.session_state[pk(pname, "steps_list")] = steps
             st.toast(f"🗑 {name} を削除しました")
@@ -1245,7 +1245,7 @@ def edit_step_dialog(pname: str, step_idx: int, bool_cols: list, df: pd.DataFram
                                 key=f"_eedge_{pname}_{step_idx}")
         new_edge = "RISE" if "RISE" in new_edge_lbl else "FALL"
         if new_var:
-            st.plotly_chart(make_mini_chart(df, new_var, 48), use_container_width=True,
+            st.plotly_chart(make_mini_chart(df, new_var, 48), width="stretch",
                             key=f"_emini_{pname}_{step_idx}",
                             config={"displayModeBar": False})
         upd = {"mode": "single", "variable": new_var, "edge": new_edge}
@@ -1257,7 +1257,7 @@ def edit_step_dialog(pname: str, step_idx: int, bool_cols: list, df: pd.DataFram
                                key=f"_eopvar_{pname}_{step_idx}")
         st.caption("選択した変数が 1 の間（RISE → FALL）を計測します")
         if new_var:
-            st.plotly_chart(make_mini_chart(df, new_var, 48), use_container_width=True,
+            st.plotly_chart(make_mini_chart(df, new_var, 48), width="stretch",
                             key=f"_eopmini_{pname}_{step_idx}",
                             config={"displayModeBar": False})
         upd = {"mode": "on_period", "variable": new_var}
@@ -1312,7 +1312,7 @@ def edit_step_dialog(pname: str, step_idx: int, bool_cols: list, df: pd.DataFram
                                       key=f"_eval_{pname}_{step_idx}", label_visibility="hidden")
         if new_nvar and new_nvar in df.columns:
             st.caption(f"「{new_nvar} {new_op} {new_val:.0f}」が True の区間を計測します")
-            st.plotly_chart(make_mini_chart(df, new_nvar, 48), use_container_width=True,
+            st.plotly_chart(make_mini_chart(df, new_nvar, 48), width="stretch",
                             key=f"_enmini_{pname}_{step_idx}",
                             config={"displayModeBar": False})
         upd = {"mode": "numeric", "variable": new_nvar, "op": new_op, "value": new_val}
@@ -1330,13 +1330,13 @@ def edit_step_dialog(pname: str, step_idx: int, bool_cols: list, df: pd.DataFram
     r1, r2, _ = st.columns([1, 1, 3])
     with r1:
         if st.button("↑ 上へ", disabled=step_idx == 0,
-                     key=f"_eup_{pname}_{step_idx}", use_container_width=True):
+                     key=f"_eup_{pname}_{step_idx}", width="stretch"):
             steps[step_idx], steps[step_idx-1] = steps[step_idx-1], steps[step_idx]
             st.session_state[pk(pname, "steps_list")] = steps
             st.rerun()
     with r2:
         if st.button("↓ 下へ", disabled=step_idx == len(steps)-1,
-                     key=f"_edn_{pname}_{step_idx}", use_container_width=True):
+                     key=f"_edn_{pname}_{step_idx}", width="stretch"):
             steps[step_idx], steps[step_idx+1] = steps[step_idx+1], steps[step_idx]
             st.session_state[pk(pname, "steps_list")] = steps
             st.rerun()
@@ -1363,7 +1363,7 @@ def edit_step_dialog(pname: str, step_idx: int, bool_cols: list, df: pd.DataFram
             "ダウンロード",
             data=json.dumps(cfg, ensure_ascii=False, indent=2),
             file_name=f"{pname}_config.json", mime="application/json",
-            key=f"_edl_{pname}_{step_idx}", use_container_width=True,
+            key=f"_edl_{pname}_{step_idx}", width="stretch",
         )
 
 
@@ -1483,7 +1483,7 @@ def baseline_dialog(pname: str, step_stats: list, result_df: pd.DataFrame):
         if src_lbl == "特定サイクル" and _sel_cyc_row is not None
         else f"✅ 登録（{n_cyc} サイクルの{src_lbl}）"
     )
-    if st.button(_btn_label, type="primary", use_container_width=True):
+    if st.button(_btn_label, type="primary", width="stretch"):
         st.session_state[pk(pname, "baseline")] = new_vals
         st.session_state[pk(pname, "baseline_meta")] = {
             "source":    src_lbl,
@@ -1494,7 +1494,7 @@ def baseline_dialog(pname: str, step_stats: list, result_df: pd.DataFrame):
         st.rerun()
 
     if existing:
-        if st.button("🗑 基準値をクリア", use_container_width=True):
+        if st.button("🗑 基準値をクリア", width="stretch"):
             for k in [pk(pname, "baseline"), pk(pname, "baseline_meta")]:
                 st.session_state.pop(k, None)
             st.rerun()
@@ -1608,7 +1608,7 @@ with st.sidebar:
             data=_exp_json,
             file_name=f"apb_settings_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
             mime="application/json",
-            use_container_width=True,
+            width="stretch",
             key="_settings_export_btn",
         )
 
@@ -1665,7 +1665,7 @@ hc1, hc2 = st.columns([6, 1])
 with hc1:
     st.caption(f"登録済み工程: {len(processes)}件")
 with hc2:
-    if st.button("＋ 工程を追加", type="primary", use_container_width=True):
+    if st.button("＋ 工程を追加", type="primary", width="stretch"):
         add_process_dialog(bool_cols)
 
 if not processes:
@@ -1732,12 +1732,12 @@ with _page_tabs[0]:
         with _sum_hdr:
             st.markdown("**⏱ 工程タイムライン概要**")
         with _ea:
-            if st.button("▼ 全展開", key="_expand_all", use_container_width=True):
+            if st.button("▼ 全展開", key="_expand_all", width="stretch"):
                 for _p in _proc_items:
                     st.session_state[f"_sum_exp_{_p['proc']}"] = True
                 st.rerun()
         with _ca:
-            if st.button("▶ 全折畳", key="_collapse_all", use_container_width=True):
+            if st.button("▶ 全折畳", key="_collapse_all", width="stretch"):
                 for _p in _proc_items:
                     st.session_state[f"_sum_exp_{_p['proc']}"] = False
                 st.rerun()
@@ -1759,7 +1759,7 @@ with _page_tabs[0]:
                 if st.button(
                     "▼" if _is_exp else "▶",
                     key=f"_sum_tog_{_item['proc']}",
-                    use_container_width=True,
+                    width="stretch",
                 ):
                     st.session_state[f"_sum_exp_{_item['proc']}"] = not _is_exp
                     st.rerun()
@@ -1889,11 +1889,11 @@ with _page_tabs[0]:
                 )
             with cyc_col:
                 if st.button("⚙️", key=f"open_cyc_{pname}",
-                             use_container_width=True, help="サイクル設定"):
+                             width="stretch", help="サイクル設定"):
                     cycle_settings_dialog(pname, bool_cols, df)
             with add_col:
                 if st.button("＋ ステップを追加", key=f"open_add_{pname}",
-                             use_container_width=True, type="primary"):
+                             width="stretch", type="primary"):
                     add_step_dialog(pname, bool_cols, df)
 
             new_name_stripped = new_name.strip()
@@ -1944,7 +1944,7 @@ with _page_tabs[0]:
                         if st.button(
                             f"{icon} {lbl}",
                             key=f"chip_{pname}_{ci}",
-                            use_container_width=True,
+                            width="stretch",
                             help="クリックして編集",
                         ):
                             edit_step_dialog(pname, ci, bool_cols, df)
@@ -2016,7 +2016,7 @@ with _page_tabs[0]:
 
                         # ── ガントチャート（クリックでステップ詳細連動）──
                         gantt_event = st.plotly_chart(
-                            fig_gantt, use_container_width=True,
+                            fig_gantt, width="stretch",
                             key=f"gantt_{pname}", on_select="rerun",
                         )
                         try:
@@ -2115,7 +2115,7 @@ with _page_tabs[0]:
                             }
                             rows.append(row)
                         st.dataframe(pd.DataFrame(rows), hide_index=True,
-                                     use_container_width=True)
+                                     width="stretch")
                         if takt_target == 0:
                             st.caption("💡 Cpk を表示するにはサイクル設定でタクト目標を設定してください")
 
@@ -2147,7 +2147,7 @@ with _page_tabs[0]:
                             if st.button(
                                 "📐 基準値を登録・編集",
                                 key=f"bl_btn_{pname}",
-                                use_container_width=True,
+                                width="stretch",
                                 disabled=not step_stats,
                             ):
                                 baseline_dialog(pname, step_stats, result_df)
@@ -2189,7 +2189,7 @@ with _page_tabs[0]:
                     tabs = st.tabs(["サイクル一覧", "ヒストグラム", "時系列波形", "📈 トレンド"])
 
                     with tabs[0]:
-                        st.dataframe(result_df, use_container_width=True)
+                        st.dataframe(result_df, width="stretch")
                         st.download_button("CSVダウンロード",
                                            result_df.to_csv(index=False, encoding="utf-8-sig"),
                                            f"{pname}_cycles.csv", key=f"dl_csv_{pname}")
@@ -2223,7 +2223,7 @@ with _page_tabs[0]:
                                           annotation_text=f"3σ {sg3:.1f}ms")
                             fig.update_layout(title=vn, xaxis_title="時間[ms]",
                                               barmode="overlay", height=250, margin=dict(t=28))
-                            st.plotly_chart(fig, use_container_width=True, key=f"t2_{pname}_{vn}")
+                            st.plotly_chart(fig, width="stretch", key=f"t2_{pname}_{vn}")
                             st.slider("ビン数", 3, 60, nb, key=f"_bins_{_bkey_t}",
                                       help="ヒストグラムのビン数を手動調整（Freedman-Diaconis による自動算出が既定値）")
                             if st_:
@@ -2258,7 +2258,7 @@ with _page_tabs[0]:
                                     fig.add_vline(x=df.loc[idx_c, "Timestamp"],
                                                   line=dict(color="green", width=0.5, dash="dash"))
                             fig.update_layout(xaxis_title="時刻", height=420)
-                            st.plotly_chart(fig, use_container_width=True, key=f"t3_{pname}")
+                            st.plotly_chart(fig, width="stretch", key=f"t3_{pname}")
 
                     with tabs[3]:
                         # B-1: トレンドチャート
@@ -2273,7 +2273,7 @@ with _page_tabs[0]:
                                 "各サイクルの遅れ時間推移。赤丸は外れ値（|値-平均| > 2σ）、"
                                 "点線は mean+3σ 上限。"
                             )
-                            st.plotly_chart(_trend_fig, use_container_width=True,
+                            st.plotly_chart(_trend_fig, width="stretch",
                                             key=f"trend_{pname}")
                         else:
                             st.info("トレンドを表示するにはステップを追加してください")
@@ -2379,7 +2379,7 @@ with _page_tabs[0]:
                         showlegend=False,
                         plot_bgcolor="white",
                     )
-                    st.plotly_chart(fig_cmp, use_container_width=True,
+                    st.plotly_chart(fig_cmp, width="stretch",
                                     key="cmp_gantt_multi")
 
                     # 工程別タクト消費サマリー
@@ -2401,7 +2401,7 @@ with _page_tabs[0]:
                         })
                     if rows_cmp:
                         st.dataframe(pd.DataFrame(rows_cmp), hide_index=True,
-                                     use_container_width=True)
+                                     width="stretch")
                 else:
                     st.info("比較対象の工程にステップが設定されていません。")
 
@@ -2445,7 +2445,7 @@ with _page_tabs[1]:
             with _evc:
                 if ev_page_key in st.session_state:
                     if st.button("✕ クリア", key=f"ev_page_clr_{_ev_pname}",
-                                 use_container_width=True):
+                                 width="stretch"):
                         del st.session_state[ev_page_key]
                         st.session_state.pop(f"{ev_page_key}_sig", None)
                         st.rerun()
@@ -2479,7 +2479,7 @@ with _page_tabs[1]:
                     )
                     if _ev_fig:
                         st.markdown("**ガントチャート（評価データ）**")
-                        st.plotly_chart(_ev_fig, use_container_width=True,
+                        st.plotly_chart(_ev_fig, width="stretch",
                                         key=f"evpage_gantt_{_ev_pname}")
 
                     # σ倍率 & サマリーテーブル
@@ -2517,7 +2517,7 @@ with _page_tabs[1]:
                     if _ev_delta_rows:
                         st.markdown("**ステップ別サマリー**")
                         st.dataframe(pd.DataFrame(_ev_delta_rows),
-                                     hide_index=True, use_container_width=True)
+                                     hide_index=True, width="stretch")
 
                     # ステップ詳細（差分ヒストグラム）
                     st.divider()
@@ -2581,7 +2581,7 @@ with _page_tabs[1]:
                         "🔴 NG" if ng else "🟢 OK" for ng in _ng_any
                     ]
                     if not _ev_cyc_df.empty:
-                        st.dataframe(_ev_cyc_df, hide_index=True, use_container_width=True)
+                        st.dataframe(_ev_cyc_df, hide_index=True, width="stretch")
                         st.download_button(
                             "サイクル判定CSVダウンロード",
                             _ev_cyc_df.to_csv(index=False, encoding="utf-8-sig"),
@@ -2655,7 +2655,7 @@ with _page_tabs[2]:
                 st.divider()
                 if st.button(
                     "📊 傾向解析を実行", type="primary",
-                    use_container_width=True, key=f"tr_run_{_tr_pname}",
+                    width="stretch", key=f"tr_run_{_tr_pname}",
                 ):
                     _tr_steps_json = json.dumps(_tr_steps)
                     _res_list = []
@@ -2803,7 +2803,7 @@ with _page_tabs[2]:
                                 legend=dict(orientation="h", y=1.05, x=1, xanchor="right"),
                                 hovermode="x unified",
                             )
-                            st.plotly_chart(_fig_tr, use_container_width=True)
+                            st.plotly_chart(_fig_tr, width="stretch")
 
                     # ══════════════════════════════════════════════════
                     # B) Xbar-R 管理図
@@ -3016,7 +3016,7 @@ with _page_tabs[2]:
                                     f"{'S' if _use_s else 'R'} 管理外 {_sub_ng_cnt} 点"
                                 )
 
-                            st.plotly_chart(_fig_xbr, use_container_width=True,
+                            st.plotly_chart(_fig_xbr, width="stretch",
                                             key=f"xbr_{_tr_pname}_{_tsn}")
 
                     # ── サマリーテーブル ────────────────────────────
@@ -3025,7 +3025,7 @@ with _page_tabs[2]:
                         st.markdown("#### 📋 サマリーテーブル（平均 ± σ）")
                         st.caption("🔴 は基準値から±Nσ 以上の逸脱")
                         _tr_sum_df = pd.DataFrame(_tr_summary_rows)
-                        st.dataframe(_tr_sum_df, hide_index=True, use_container_width=True)
+                        st.dataframe(_tr_sum_df, hide_index=True, width="stretch")
 
                         # CSV ダウンロード
                         _tr_dl_rows = []
@@ -3060,7 +3060,7 @@ with _page_tabs[2]:
                                 ),
                                 f"{_tr_pname}_trend.csv",
                                 key=f"tr_dl_{_tr_pname}",
-                                use_container_width=True,
+                                width="stretch",
                             )
             else:
                 st.info("CSVファイルをアップロードして「傾向解析を実行」を押してください")

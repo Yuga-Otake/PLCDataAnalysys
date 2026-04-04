@@ -285,7 +285,7 @@ edited = st.data_editor(
         "推定周期[ms]": st.column_config.NumberColumn("推定周期[ms]", format="%.1f"),
         "推奨分類":     st.column_config.TextColumn("推奨分類", width="medium"),
     },
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     key="nav_editor",
     height=420,
