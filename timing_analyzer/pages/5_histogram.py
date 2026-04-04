@@ -144,16 +144,22 @@ with ctrl3:
 st.divider()
 
 # ── ヒストグラム描画 ──────────────────────────────────────────────
+# 共通ビン幅を全データから一括計算（分割後も同一幅を使う）
+_vmin  = float(vals_plot.min())
+_vmax  = float(vals_plot.max())
+_bsize = (_vmax - _vmin) / n_bins if n_bins > 0 and _vmax > _vmin else 1.0
+_xbins = dict(start=_vmin, end=_vmax + _bsize, size=_bsize)
+
 fig = go.Figure()
 
 if threshold > 0 and not _delta_mode:
     below = vals_plot[vals_plot <= threshold]
     above = vals_plot[vals_plot >  threshold]
     if len(below):
-        fig.add_trace(go.Histogram(x=below, nbinsx=n_bins, name="閾値以内",
+        fig.add_trace(go.Histogram(x=below, xbins=_xbins, name="閾値以内",
                                    marker_color="royalblue", opacity=0.78))
     if len(above):
-        fig.add_trace(go.Histogram(x=above, nbinsx=n_bins, name="閾値超過",
+        fig.add_trace(go.Histogram(x=above, xbins=_xbins, name="閾値超過",
                                    marker_color="crimson",   opacity=0.78))
     fig.add_vline(x=threshold, line_dash="dash", line_color="orange",
                   annotation_text=f"閾値 {threshold:.1f} ms",
@@ -164,10 +170,10 @@ elif _delta_mode and _bl_std > 0:
     in_r  = vals_plot[np.abs(vals_plot) <= _t3]
     out_r = vals_plot[np.abs(vals_plot) >  _t3]
     if len(in_r):
-        fig.add_trace(go.Histogram(x=in_r, nbinsx=n_bins, name="±3σ以内",
+        fig.add_trace(go.Histogram(x=in_r, xbins=_xbins, name="±3σ以内",
                                    marker_color="royalblue", opacity=0.78))
     if len(out_r):
-        fig.add_trace(go.Histogram(x=out_r, nbinsx=n_bins, name="±3σ超過",
+        fig.add_trace(go.Histogram(x=out_r, xbins=_xbins, name="±3σ超過",
                                    marker_color="crimson",   opacity=0.78))
     fig.add_vline(x= _t3, line_dash="dash", line_color="orange",
                   annotation_text=f"+3σ ({_t3:.1f} ms)", annotation_position="top right")
@@ -175,7 +181,7 @@ elif _delta_mode and _bl_std > 0:
                   annotation_text=f"-3σ ({_t3:.1f} ms)", annotation_position="top left")
 
 else:
-    fig.add_trace(go.Histogram(x=vals_plot, nbinsx=n_bins,
+    fig.add_trace(go.Histogram(x=vals_plot, xbins=_xbins,
                                marker_color="steelblue", opacity=0.82))
 
 # 基準線
