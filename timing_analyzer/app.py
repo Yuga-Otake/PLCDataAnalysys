@@ -498,6 +498,165 @@ def detect_outliers_iqr(result_df: pd.DataFrame, step_stats: list) -> list:
 
 
 # ═══════════════════════════════════════════════════════════════
+# 波形監視ヘルパー（UIなし・再利用可能）
+# ═══════════════════════════════════════════════════════════════
+
+def _get_wv_cfg(pname: str, step_name: str, var: str) -> dict:
+    """_render_waveform_overlay が使うウィジェットキーから設定を読み取る（デフォルト付き）"""
+    _vkey = f"wvol_{pname}_{step_name}_{var}"
+    return {
+        "win_pre":        int(st.session_state.get(f"{_vkey}_wpre",   50)),
+        "win_post":       int(st.session_state.get(f"{_vkey}_wpost",  300)),
+        "insp_type":      st.session_state.get(f"{_vkey}_itype",  "時間軸"),
+        "insp_s":         float(st.session_state.get(f"{_vkey}_is",     0)),
+        "insp_e":         float(st.session_state.get(f"{_vkey}_ie",   200)),
+        "insp_trig_val":  float(st.session_state.get(f"{_vkey}_itv",   1.0)),
+        "insp_trig_pre":  float(st.session_state.get(f"{_vkey}_itpre", 10)),
+        "insp_trig_post": float(st.session_state.get(f"{_vkey}_itpost",150)),
+        "good_mode":      st.session_state.get(f"{_vkey}_gmode", "手動入力"),
+        "good_lo":        float(st.session_state.get(f"{_vkey}_glo",   0.0)),
+        "good_hi":        float(st.session_state.get(f"{_vkey}_ghi",   0.0)),
+        "good_nsig":      float(st.session_state.get(f"{_vkey}_nsig",  3.0)),
+    }
+
+
+def _compute_wv_ng(df: pd.DataFrame, trigger_col: str, edge: str,
+                   step: dict, pname: str, result_df: pd.DataFrame) -> dict:
+    """
+    波形NG判定をUIなしで実行。新データ評価・傾向解析から呼び出す。
+
+    Returns:
+        {var: {"ng_count": int, "total": int, "ng_flags": list[bool], "peaks": list[float]}}
+        peaks = 各サイクルの検査ウィンドウ内最大値
+    """
+    mode          = step.get("mode", "single")
+    name          = step.get("name", "")
+    waveform_vars = [v for v in step.get("waveform_vars", []) if v in df.columns]
+    if not waveform_vars:
+        return {}
+
+    start_col = f"{name}_遅れ[ms]" if mode == "single" else f"{name}_start[ms]"
+    if start_col not in result_df.columns:
+        return {}
+
+    start_offsets = result_df[start_col].values
+    try:
+        waveforms = cached_waveforms(df, trigger_col, edge, tuple(waveform_vars))
+    except Exception:
+        return {}
+
+    n_cyc = min(len(waveforms), len(start_offsets))
+    if n_cyc == 0:
+        return {}
+
+    _wv_bl = st.session_state.get(pk(pname, "wv_baseline"), {})
+    out    = {}
+
+    for var in waveform_vars:
+        cfg      = _get_wv_cfg(pname, name, var)
+        win_pre  = cfg["win_pre"]
+        win_post = cfg["win_post"]
+
+        # 波形データ抽出（ステップ開始基準）
+        step_waves = []
+        for i in range(n_cyc):
+            cyc      = waveforms[i]
+            step_off = float(start_offsets[i]) if not np.isnan(start_offsets[i]) else None
+            if step_off is None or var not in cyc.columns:
+                continue
+            t_step = cyc["time_offset_ms"].values - step_off
+            v_arr  = cyc[var].values.astype(np.float64)
+            mask   = (t_step >= -win_pre) & (t_step <= win_post)
+            if mask.sum() < 2:
+                continue
+            step_waves.append((t_step[mask], v_arr[mask]))
+
+        if not step_waves:
+            continue
+
+        # エンベロープ計算
+        t_common = np.linspace(-win_pre, win_post, 500)
+        mat = np.full((len(step_waves), len(t_common)), np.nan)
+        for j, (t_sw, v_sw) in enumerate(step_waves):
+            idx      = np.searchsorted(t_sw, t_common).clip(0, len(t_sw) - 1)
+            in_range = (t_common >= t_sw[0]) & (t_common <= t_sw[-1])
+            mat[j, in_range] = v_sw[idx[in_range]]
+        mean_v = np.nanmean(mat, axis=0)
+        std_v  = np.nanstd(mat,  axis=0)
+
+        # 良品範囲
+        good_mode = cfg["good_mode"]
+        if good_mode == "自動（基準±Nσ）":
+            good_nsig = cfg["good_nsig"]
+            bl        = _wv_bl.get(f"{pname}_{name}_{var}", {})
+            if bl:
+                _t_bl   = np.array(bl["t"])
+                _m_bl   = np.interp(t_common, _t_bl, np.array(bl["mean"]))
+                _s_bl   = np.interp(t_common, _t_bl, np.array(bl["std"]))
+                env_hi  = _m_bl + good_nsig * _s_bl
+                env_lo  = _m_bl - good_nsig * _s_bl
+            else:
+                env_hi  = mean_v + good_nsig * std_v
+                env_lo  = mean_v - good_nsig * std_v
+            has_envelope = True
+        else:
+            glo = cfg["good_lo"]
+            ghi = cfg["good_hi"]
+            has_envelope = glo < ghi
+            env_hi = np.full_like(t_common, ghi) if has_envelope else None
+            env_lo = np.full_like(t_common, glo) if has_envelope else None
+
+        # 検査ウィンドウ・NG判定・ピーク収集
+        insp_type = cfg["insp_type"]
+        ng_flags  = []
+        peaks     = []
+
+        for _j, (t_sw, v_sw) in enumerate(step_waves):
+            # 検査ウィンドウ確定
+            if insp_type == "時間軸":
+                _win = (cfg["insp_s"], cfg["insp_e"])
+            else:
+                _over = np.where(v_sw >= cfg["insp_trig_val"])[0]
+                if len(_over) > 0:
+                    _t0  = float(t_sw[_over[0]])
+                    _win = (_t0 - cfg["insp_trig_pre"], _t0 + cfg["insp_trig_post"])
+                else:
+                    _win = None
+
+            # ピーク収集（検査ウィンドウ内最大値）
+            if _win is not None:
+                _ws, _we  = _win
+                _mask_i   = (t_sw >= _ws) & (t_sw <= _we)
+                peaks.append(float(np.max(v_sw[_mask_i])) if _mask_i.sum() > 0 else float(np.max(v_sw)))
+            else:
+                peaks.append(float(np.max(v_sw)))
+
+            # NG判定
+            if not has_envelope or _win is None:
+                ng_flags.append(False)
+                continue
+            _ws, _we = _win
+            _mask_i  = (t_sw >= _ws) & (t_sw <= _we)
+            if _mask_i.sum() == 0:
+                ng_flags.append(False)
+                continue
+            _t_i  = t_sw[_mask_i]
+            _v_i  = v_sw[_mask_i]
+            _hi_i = np.interp(_t_i, t_common, env_hi)
+            _lo_i = np.interp(_t_i, t_common, env_lo)
+            ng_flags.append(bool(np.any(_v_i > _hi_i) or np.any(_v_i < _lo_i)))
+
+        out[var] = {
+            "ng_count": sum(ng_flags),
+            "total":    len(ng_flags),
+            "ng_flags": ng_flags,
+            "peaks":    peaks,
+        }
+
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════
 # 波形監視オーバーレイ
 # ═══════════════════════════════════════════════════════════════
 
@@ -1859,6 +2018,7 @@ with st.sidebar:
             df, col_types = cached_load_sample(sample_path)
             st.success(f"sample_playback.csv（{len(df):,}行）")
             st.session_state["df"] = df
+            st.session_state["col_types"] = col_types
             st.session_state["uploaded_filename"] = "sample_playback.csv"
         except FileNotFoundError:
             st.error("sample_playback.csv が見つかりません")
@@ -1871,6 +2031,7 @@ with st.sidebar:
                 col_types = detect_bool_columns(df)
                 st.success(f"{len(df):,}行 読み込み完了")
                 st.session_state["df"] = df
+                st.session_state["col_types"] = col_types
                 st.session_state["uploaded_filename"] = uploaded.name
             except Exception as e:
                 st.error(f"読み込みエラー: {e}")
@@ -2857,6 +3018,48 @@ with _page_tabs[1]:
                         st.dataframe(pd.DataFrame(_ev_delta_rows),
                                      hide_index=True, width="stretch")
 
+                    # ── 波形監視 NG サマリー ──────────────────────────
+                    _wv_ng_by_step: dict = {}   # {step_name: {var: result_dict}}
+                    _wv_ng_rows = []
+                    for _ev_s in _ev_steps:
+                        _ev_sn  = _ev_s.get("name", "")
+                        _ev_wvv = [v for v in _ev_s.get("waveform_vars", [])
+                                   if v in _ev_df.columns]
+                        if not _ev_wvv:
+                            continue
+                        _ev_stat_s = next(
+                            (s for s in (_ev_step_stats or []) if s["name"] == _ev_sn), None
+                        )
+                        if _ev_stat_s is None:
+                            continue
+                        try:
+                            _ev_wv_res = _compute_wv_ng(
+                                _ev_df, _ev_trigger, _ev_edge,
+                                _ev_s, _ev_pname, _ev_result,
+                            )
+                        except Exception:
+                            _ev_wv_res = {}
+                        _wv_ng_by_step[_ev_sn] = _ev_wv_res
+                        for _ev_v, _ev_r in _ev_wv_res.items():
+                            _ev_nr = (
+                                _ev_r["ng_count"] / _ev_r["total"] * 100
+                                if _ev_r["total"] > 0 else 0.0
+                            )
+                            _wv_ng_rows.append({
+                                "ステップ":   _ev_sn,
+                                "変数":      _ev_v,
+                                "サイクル数":  _ev_r["total"],
+                                "NG数":      _ev_r["ng_count"],
+                                "NG率":      f"{_ev_nr:.1f}%",
+                                "判定":      "🔴" if _ev_r["ng_count"] > 0 else "🟢",
+                            })
+                    if _wv_ng_rows:
+                        st.markdown("**📈 波形監視 NG サマリー**")
+                        st.dataframe(
+                            pd.DataFrame(_wv_ng_rows),
+                            hide_index=True, width="stretch",
+                        )
+
                     # ステップ詳細（差分ヒストグラム）
                     st.divider()
                     st.markdown("**ステップ詳細（基準値との差分）**")
@@ -2915,6 +3118,18 @@ with _page_tabs[1]:
                             f"{'🔴 ' if ng else ''}{d:+.1f}ms" if pd.notna(d) else ""
                             for d, ng in zip(_delta_s, _is_ng_s)
                         ]
+                    # 波形NG列を追加（_wv_ng_by_step は上の波形NGサマリーブロックで計算済み）
+                    for _sn_w, _wv_res_w in _wv_ng_by_step.items():
+                        for _v_w, _wr_w in _wv_res_w.items():
+                            _flags_w = _wr_w.get("ng_flags", [])
+                            # サイクル数が result と一致しない場合はパディング
+                            _padded = (_flags_w + [False] * len(_ev_result))[:len(_ev_result)]
+                            _wv_ng_s = pd.Series(_padded, index=_ev_result.index)
+                            _ng_any |= _wv_ng_s
+                            _col_label = f"📈{_sn_w}\n{_v_w}"
+                            _ev_cyc_df[_col_label] = [
+                                "🔴 NG" if ng else "" for ng in _wv_ng_s
+                            ]
                     _ev_cyc_df["総合判定"] = [
                         "🔴 NG" if ng else "🟢 OK" for ng in _ng_any
                     ]
@@ -3009,8 +3224,21 @@ with _page_tabs[2]:
                                 _tdf, _tr_trigger, _tr_edge, _tr_steps_json
                             )
                             _lbl = st.session_state[_tr_labels_key].get(_tf.name, _tf.name)
+                            # 波形NG統計を計算（waveform_vars が設定されたステップのみ）
+                            _wv_stats_tr: dict = {}
+                            for _step_cfg_tr in _tr_steps:
+                                if _step_cfg_tr.get("waveform_vars"):
+                                    _sn_tr = _step_cfg_tr.get("name", "")
+                                    try:
+                                        _wv_stats_tr[_sn_tr] = _compute_wv_ng(
+                                            _tdf, _tr_trigger, _tr_edge,
+                                            _step_cfg_tr, _tr_pname, _tres,
+                                        )
+                                    except Exception:
+                                        pass
                             _res_list.append(
-                                {"label": _lbl, "fname": _tf.name, "result": _tres}
+                                {"label": _lbl, "fname": _tf.name,
+                                 "result": _tres, "wv_stats": _wv_stats_tr}
                             )
                         except Exception as _te:
                             st.warning(f"{_tf.name}: 解析失敗 ({_te})")
@@ -3400,5 +3628,97 @@ with _page_tabs[2]:
                                 key=f"tr_dl_{_tr_pname}",
                                 width="stretch",
                             )
+
+                    # ── 波形監視トレンド ────────────────────────────
+                    _wv_tr_steps = [s for s in _tr_steps if s.get("waveform_vars")]
+                    _has_wv_data = any(
+                        _r.get("wv_stats") for _r in _tr_res_list
+                    )
+                    if _wv_tr_steps and _has_wv_data:
+                        st.divider()
+                        st.markdown("#### 📈 波形監視トレンド")
+                        st.caption(
+                            "各時期の波形ピーク値（検査ウィンドウ内最大値の平均）と NG 率の推移。"
+                            "良品範囲が設定されているステップ・変数のみ NG 判定が有効です。"
+                        )
+
+                        for _wvs_step in _wv_tr_steps:
+                            _wvs_sn  = _wvs_step["name"]
+                            _wvs_col = _wvs_step.get("color", "#4472C4")
+                            for _wvs_var in _wvs_step.get("waveform_vars", []):
+                                # ファイル毎の統計収集
+                                _wvt_lbls, _wvt_peaks, _wvt_ng_rates = [], [], []
+                                for _rr in _tr_res_list:
+                                    _rvs = (_rr.get("wv_stats") or {}).get(_wvs_sn, {}).get(_wvs_var)
+                                    if not _rvs or _rvs["total"] == 0:
+                                        continue
+                                    _wvt_lbls.append(_rr["label"])
+                                    _wvt_peaks.append(
+                                        float(np.mean(_rvs["peaks"])) if _rvs["peaks"] else 0.0
+                                    )
+                                    _wvt_ng_rates.append(
+                                        _rvs["ng_count"] / _rvs["total"] * 100
+                                    )
+
+                                if len(_wvt_lbls) < 2:
+                                    continue
+
+                                _fig_wvt = make_subplots(
+                                    rows=2, cols=1, shared_xaxes=True,
+                                    subplot_titles=(
+                                        "ピーク値トレンド（検査ウィンドウ内最大値の時期別平均）",
+                                        "NG率トレンド [%]",
+                                    ),
+                                    vertical_spacing=0.18,
+                                    row_heights=[0.6, 0.4],
+                                )
+
+                                # ピーク値折れ線
+                                _hex_w = _wvs_col.lstrip("#")
+                                _rgb_w = (
+                                    tuple(int(_hex_w[i:i+2], 16) for i in (0, 2, 4))
+                                    if len(_hex_w) == 6 else (68, 114, 196)
+                                )
+                                _fill_w = f"rgba({_rgb_w[0]},{_rgb_w[1]},{_rgb_w[2]},0.15)"
+                                _fig_wvt.add_trace(go.Scatter(
+                                    x=_wvt_lbls, y=_wvt_peaks,
+                                    mode="lines+markers",
+                                    name="ピーク平均",
+                                    line=dict(color=_wvs_col, width=2),
+                                    marker=dict(size=9, color=_wvs_col,
+                                                line=dict(width=1.5, color="white")),
+                                    hovertemplate="%{x}<br>ピーク平均: %{y:.3f}<extra></extra>",
+                                ), row=1, col=1)
+
+                                # NG率棒グラフ
+                                _ng_bar_cols = [
+                                    "#e74c3c" if r > 0 else "#27ae60" for r in _wvt_ng_rates
+                                ]
+                                _fig_wvt.add_trace(go.Bar(
+                                    x=_wvt_lbls, y=_wvt_ng_rates,
+                                    name="NG率",
+                                    marker_color=_ng_bar_cols,
+                                    hovertemplate="%{x}<br>NG率: %{y:.1f}%<extra></extra>",
+                                ), row=2, col=1)
+
+                                _fig_wvt.update_layout(
+                                    title=dict(
+                                        text=f"<b>{_wvs_sn}　/　{_wvs_var}</b>　波形監視トレンド",
+                                        font=dict(size=14),
+                                    ),
+                                    height=420,
+                                    margin=dict(t=60, b=48, l=80, r=40),
+                                    showlegend=True,
+                                    legend=dict(orientation="h", y=1.04, x=1, xanchor="right"),
+                                    hovermode="x unified",
+                                )
+                                _fig_wvt.update_yaxes(title_text=_wvs_var, row=1, col=1)
+                                _fig_wvt.update_yaxes(title_text="NG率 [%]", row=2, col=1)
+                                _fig_wvt.update_xaxes(title_text="時期", row=2, col=1)
+                                st.plotly_chart(
+                                    _fig_wvt, width="stretch",
+                                    key=f"wvtr_{_tr_pname}_{_wvs_sn}_{_wvs_var}",
+                                )
+
             else:
                 st.info("CSVファイルをアップロードして「傾向解析を実行」を押してください")
