@@ -798,6 +798,55 @@ _d2v_max_ref = _slope_diff_max_ref_t
 _d2y_max_ref = _slope_diff_max_ref_xy
 
 
+def _select_nth_pts(pts: list, nth: int) -> list:
+    """
+    pts: list of (coord, value) tuples, coord 昇順ソート済み。
+    nth: 0=全て, 1=最初, 2=2番目, ..., -1=最後, -2=後ろから2番目。
+    IndexError の場合は空リストを返す。
+    """
+    if nth == 0 or not pts:
+        return pts
+    try:
+        return [pts[nth - 1 if nth > 0 else nth]]
+    except IndexError:
+        return []
+
+
+def _detect_threshold_crossings(coord: np.ndarray, v: np.ndarray,
+                                 threshold: float,
+                                 direction: str = "rise",
+                                 range_s=None, range_e=None) -> list:
+    """
+    coord/v が同長の配列（coord は昇順）でスカラー閾値 threshold を
+    v が超える（上昇）または下回る（下降）座標を返す。
+    direction: "rise" | "fall" | "both"
+    Returns: list of (coord_cross, threshold) tuples
+    """
+    if len(coord) < 2:
+        return []
+    mask = np.ones(len(coord), dtype=bool)
+    if range_s is not None:
+        mask &= coord >= range_s
+    if range_e is not None:
+        mask &= coord <= range_e
+    coord, v = coord[mask], v[mask]
+    if len(coord) < 2:
+        return []
+    crossings = []
+    for i in range(1, len(v)):
+        dv = float(v[i] - v[i - 1])
+        dc = float(coord[i] - coord[i - 1])
+        if direction in ("rise", "both") and v[i - 1] < threshold <= v[i]:
+            c = (float(coord[i - 1]) + (threshold - float(v[i - 1])) / dv * dc
+                 if dv != 0 else float(coord[i]))
+            crossings.append((c, float(threshold)))
+        elif direction in ("fall", "both") and v[i - 1] >= threshold > v[i]:
+            c = (float(coord[i - 1]) + (float(v[i - 1]) - threshold) / (-dv) * dc
+                 if dv != 0 else float(coord[i]))
+            crossings.append((c, float(threshold)))
+    return crossings
+
+
 def _render_item_insp_win_t(dkey: str, step_waves: list,
                              insp_windows_global: list) -> list:
     """
@@ -1283,7 +1332,8 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                 st.session_state[_tdet_cnt_key] = 0
             _tdet_list = st.session_state[_tdet_list_key]
 
-            _DET_TYPES_T = ["傾き変化点", "上下判定比較", "最大値検査", "最小値検査", "検出点比較"]
+            _DET_TYPES_T = ["傾き変化点", "閾値超え検出", "上下判定比較",
+                            "最大値検査", "最小値検査", "検出点比較"]
             _DET_COLORS  = ["darkorange", "deeppink", "limegreen", "dodgerblue", "gold"]
 
             _add_ca, _add_cb = st.columns([2, 4])
@@ -1311,7 +1361,8 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                 _dtype = _det["type"]
                 _dkey  = f"{_vkey}_{_did}"
                 _color = _DET_COLORS[_di % len(_DET_COLORS)]
-                _icon  = "📐" if _dtype == "傾き変化点" else "📏"
+                _icon  = {"傾き変化点": "📐", "閾値超え検出": "🎯",
+                          "上下判定比較": "📊", "検出点比較": "🔲"}.get(_dtype, "📏")
 
                 with st.expander(f"{_icon} #{_di+1} {_dtype}", expanded=True):
                     _hd, _del_btn = st.columns([8, 1])
@@ -1400,9 +1451,20 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                             y_label=var, chart_key=f"{_dkey}_preview",
                         )
 
+                        # N番目の点
+                        _nth_c1, _nth_c2 = st.columns([2, 4])
+                        with _nth_c1:
+                            st.markdown("**🎯 使用する点**")
+                        with _nth_c2:
+                            st.number_input(
+                                "N番目（0=全て, 1=最初, -1=最後）",
+                                value=0, step=1, key=f"{_dkey}_nth",
+                                help="サイクルごとにN番目の検出点のみ使用。0=全点。")
+
                         # 全サイクルから検出点収集
                         _det_on  = bool(st.session_state.get(f"{_dkey}_on", False))
                         _det_thr = float(st.session_state.get(f"{_dkey}_thresh", 0.0))
+                        _det_nth = int(st.session_state.get(f"{_dkey}_nth", 0))
                         if _det_on and _det_thr > 0:
                             _mkt, _mkv = [], []
                             for (t_sw, v_sw) in step_waves:
@@ -1412,9 +1474,10 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     threshold=_det_thr,
                                     range_s=_rs_d, range_e=_re_d,
                                     detect_increase=_dinc, detect_decrease=_ddec)
-                                for ti in _ts:
-                                    _mkt.append(float(ti))
-                                    _mkv.append(float(np.interp(ti, t_sw, v_sw)))
+                                _pts = [(float(ti), float(np.interp(ti, t_sw, v_sw)))
+                                        for ti in _ts]
+                                for ti, vi in _select_nth_pts(_pts, _det_nth):
+                                    _mkt.append(ti); _mkv.append(vi)
                             if _mkt:
                                 all_inf_markers.append({
                                     "t": _mkt, "v": _mkv,
@@ -1657,6 +1720,76 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     peak_ng_flags[j] = True
                                 if _det_lo != 0.0 and _val < _det_lo:
                                     peak_ng_flags[j] = True
+
+                    elif _dtype == "閾値超え検出":
+                        # ── 閾値超え検出 ─────────────────────────────
+                        st.caption(
+                            "波形値が閾値を超えた（または下回った）瞬間を検出します。"
+                            "N番目の交差点のみを使うことも可能です。"
+                        )
+                        _thc1, _thc2, _thc3 = st.columns([3, 3, 1])
+                        with _thc1:
+                            st.markdown("**閾値**")
+                            st.number_input("閾値", value=1.0, step=0.1,
+                                            key=f"{_dkey}_tv")
+                        with _thc2:
+                            st.markdown("**方向**")
+                            st.radio("方向", ["上昇 ↑", "下降 ↓", "両方"],
+                                     horizontal=True, key=f"{_dkey}_tdir")
+                        with _thc3:
+                            st.markdown("**有効**")
+                            st.checkbox("ON", key=f"{_dkey}_on")
+
+                        _nth_c1, _nth_c2 = st.columns([2, 4])
+                        with _nth_c1:
+                            st.markdown("**🎯 使用する点**")
+                        with _nth_c2:
+                            st.number_input(
+                                "N番目（0=全て, 1=最初, -1=最後）",
+                                value=1, step=1, key=f"{_dkey}_nth",
+                                help="サイクルごとにN番目の交差点のみ使用。0=全点。")
+
+                        _rng_tc1, _rng_tc2, _rng_tc3 = st.columns([1, 2, 2])
+                        with _rng_tc1:
+                            st.markdown("**🔍 検出範囲 [ms]**")
+                            st.checkbox("指定する", key=f"{_dkey}_use_range")
+                        _use_rng_t = bool(st.session_state.get(
+                            f"{_dkey}_use_range", False))
+                        with _rng_tc2:
+                            st.number_input("開始", value=0.0, step=5.0,
+                                            key=f"{_dkey}_range_s",
+                                            disabled=not _use_rng_t)
+                        with _rng_tc3:
+                            st.number_input("終了", value=200.0, step=5.0,
+                                            key=f"{_dkey}_range_e",
+                                            disabled=not _use_rng_t)
+
+                        _tv_val   = float(st.session_state.get(f"{_dkey}_tv", 1.0))
+                        _tdir_raw = st.session_state.get(f"{_dkey}_tdir", "上昇 ↑")
+                        _tdir_str = ("rise" if "上昇" in _tdir_raw
+                                     else "fall" if "下降" in _tdir_raw else "both")
+                        _t_nth    = int(st.session_state.get(f"{_dkey}_nth", 1))
+                        _t_det_on = bool(st.session_state.get(f"{_dkey}_on", False))
+                        _t_rs     = float(st.session_state.get(
+                            f"{_dkey}_range_s", 0.0)) if _use_rng_t else None
+                        _t_re     = float(st.session_state.get(
+                            f"{_dkey}_range_e", 200.0)) if _use_rng_t else None
+
+                        if _t_det_on:
+                            _tmkt, _tmkv = [], []
+                            for (t_sw, v_sw) in step_waves:
+                                _crs = _detect_threshold_crossings(
+                                    t_sw, v_sw, _tv_val,
+                                    direction=_tdir_str,
+                                    range_s=_t_rs, range_e=_t_re)
+                                for tc, vc in _select_nth_pts(_crs, _t_nth):
+                                    _tmkt.append(tc); _tmkv.append(vc)
+                            if _tmkt:
+                                all_inf_markers.append({
+                                    "t": _tmkt, "v": _tmkv,
+                                    "label": f"#{_di+1} 閾値超え ({len(_tmkt)}点)",
+                                    "color": _color,
+                                })
 
                     else:  # 検出点比較
                         # ── 検出点比較 ─────────────────────────────
@@ -2110,7 +2243,8 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                         st.session_state[_xydet_cnt_key] = 0
                     _xydet_list = st.session_state[_xydet_list_key]
 
-                    _DET_TYPES_XY = ["傾き変化点", "上下判定比較", "Y最大値検査", "Y最小値検査", "検出点比較"]
+                    _DET_TYPES_XY = ["傾き変化点", "閾値超え検出", "上下判定比較",
+                                     "Y最大値検査", "Y最小値検査", "検出点比較"]
                     _DET_COLORS_XY = ["darkorange", "deeppink", "limegreen", "dodgerblue", "gold"]
 
                     _xy_add_ca, _xy_add_cb = st.columns([2, 4])
@@ -2142,7 +2276,8 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                         _xdtype = _xdet["type"]
                         _xdkey  = f"{_vkey}_{_xdid}"
                         _xcolor = _DET_COLORS_XY[_xdi % len(_DET_COLORS_XY)]
-                        _xicon  = "📐" if _xdtype == "傾き変化点" else "📏"
+                        _xicon  = {"傾き変化点": "📐", "閾値超え検出": "🎯",
+                                   "上下判定比較": "📊", "検出点比較": "🔲"}.get(_xdtype, "📏")
 
                         with st.expander(f"{_xicon} #{_xdi+1} {_xdtype}", expanded=True):
                             _xhd, _xdel_btn = st.columns([8, 1])
@@ -2244,9 +2379,20 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     chart_key=f"{_xdkey}_preview",
                                 )
 
+                                # N番目の点
+                                _xnth_c1, _xnth_c2 = st.columns([2, 4])
+                                with _xnth_c1:
+                                    st.markdown("**🎯 使用する点**")
+                                with _xnth_c2:
+                                    st.number_input(
+                                        "N番目（0=全て, 1=最初, -1=最後）",
+                                        value=0, step=1, key=f"{_xdkey}_nth",
+                                        help="サイクルごとにN番目の検出点のみ使用。0=全点。")
+
                                 _xdet_on  = bool(st.session_state.get(f"{_xdkey}_on", False))
                                 _xdet_thr = float(st.session_state.get(
                                     f"{_xdkey}_thresh", 0.0))
+                                _xdet_nth = int(st.session_state.get(f"{_xdkey}_nth", 0))
                                 if _xdet_on and _xdet_thr > 0:
                                     _xmkx, _xmky = [], []
                                     for (xw, yw) in xy_waves:
@@ -2258,10 +2404,11 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                             detect_increase=_xdinc,
                                             detect_decrease=_xddec)
                                         si = np.argsort(xw)
-                                        for xi in ix_pts:
-                                            _xmkx.append(float(xi))
-                                            _xmky.append(float(
-                                                np.interp(xi, xw[si], yw[si])))
+                                        _xpts = [(float(xi),
+                                                  float(np.interp(xi, xw[si], yw[si])))
+                                                 for xi in ix_pts]
+                                        for xi, yi in _select_nth_pts(_xpts, _xdet_nth):
+                                            _xmkx.append(xi); _xmky.append(yi)
                                     if _xmkx:
                                         all_xy_inf_markers.append({
                                             "x": _xmkx, "y": _xmky,
@@ -2513,6 +2660,80 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                             xy_peak_ng_flags[j] = True
                                         if _xdet_lo != 0.0 and _xval < _xdet_lo:
                                             xy_peak_ng_flags[j] = True
+
+                            elif _xdtype == "閾値超え検出":
+                                # ── XY 閾値超え検出 ──────────────────────────
+                                st.caption(
+                                    "Y値が閾値を超えた（または下回った）X座標を検出します。"
+                                    "N番目の交差点のみを使うことも可能です。"
+                                )
+                                _xthc1, _xthc2, _xthc3 = st.columns([3, 3, 1])
+                                with _xthc1:
+                                    st.markdown("**閾値（Y値）**")
+                                    st.number_input("閾値", value=0.0, step=0.1,
+                                                    key=f"{_xdkey}_tv")
+                                with _xthc2:
+                                    st.markdown("**方向**")
+                                    st.radio("方向", ["上昇 ↑", "下降 ↓", "両方"],
+                                             horizontal=True, key=f"{_xdkey}_tdir")
+                                with _xthc3:
+                                    st.markdown("**有効**")
+                                    st.checkbox("ON", key=f"{_xdkey}_on")
+
+                                _xnth_c1, _xnth_c2 = st.columns([2, 4])
+                                with _xnth_c1:
+                                    st.markdown("**🎯 使用する点**")
+                                with _xnth_c2:
+                                    st.number_input(
+                                        "N番目（0=全て, 1=最初, -1=最後）",
+                                        value=1, step=1, key=f"{_xdkey}_nth",
+                                        help="サイクルごとにN番目の交差点のみ使用。0=全点。")
+
+                                _xrng_tc1, _xrng_tc2, _xrng_tc3 = st.columns([1, 2, 2])
+                                with _xrng_tc1:
+                                    st.markdown("**🔍 検出範囲（X値）**")
+                                    st.checkbox("指定する", key=f"{_xdkey}_use_range")
+                                _xuse_rng_t = bool(st.session_state.get(
+                                    f"{_xdkey}_use_range", False))
+                                with _xrng_tc2:
+                                    st.number_input("X 開始", value=0.0, step=0.5,
+                                                    key=f"{_xdkey}_range_s",
+                                                    disabled=not _xuse_rng_t)
+                                with _xrng_tc3:
+                                    st.number_input("X 終了", value=0.0, step=0.5,
+                                                    key=f"{_xdkey}_range_e",
+                                                    disabled=not _xuse_rng_t)
+
+                                _xtv_val   = float(st.session_state.get(
+                                    f"{_xdkey}_tv", 0.0))
+                                _xtdir_raw = st.session_state.get(
+                                    f"{_xdkey}_tdir", "上昇 ↑")
+                                _xtdir_str = ("rise" if "上昇" in _xtdir_raw
+                                              else "fall" if "下降" in _xtdir_raw
+                                              else "both")
+                                _xt_nth    = int(st.session_state.get(f"{_xdkey}_nth", 1))
+                                _xt_on     = bool(st.session_state.get(f"{_xdkey}_on", False))
+                                _xtrs      = float(st.session_state.get(
+                                    f"{_xdkey}_range_s", 0.0)) if _xuse_rng_t else None
+                                _xtre      = float(st.session_state.get(
+                                    f"{_xdkey}_range_e", 0.0)) if _xuse_rng_t else None
+
+                                if _xt_on:
+                                    _xtmkx, _xtmky = [], []
+                                    for (xw, yw) in xy_waves:
+                                        si = np.argsort(xw)
+                                        _xcs = _detect_threshold_crossings(
+                                            xw[si], yw[si], _xtv_val,
+                                            direction=_xtdir_str,
+                                            range_s=_xtrs, range_e=_xtre)
+                                        for xc, yc in _select_nth_pts(_xcs, _xt_nth):
+                                            _xtmkx.append(xc); _xtmky.append(yc)
+                                    if _xtmkx:
+                                        all_xy_inf_markers.append({
+                                            "x": _xtmkx, "y": _xtmky,
+                                            "label": f"#{_xdi+1} 閾値超え ({len(_xtmkx)}点)",
+                                            "color": _xcolor,
+                                        })
 
                             else:  # 検出点比較
                                 # ── XY 検出点比較 ────────────────────────────
