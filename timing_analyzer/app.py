@@ -657,6 +657,437 @@ def _compute_wv_ng(df: pd.DataFrame, trigger_col: str, edge: str,
 
 
 # ═══════════════════════════════════════════════════════════════
+# 波形特徴量検出ヘルパー
+# ═══════════════════════════════════════════════════════════════
+
+def _slope_diff_t(t: np.ndarray, vs: np.ndarray,
+                  n_left: int, n_right: int) -> tuple:
+    """
+    時間軸波形の左右傾き差を計算（平滑化済み配列を受け取る）。
+    各点 i について（有効範囲: n_left ≤ i < len-n_right）:
+        左傾き L[i] = (vs[i] - vs[i-n_left])  / (t[i] - t[i-n_left])
+        右傾き R[i] = (vs[i+n_right] - vs[i])  / (t[i+n_right] - t[i])
+        差 D[i] = R[i] - L[i]
+    Returns: (t_mid, L_arr, R_arr, D_arr)
+    """
+    idx  = np.arange(n_left, len(t) - n_right)
+    dt_l = t[idx] - t[idx - n_left];   dt_l = np.where(dt_l != 0, dt_l, 1e-10)
+    dt_r = t[idx + n_right] - t[idx];  dt_r = np.where(dt_r != 0, dt_r, 1e-10)
+    L = (vs[idx] - vs[idx - n_left])  / dt_l
+    R = (vs[idx + n_right] - vs[idx]) / dt_r
+    return t[idx], L, R, R - L
+
+
+def _slope_diff_xy(xs: np.ndarray, ys: np.ndarray,
+                   n_left: int, n_right: int) -> tuple:
+    """
+    XY軸（X昇順ソート済み）の左右傾き差を計算（平滑化済み配列を受け取る）。
+    Returns: (x_mid, L_arr, R_arr, D_arr)
+    """
+    idx  = np.arange(n_left, len(xs) - n_right)
+    dx_l = xs[idx] - xs[idx - n_left];   dx_l = np.where(dx_l != 0, dx_l, 1e-10)
+    dx_r = xs[idx + n_right] - xs[idx];  dx_r = np.where(dx_r != 0, dx_r, 1e-10)
+    L = (ys[idx] - ys[idx - n_left])  / dx_l
+    R = (ys[idx + n_right] - ys[idx]) / dx_r
+    return xs[idx], L, R, R - L
+
+
+def _detect_inflections(t: np.ndarray, v: np.ndarray,
+                        smooth_w: int = 5,
+                        n_left: int = 3, n_right: int = 3,
+                        threshold: float = 0.0,
+                        range_s: float = None, range_e: float = None,
+                        detect_increase: bool = True,
+                        detect_decrease: bool = True) -> np.ndarray:
+    """
+    左右傾き差による傾き変化点検出（時間軸）。
+    detect_increase=True: D = R-L > +threshold (傾きが増加する点)
+    detect_decrease=True: D = R-L < -threshold (傾きが減少する点)
+    両方 True のとき |D| > threshold（従来動作）。
+    threshold = 0 または方向フラグ両方 False の場合は空配列を返す。
+    """
+    if len(t) < n_left + n_right + 1 or threshold <= 0:
+        return np.array([])
+    if not detect_increase and not detect_decrease:
+        return np.array([])
+    w  = max(1, min(smooth_w, len(v) // 2))
+    vs = np.convolve(v, np.ones(w) / w, mode="same") if w > 1 else v.copy()
+    t_mid, _, _, D = _slope_diff_t(t, vs, n_left, n_right)
+    if detect_increase and detect_decrease:
+        mask = np.abs(D) > threshold
+    elif detect_increase:
+        mask = D > threshold
+    else:
+        mask = D < -threshold
+    if range_s is not None:
+        mask &= (t_mid >= range_s)
+    if range_e is not None:
+        mask &= (t_mid <= range_e)
+    return t_mid[mask]
+
+
+def _detect_xy_inflections(x: np.ndarray, y: np.ndarray,
+                            smooth_w: int = 5,
+                            n_left: int = 3, n_right: int = 3,
+                            threshold: float = 0.0,
+                            range_s: float = None, range_e: float = None,
+                            detect_increase: bool = True,
+                            detect_decrease: bool = True):
+    """
+    左右傾き差による傾き変化点検出（XY軸）。
+    detect_increase=True: D = R-L > +threshold (傾きが増加する点)
+    detect_decrease=True: D = R-L < -threshold (傾きが減少する点)
+    Returns: (x_pts, diff_vals)
+    """
+    if len(x) < n_left + n_right + 1 or threshold <= 0:
+        return np.array([]), np.array([])
+    if not detect_increase and not detect_decrease:
+        return np.array([]), np.array([])
+    si = np.argsort(x)
+    xs, ys = x[si], y[si]
+    w  = max(1, min(smooth_w, len(ys) // 2))
+    ys = np.convolve(ys, np.ones(w) / w, mode="same") if w > 1 else ys.copy()
+    x_mid, _, _, D = _slope_diff_xy(xs, ys, n_left, n_right)
+    if detect_increase and detect_decrease:
+        mask = np.abs(D) > threshold
+    elif detect_increase:
+        mask = D > threshold
+    else:
+        mask = D < -threshold
+    if range_s is not None:
+        mask &= (x_mid >= range_s)
+    if range_e is not None:
+        mask &= (x_mid <= range_e)
+    return x_mid[mask], D[mask]
+
+
+def _slope_diff_max_ref_t(waves_sample, smooth_w: int = 5,
+                           n_left: int = 3, n_right: int = 3) -> float:
+    """時間軸波形サンプルの最大 |傾き差| を推定（閾値設定の参考値）"""
+    ref = 0.0
+    for (t_r, v_r) in waves_sample:
+        if len(t_r) < n_left + n_right + 1:
+            continue
+        w  = max(1, min(smooth_w, len(v_r) // 2))
+        vs = np.convolve(v_r, np.ones(w) / w, mode="same") if w > 1 else v_r.copy()
+        _, _, _, D = _slope_diff_t(t_r, vs, n_left, n_right)
+        if len(D):
+            ref = max(ref, float(np.nanmax(np.abs(D))))
+    return ref
+
+
+def _slope_diff_max_ref_xy(xy_waves_sample, smooth_w: int = 5,
+                            n_left: int = 3, n_right: int = 3) -> float:
+    """XY波形サンプルの最大 |傾き差| を推定（閾値設定の参考値）"""
+    ref = 0.0
+    for (xw, yw) in xy_waves_sample:
+        if len(xw) < n_left + n_right + 1:
+            continue
+        si = np.argsort(xw)
+        xs, ys = xw[si], yw[si]
+        w  = max(1, min(smooth_w, len(ys) // 2))
+        ys = np.convolve(ys, np.ones(w) / w, mode="same") if w > 1 else ys.copy()
+        _, _, _, D = _slope_diff_xy(xs, ys, n_left, n_right)
+        if len(D):
+            ref = max(ref, float(np.nanmax(np.abs(D))))
+    return ref
+
+
+# 旧関数の別名（_compute_wv_ng などから参照されている場合のフォールバック）
+_d2v_max_ref = _slope_diff_max_ref_t
+_d2y_max_ref = _slope_diff_max_ref_xy
+
+
+def _render_item_insp_win_t(dkey: str, step_waves: list,
+                             insp_windows_global: list) -> list:
+    """
+    検出アイテム単位の検査ウィンドウ UI を描画し、有効な insp_windows リストを返す。
+    「個別設定を使う」が OFF の場合はグローバルウィンドウをそのまま返す。
+    時間軸タブ用。
+    """
+    import streamlit as _st
+    _st.markdown("---")
+    _iw_hd, _iw_cb = _st.columns([3, 2])
+    with _iw_hd:
+        _st.markdown("**🔍 検査ウィンドウ（このアイテム専用）**")
+    with _iw_cb:
+        _own = _st.checkbox("個別設定を使う", key=f"{dkey}_own_win")
+    if not _own:
+        return insp_windows_global
+
+    _iw_type = _st.radio("種別", ["時間軸", "値トリガ"],
+                          horizontal=True, key=f"{dkey}_iw_type")
+    if _iw_type == "時間軸":
+        _c1, _c2 = _st.columns(2)
+        with _c1:
+            _st.number_input("開始 [ms]", value=0.0, step=5.0, key=f"{dkey}_iw_s")
+        with _c2:
+            _st.number_input("終了 [ms]", value=200.0, step=5.0, key=f"{dkey}_iw_e")
+        _s = float(_st.session_state.get(f"{dkey}_iw_s", 0.0))
+        _e = float(_st.session_state.get(f"{dkey}_iw_e", 200.0))
+        return [(_s, _e)] * len(step_waves)
+    else:
+        _c1, _c2, _c3 = _st.columns(3)
+        with _c1:
+            _st.number_input("トリガ閾値", value=1.0, step=0.5, key=f"{dkey}_iw_tv")
+        with _c2:
+            _st.number_input("前 [ms]", value=10.0, step=5.0, key=f"{dkey}_iw_pre")
+        with _c3:
+            _st.number_input("後 [ms]", value=150.0, step=5.0, key=f"{dkey}_iw_post")
+        _tv  = float(_st.session_state.get(f"{dkey}_iw_tv",   1.0))
+        _pre = float(_st.session_state.get(f"{dkey}_iw_pre",  10.0))
+        _pst = float(_st.session_state.get(f"{dkey}_iw_post", 150.0))
+        result = []
+        for (t_sw, v_sw) in step_waves:
+            over = np.where(v_sw >= _tv)[0]
+            if len(over) > 0:
+                t0 = float(t_sw[over[0]])
+                result.append((t0 - _pre, t0 + _pst))
+            else:
+                result.append(None)
+        return result
+
+
+def _render_item_insp_win_xy(dkey: str, x_min: float, x_max: float,
+                              xs_global: float, xe_global: float,
+                              use_global: bool) -> tuple:
+    """
+    検出アイテム単位の検査ウィンドウ UI を描画し、(eff_xs, eff_xe, eff_use) を返す。
+    XY タブ用。
+    """
+    import streamlit as _st
+    _st.markdown("---")
+    _iw_hd, _iw_cb = _st.columns([3, 2])
+    with _iw_hd:
+        _st.markdown("**🔍 検査ウィンドウ（このアイテム専用）**")
+    with _iw_cb:
+        _own = _st.checkbox("個別設定を使う", key=f"{dkey}_own_win")
+    if not _own:
+        return xs_global, xe_global, use_global
+
+    _c1, _c2 = _st.columns(2)
+    with _c1:
+        _st.number_input("X 開始", value=float(x_min), step=0.5, key=f"{dkey}_iw_xs")
+    with _c2:
+        _st.number_input("X 終了", value=float(x_max), step=0.5, key=f"{dkey}_iw_xe")
+    _xs = float(_st.session_state.get(f"{dkey}_iw_xs", x_min))
+    _xe = float(_st.session_state.get(f"{dkey}_iw_xe", x_max))
+    return _xs, _xe, (_xs < _xe)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 傾き変化点検出 — 3段階アルゴリズム可視化
+# ═══════════════════════════════════════════════════════════════
+
+def _render_inflection_debug_t(t_arr, v_arr, smooth_w: int,
+                                n_left: int, n_right: int,
+                                threshold: float,
+                                range_s: float, range_e: float,
+                                y_label: str, chart_key: str):
+    """
+    時間軸波形の傾き変化点検出 3段階プレビュー（左右傾き差方式）
+      ① 平滑化（移動平均）
+      ② 左傾き L（n_left 離れた点）と右傾き R（n_right 離れた点）
+      ③ |R−L| + 閾値 + 検出範囲 + 検出マーカー
+    """
+    need = n_left + n_right + 1
+    if len(t_arr) < need:
+        st.caption(f"データ不足でプレビュー不可（必要点数 {need} に対し {len(t_arr)} 点）")
+        return
+
+    w  = max(1, min(smooth_w, len(v_arr) // 2))
+    vs = np.convolve(v_arr, np.ones(w) / w, mode="same") if w > 1 else v_arr.copy()
+    t_mid, L, R, D = _slope_diff_t(t_arr, vs, n_left, n_right)
+    aD = np.abs(D)
+
+    use_range = (range_s is not None and range_e is not None and range_s < range_e)
+
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True,
+        subplot_titles=[
+            "① 平滑化（移動平均）— 元データとの比較",
+            f"② 左傾き L（{n_left}サンプル前）・右傾き R（{n_right}サンプル後）",
+            "③ |傾き差 R−L| — 閾値・検出範囲・検出点",
+        ],
+        vertical_spacing=0.10,
+        row_heights=[0.35, 0.32, 0.33],
+    )
+
+    # ① 元データ vs 平滑化
+    fig.add_trace(go.Scatter(
+        x=t_arr, y=v_arr, mode="lines",
+        line=dict(color="rgba(150,150,150,0.45)", width=1),
+        name="元データ",
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=t_arr, y=vs, mode="lines",
+        line=dict(color="royalblue", width=2),
+        name=f"平滑化（幅 {w} サンプル）",
+    ), row=1, col=1)
+    if use_range:
+        for row_ in (1, 2, 3):
+            fig.add_vrect(x0=range_s, x1=range_e,
+                          fillcolor="rgba(100,200,255,0.07)",
+                          line_width=1, line_color="steelblue",
+                          row=row_, col=1)
+
+    # ② 左傾き L・右傾き R
+    fig.add_trace(go.Scatter(
+        x=t_mid, y=L, mode="lines",
+        line=dict(color="steelblue", width=1.5, dash="dot"),
+        name=f"左傾き L = (V[i]−V[i−{n_left}]) / Δt",
+    ), row=2, col=1)
+    fig.add_trace(go.Scatter(
+        x=t_mid, y=R, mode="lines",
+        line=dict(color="darkorange", width=1.5),
+        name=f"右傾き R = (V[i+{n_right}]−V[i]) / Δt",
+    ), row=2, col=1)
+    fig.add_hline(y=0, line_color="gray", line_dash="dot", row=2, col=1)
+
+    # ③ |傾き差| + 閾値 + 検出マーカー
+    fig.add_trace(go.Scatter(
+        x=t_mid, y=aD, mode="lines",
+        line=dict(color="mediumpurple", width=1.5),
+        name="|R − L|",
+    ), row=3, col=1)
+    if threshold > 0:
+        fig.add_hline(
+            y=threshold, line_color="red", line_dash="dash",
+            row=3, col=1,
+            annotation_text=f"閾値 {threshold:.4f}",
+            annotation_position="bottom right",
+        )
+        hit = aD > threshold
+        if use_range:
+            hit = hit & (t_mid >= range_s) & (t_mid <= range_e)
+        if hit.any():
+            fig.add_trace(go.Scatter(
+                x=t_mid[hit], y=aD[hit], mode="markers",
+                marker=dict(symbol="diamond", color="darkorange",
+                            size=9, line=dict(color="white", width=1)),
+                name=f"検出点 ({int(hit.sum())} 点)",
+            ), row=3, col=1)
+
+    fig.update_layout(
+        height=490,
+        margin=dict(t=55, b=30, l=65, r=20),
+        showlegend=True,
+        legend=dict(orientation="h", y=-0.08, x=0, font_size=11),
+        hovermode="x unified",
+    )
+    fig.update_yaxes(title_text=y_label,   row=1, col=1)
+    fig.update_yaxes(title_text="傾き",     row=2, col=1)
+    fig.update_yaxes(title_text="|R − L|", row=3, col=1)
+    fig.update_xaxes(title_text="ステップ開始からの時間 [ms]", row=3, col=1)
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+
+
+def _render_inflection_debug_xy(x_arr, y_arr, smooth_w: int,
+                                 n_left: int, n_right: int,
+                                 threshold: float,
+                                 range_s: float, range_e: float,
+                                 x_label: str, y_label: str, chart_key: str):
+    """
+    XY波形の傾き変化点検出 3段階プレビュー（左右傾き差方式、X昇順ソート後）
+      ① 平滑化（移動平均）
+      ② 左傾き L（n_left 離れた点）と右傾き R（n_right 離れた点）
+      ③ |R−L| + 閾値 + 検出範囲 + 検出マーカー
+    """
+    need = n_left + n_right + 1
+    if len(x_arr) < need:
+        st.caption(f"データ不足でプレビュー不可（必要点数 {need} に対し {len(x_arr)} 点）")
+        return
+
+    si = np.argsort(x_arr)
+    xs, ys_raw = x_arr[si], y_arr[si]
+    w  = max(1, min(smooth_w, len(ys_raw) // 2))
+    ys = np.convolve(ys_raw, np.ones(w) / w, mode="same") if w > 1 else ys_raw.copy()
+    x_mid, L, R, D = _slope_diff_xy(xs, ys, n_left, n_right)
+    aD = np.abs(D)
+
+    use_range = (range_s is not None and range_e is not None and range_s < range_e)
+
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True,
+        subplot_titles=[
+            "① 平滑化（移動平均）— 元データとの比較",
+            f"② 左傾き L（{n_left}サンプル前）・右傾き R（{n_right}サンプル後）",
+            "③ |傾き差 R−L| — 閾値・検出範囲・検出点",
+        ],
+        vertical_spacing=0.10,
+        row_heights=[0.35, 0.32, 0.33],
+    )
+
+    # ① 元データ vs 平滑化
+    fig.add_trace(go.Scatter(
+        x=xs, y=ys_raw, mode="lines",
+        line=dict(color="rgba(150,150,150,0.45)", width=1),
+        name="元データ（X昇順）",
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=xs, y=ys, mode="lines",
+        line=dict(color="royalblue", width=2),
+        name=f"平滑化（幅 {w} サンプル）",
+    ), row=1, col=1)
+    if use_range:
+        for row_ in (1, 2, 3):
+            fig.add_vrect(x0=range_s, x1=range_e,
+                          fillcolor="rgba(100,200,255,0.07)",
+                          line_width=1, line_color="steelblue",
+                          row=row_, col=1)
+
+    # ② 左傾き L・右傾き R
+    fig.add_trace(go.Scatter(
+        x=x_mid, y=L, mode="lines",
+        line=dict(color="steelblue", width=1.5, dash="dot"),
+        name=f"左傾き L = (Y[i]−Y[i−{n_left}]) / ΔX",
+    ), row=2, col=1)
+    fig.add_trace(go.Scatter(
+        x=x_mid, y=R, mode="lines",
+        line=dict(color="darkorange", width=1.5),
+        name=f"右傾き R = (Y[i+{n_right}]−Y[i]) / ΔX",
+    ), row=2, col=1)
+    fig.add_hline(y=0, line_color="gray", line_dash="dot", row=2, col=1)
+
+    # ③ |傾き差| + 閾値 + 検出マーカー
+    fig.add_trace(go.Scatter(
+        x=x_mid, y=aD, mode="lines",
+        line=dict(color="mediumpurple", width=1.5),
+        name="|R − L|",
+    ), row=3, col=1)
+    if threshold > 0:
+        fig.add_hline(
+            y=threshold, line_color="red", line_dash="dash",
+            row=3, col=1,
+            annotation_text=f"閾値 {threshold:.4f}",
+            annotation_position="bottom right",
+        )
+        hit = aD > threshold
+        if use_range:
+            hit = hit & (x_mid >= range_s) & (x_mid <= range_e)
+        if hit.any():
+            fig.add_trace(go.Scatter(
+                x=x_mid[hit], y=aD[hit], mode="markers",
+                marker=dict(symbol="diamond", color="darkorange",
+                            size=9, line=dict(color="white", width=1)),
+                name=f"検出点 ({int(hit.sum())} 点)",
+            ), row=3, col=1)
+
+    fig.update_layout(
+        height=490,
+        margin=dict(t=55, b=30, l=65, r=20),
+        showlegend=True,
+        legend=dict(orientation="h", y=-0.08, x=0, font_size=11),
+        hovermode="x unified",
+    )
+    fig.update_yaxes(title_text=y_label,   row=1, col=1)
+    fig.update_yaxes(title_text="傾き",     row=2, col=1)
+    fig.update_yaxes(title_text="|R − L|", row=3, col=1)
+    fig.update_xaxes(title_text=x_label,   row=3, col=1)
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+
+
+# ═══════════════════════════════════════════════════════════════
 # 波形監視オーバーレイ
 # ═══════════════════════════════════════════════════════════════
 
@@ -703,255 +1134,1672 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
     for var in waveform_vars:
         st.markdown(f"---\n#### 📈 {var}")
         _vkey = f"wvol_{pname}_{name}_{var}"
+        _tab_time, _tab_xy = st.tabs(["⏱ 時間軸", "📊 XY グラフ"])
 
-        # ── コントロールパネル ─────────────────────────────────
-        ctrl_c1, ctrl_c2, ctrl_c3 = st.columns([3, 3, 3])
+        with _tab_time:
+            # ── コントロールパネル ─────────────────────────────────
+            ctrl_c1, ctrl_c2, ctrl_c3 = st.columns([3, 3, 3])
 
-        with ctrl_c1:
-            st.markdown("**表示ウィンドウ（ステップ開始基準）**")
-            win_pre  = st.number_input("開始前 [ms]", min_value=0, max_value=500,
-                                        value=50, step=10, key=f"{_vkey}_wpre")
-            win_post = st.number_input("終了後 [ms]", min_value=10, max_value=2000,
-                                        value=300, step=10, key=f"{_vkey}_wpost")
+            with ctrl_c1:
+                st.markdown("**表示ウィンドウ（ステップ開始基準）**")
+                win_pre  = st.number_input("開始前 [ms]", min_value=0, max_value=500,
+                                            value=50, step=10, key=f"{_vkey}_wpre")
+                win_post = st.number_input("終了後 [ms]", min_value=10, max_value=2000,
+                                            value=300, step=10, key=f"{_vkey}_wpost")
 
-        with ctrl_c2:
-            st.markdown("**検査ウィンドウ**")
-            insp_type = st.radio("種別", ["時間軸", "値トリガ"],
-                                  horizontal=True, key=f"{_vkey}_itype")
-            if insp_type == "時間軸":
-                insp_s = st.number_input("開始 [ms]", min_value=-500, max_value=2000,
-                                          value=0, step=5, key=f"{_vkey}_is")
-                insp_e = st.number_input("終了 [ms]", min_value=-500, max_value=2000,
-                                          value=200, step=5, key=f"{_vkey}_ie")
-                insp_e = max(insp_e, insp_s + 1)
-                insp_trig_var = None; insp_trig_val = None; insp_trig_post = None
-            else:
-                st.caption("この変数が閾値を超えた瞬間を起点にウィンドウを設定")
-                insp_trig_val  = st.number_input("トリガ閾値", value=1.0, step=0.5,
-                                                  key=f"{_vkey}_itv")
-                insp_trig_pre  = st.number_input("前 [ms]", min_value=0, max_value=500,
-                                                  value=10, step=5, key=f"{_vkey}_itpre")
-                insp_trig_post = st.number_input("後 [ms]", min_value=1, max_value=2000,
-                                                  value=150, step=5, key=f"{_vkey}_itpost")
-                insp_s = None; insp_e = None; insp_trig_var = var
-
-        with ctrl_c3:
-            st.markdown("**良品範囲**")
-            good_mode = st.radio("種別", ["手動入力", "自動（基準±Nσ）"],
-                                  horizontal=True, key=f"{_vkey}_gmode")
-            if good_mode == "手動入力":
-                good_lo = st.number_input("下限", value=0.0, step=0.5,
-                                           key=f"{_vkey}_glo")
-                good_hi = st.number_input("上限", value=0.0, step=0.5,
-                                           key=f"{_vkey}_ghi")
-                use_manual_range = good_lo < good_hi
-                good_nsig = None
-            else:
-                good_nsig = st.number_input("N（±Nσ）", min_value=1.0, max_value=6.0,
-                                             value=3.0, step=0.5, key=f"{_vkey}_nsig")
-                use_manual_range = False
-                good_lo = good_hi = None
-
-        # ── 波形データ抽出（ステップ開始基準に変換）─────────────
-        step_waves = []   # list of (t_step_rel, v_arr)
-        for i in range(n_cyc):
-            cyc        = waveforms[i]
-            step_off   = float(start_offsets[i]) if not np.isnan(start_offsets[i]) else None
-            if step_off is None or var not in cyc.columns:
-                continue
-            t_abs  = cyc["time_offset_ms"].values          # cycle-relative [ms]
-            t_step = t_abs - step_off                       # step-relative [ms]
-            v_arr  = cyc[var].values.astype(np.float64)
-
-            # 表示ウィンドウでクリップ
-            mask = (t_step >= -win_pre) & (t_step <= win_post)
-            if mask.sum() < 2:
-                continue
-            step_waves.append((t_step[mask], v_arr[mask]))
-
-        if not step_waves:
-            st.warning(f"{var}: 有効な波形データがありません")
-            continue
-
-        # ── 基準エンベロープ計算 ─────────────────────────────────
-        t_common = np.linspace(-win_pre, win_post, 500)
-        mat = np.full((len(step_waves), len(t_common)), np.nan)
-        for j, (t_sw, v_sw) in enumerate(step_waves):
-            idx = np.searchsorted(t_sw, t_common).clip(0, len(t_sw) - 1)
-            # 範囲外はNaN
-            in_range = (t_common >= t_sw[0]) & (t_common <= t_sw[-1])
-            mat[j, in_range] = v_sw[idx[in_range]]
-
-        mean_v = np.nanmean(mat, axis=0)
-        std_v  = np.nanstd(mat, axis=0)
-
-        # 良品範囲の確定
-        if good_mode == "自動（基準±Nσ）":
-            bl_key = f"{pname}_{name}_{var}"
-            bl     = _wv_bl.get(bl_key, {})
-            if bl:
-                mean_v_bl = np.array(bl["mean"])
-                std_v_bl  = np.array(bl["std"])
-                t_bl      = np.array(bl["t"])
-                # t_bl → t_common に補間
-                mean_v_bl_i = np.interp(t_common, t_bl, mean_v_bl, left=np.nan, right=np.nan)
-                std_v_bl_i  = np.interp(t_common, t_bl, std_v_bl,  left=np.nan, right=np.nan)
-                env_hi = mean_v_bl_i + good_nsig * std_v_bl_i
-                env_lo = mean_v_bl_i - good_nsig * std_v_bl_i
-                has_envelope = True
-            else:
-                # 基準未登録時は現データの平均±Nσで仮表示
-                env_hi = mean_v + good_nsig * std_v
-                env_lo = mean_v - good_nsig * std_v
-                has_envelope = True
-                st.caption("⚠️ 基準未登録のため現データ平均±Nσを仮表示")
-        else:
-            has_envelope = use_manual_range
-            env_hi = np.full_like(t_common, good_hi) if use_manual_range else None
-            env_lo = np.full_like(t_common, good_lo) if use_manual_range else None
-
-        # ── 検査ウィンドウの確定（値トリガ対応）────────────────
-        # 各サイクルの実際の検査ウィンドウ [t_start, t_end] (step-relative)
-        insp_windows = []
-        for (t_sw, v_sw) in step_waves:
-            if insp_type == "時間軸":
-                insp_windows.append((insp_s, insp_e))
-            else:
-                # 値トリガ: この波形でtrig_valを超えた最初の点を起点
-                over = np.where(v_sw >= insp_trig_val)[0]
-                if len(over) > 0:
-                    t0_trig = float(t_sw[over[0]])
-                    insp_windows.append((t0_trig - insp_trig_pre, t0_trig + insp_trig_post))
+            with ctrl_c2:
+                st.markdown("**検査ウィンドウ**")
+                insp_type = st.radio("種別", ["時間軸", "値トリガ"],
+                                      horizontal=True, key=f"{_vkey}_itype")
+                if insp_type == "時間軸":
+                    insp_s = st.number_input("開始 [ms]", min_value=-500, max_value=2000,
+                                              value=0, step=5, key=f"{_vkey}_is")
+                    insp_e = st.number_input("終了 [ms]", min_value=-500, max_value=2000,
+                                              value=200, step=5, key=f"{_vkey}_ie")
+                    insp_e = max(insp_e, insp_s + 1)
+                    insp_trig_val = None; insp_trig_pre = None; insp_trig_post = None
                 else:
-                    insp_windows.append(None)
+                    st.caption("この変数が閾値を超えた瞬間を起点にウィンドウを設定")
+                    insp_trig_val  = st.number_input("トリガ閾値", value=1.0, step=0.5,
+                                                      key=f"{_vkey}_itv")
+                    insp_trig_pre  = st.number_input("前 [ms]", min_value=0, max_value=500,
+                                                      value=10, step=5, key=f"{_vkey}_itpre")
+                    insp_trig_post = st.number_input("後 [ms]", min_value=1, max_value=2000,
+                                                      value=150, step=5, key=f"{_vkey}_itpost")
+                    insp_s = None; insp_e = None
 
-        # ── NG判定 ───────────────────────────────────────────────
-        ng_flags = []
-        if has_envelope:
+            with ctrl_c3:
+                st.markdown("**良品範囲**")
+                good_mode = st.radio("種別", ["手動入力", "自動（基準±Nσ）"],
+                                      horizontal=True, key=f"{_vkey}_gmode")
+                if good_mode == "手動入力":
+                    good_lo = st.number_input("下限", value=0.0, step=0.5,
+                                               key=f"{_vkey}_glo")
+                    good_hi = st.number_input("上限", value=0.0, step=0.5,
+                                               key=f"{_vkey}_ghi")
+                    use_manual_range = good_lo < good_hi
+                    good_nsig = None
+                else:
+                    good_nsig = st.number_input("N（±Nσ）", min_value=1.0, max_value=6.0,
+                                                 value=3.0, step=0.5, key=f"{_vkey}_nsig")
+                    use_manual_range = False
+                    good_lo = good_hi = None
+
+            # ── 波形データ抽出（ステップ開始基準に変換）─────────────
+            step_waves = []   # list of (t_step_rel, v_arr)
+            for i in range(n_cyc):
+                cyc        = waveforms[i]
+                step_off   = float(start_offsets[i]) if not np.isnan(start_offsets[i]) else None
+                if step_off is None or var not in cyc.columns:
+                    continue
+                t_abs  = cyc["time_offset_ms"].values          # cycle-relative [ms]
+                t_step = t_abs - step_off                       # step-relative [ms]
+                v_arr  = cyc[var].values.astype(np.float64)
+
+                # 表示ウィンドウでクリップ
+                mask = (t_step >= -win_pre) & (t_step <= win_post)
+                if mask.sum() < 2:
+                    continue
+                step_waves.append((t_step[mask], v_arr[mask]))
+
+            if not step_waves:
+                st.warning(f"{var}: 有効な波形データがありません")
+                continue
+
+            # ── 基準エンベロープ計算 ─────────────────────────────────
+            t_common = np.linspace(-win_pre, win_post, 500)
+            mat = np.full((len(step_waves), len(t_common)), np.nan)
             for j, (t_sw, v_sw) in enumerate(step_waves):
-                win = insp_windows[j]
-                if win is None:
-                    ng_flags.append(False)
-                    continue
-                ws, we = win
-                # 検査ウィンドウ内のみ
-                mask_insp = (t_sw >= ws) & (t_sw <= we)
-                if mask_insp.sum() == 0:
-                    ng_flags.append(False)
-                    continue
-                t_insp = t_sw[mask_insp]
-                v_insp = v_sw[mask_insp]
-                hi_insp = np.interp(t_insp, t_common, env_hi)
-                lo_insp = np.interp(t_insp, t_common, env_lo)
-                is_ng = bool(np.any(v_insp > hi_insp) or np.any(v_insp < lo_insp))
-                ng_flags.append(is_ng)
-        else:
-            ng_flags = [False] * len(step_waves)
+                idx = np.searchsorted(t_sw, t_common).clip(0, len(t_sw) - 1)
+                in_range = (t_common >= t_sw[0]) & (t_common <= t_sw[-1])
+                mat[j, in_range] = v_sw[idx[in_range]]
 
-        # ── グラフ描画 ─────────────────────────────────────────
-        fig = go.Figure()
+            mean_v = np.nanmean(mat, axis=0)
+            std_v  = np.nanstd(mat, axis=0)
 
-        _MAX_WAVE = 80
-        for j, (t_sw, v_sw) in enumerate(step_waves):
-            if j >= _MAX_WAVE:
-                break
-            color_cyc = "rgba(220,50,50,0.25)" if (ng_flags[j] if j < len(ng_flags) else False) \
-                        else "rgba(100,120,200,0.12)"
-            fig.add_trace(go.Scatter(
-                x=t_sw, y=v_sw, mode="lines",
-                line=dict(color=color_cyc, width=1),
-                showlegend=False,
-            ))
+            # 良品範囲の確定
+            if good_mode == "自動（基準±Nσ）":
+                bl_key = f"{pname}_{name}_{var}"
+                bl     = _wv_bl.get(bl_key, {})
+                if bl:
+                    mean_v_bl   = np.array(bl["mean"])
+                    std_v_bl    = np.array(bl["std"])
+                    t_bl        = np.array(bl["t"])
+                    mean_v_bl_i = np.interp(t_common, t_bl, mean_v_bl, left=np.nan, right=np.nan)
+                    std_v_bl_i  = np.interp(t_common, t_bl, std_v_bl,  left=np.nan, right=np.nan)
+                    env_hi = mean_v_bl_i + good_nsig * std_v_bl_i
+                    env_lo = mean_v_bl_i - good_nsig * std_v_bl_i
+                    has_envelope = True
+                else:
+                    env_hi = mean_v + good_nsig * std_v
+                    env_lo = mean_v - good_nsig * std_v
+                    has_envelope = True
+                    st.caption("⚠️ 基準未登録のため現データ平均±Nσを仮表示")
+            else:
+                has_envelope = use_manual_range
+                env_hi = np.full_like(t_common, good_hi) if use_manual_range else None
+                env_lo = np.full_like(t_common, good_lo) if use_manual_range else None
 
-        # 平均波形
-        fig.add_trace(go.Scatter(
-            x=t_common, y=mean_v, mode="lines",
-            line=dict(color="royalblue", width=2.5),
-            name="平均波形",
-        ))
+            # ── 検査ウィンドウの確定（値トリガ対応）────────────────
+            insp_windows = []
+            for (t_sw, v_sw) in step_waves:
+                if insp_type == "時間軸":
+                    insp_windows.append((insp_s, insp_e))
+                else:
+                    over = np.where(v_sw >= insp_trig_val)[0]
+                    if len(over) > 0:
+                        t0_trig = float(t_sw[over[0]])
+                        insp_windows.append((t0_trig - insp_trig_pre, t0_trig + insp_trig_post))
+                    else:
+                        insp_windows.append(None)
 
-        # 良品範囲エンベロープ
-        if has_envelope and env_hi is not None:
-            fig.add_trace(go.Scatter(
-                x=np.concatenate([t_common, t_common[::-1]]),
-                y=np.concatenate([env_hi, env_lo[::-1]]),
-                fill="toself",
-                fillcolor="rgba(0,200,100,0.10)",
-                line=dict(color="rgba(0,0,0,0)"),
-                name="良品範囲",
-                showlegend=True,
-            ))
-            fig.add_trace(go.Scatter(
-                x=t_common, y=env_hi, mode="lines",
-                line=dict(color="green", width=1.5, dash="dash"),
-                name="上限", showlegend=False,
-            ))
-            fig.add_trace(go.Scatter(
-                x=t_common, y=env_lo, mode="lines",
-                line=dict(color="green", width=1.5, dash="dash"),
-                name="下限", showlegend=False,
-            ))
+            # ── NG判定 ───────────────────────────────────────────────
+            ng_flags = []
+            if has_envelope:
+                for j, (t_sw, v_sw) in enumerate(step_waves):
+                    win = insp_windows[j]
+                    if win is None:
+                        ng_flags.append(False)
+                        continue
+                    ws, we = win
+                    mask_insp = (t_sw >= ws) & (t_sw <= we)
+                    if mask_insp.sum() == 0:
+                        ng_flags.append(False)
+                        continue
+                    t_insp  = t_sw[mask_insp]
+                    v_insp  = v_sw[mask_insp]
+                    hi_insp = np.interp(t_insp, t_common, env_hi)
+                    lo_insp = np.interp(t_insp, t_common, env_lo)
+                    ng_flags.append(bool(np.any(v_insp > hi_insp) or np.any(v_insp < lo_insp)))
+            else:
+                ng_flags = [False] * len(step_waves)
 
-        # ステップ開始基準線
-        fig.add_vline(x=0, line_color="gray", line_dash="dot",
-                      annotation_text="ステップ開始", annotation_position="top left")
+            # ── 検出点リスト ──────────────────────────────────────
+            _tdet_list_key = f"{_vkey}_t_det_list"
+            _tdet_cnt_key  = f"{_vkey}_t_det_cnt"
+            if _tdet_list_key not in st.session_state:
+                st.session_state[_tdet_list_key] = []
+            if _tdet_cnt_key not in st.session_state:
+                st.session_state[_tdet_cnt_key] = 0
+            _tdet_list = st.session_state[_tdet_list_key]
 
-        # 検査ウィンドウ（代表: 最初の有効ウィンドウ）
-        _repr_win = next((w for w in insp_windows if w is not None), None)
-        if _repr_win is not None:
-            ws_r, we_r = _repr_win
-            fig.add_vrect(x0=ws_r, x1=we_r,
-                          fillcolor="rgba(255,200,0,0.08)",
-                          line_width=1, line_color="orange",
-                          annotation_text="検査ウィンドウ",
-                          annotation_position="top right")
+            _DET_TYPES_T = ["傾き変化点", "上下判定比較", "最大値検査", "最小値検査", "検出点比較"]
+            _DET_COLORS  = ["darkorange", "deeppink", "limegreen", "dodgerblue", "gold"]
 
-        # NGサイクルのみ凡例エントリ
-        ng_count = sum(ng_flags)
-        if ng_count > 0:
-            fig.add_trace(go.Scatter(
-                x=[None], y=[None], mode="lines",
-                line=dict(color="rgba(220,50,50,0.7)", width=2),
-                name=f"NG サイクル ({ng_count}/{len(step_waves)})",
-            ))
+            _add_ca, _add_cb = st.columns([2, 4])
+            with _add_cb:
+                st.selectbox("検出点タイプ", _DET_TYPES_T, key=f"{_vkey}_t_det_type_sel")
+            with _add_ca:
+                st.markdown("<div style='padding-top:28px'></div>", unsafe_allow_html=True)
+                if st.button("＋ 検出点を追加", key=f"{_vkey}_t_det_add", type="secondary"):
+                    _cnt = st.session_state[_tdet_cnt_key]
+                    _new_type = st.session_state.get(f"{_vkey}_t_det_type_sel", "傾き変化点")
+                    _tdet_list.append({"id": f"td{_cnt}", "type": _new_type})
+                    st.session_state[_tdet_list_key] = _tdet_list
+                    st.session_state[_tdet_cnt_key] = _cnt + 1
+                    st.rerun()
 
-        fig.update_layout(
-            xaxis_title="ステップ開始からの時間 [ms]",
-            yaxis_title=var,
-            height=340,
-            margin=dict(t=20, b=40, l=60, r=20),
-            legend=dict(orientation="h", y=1.05, x=1, xanchor="right"),
-            hovermode="x unified",
-        )
-        st.plotly_chart(fig, width="stretch", key=f"{_vkey}_fig")
+            # 結果収集用
+            all_inf_markers = []   # [{"t":[], "v":[], "label":str, "color":str}]
+            peak_ng_flags   = [False] * len(step_waves)
+            cyc_max_vals    = [float(np.nanmax(v)) for _, v in step_waves]
+            cyc_min_vals    = [float(np.nanmin(v)) for _, v in step_waves]
 
-        # ── サマリー & 基準登録 ───────────────────────────────────
-        sm_c1, sm_c2, sm_c3, sm_c4 = st.columns(4)
-        sm_c1.metric("サイクル数", len(step_waves))
-        sm_c2.metric("NG数", ng_count, delta=None if ng_count == 0 else f"{ng_count/len(step_waves)*100:.1f}%")
-        sm_c3.metric("平均ピーク", f"{float(np.nanmax(mean_v)):.2f}")
-        sm_c4.metric("ピークσ", f"{float(np.nanstd([np.nanmax(v) for _, v in step_waves])):.2f}")
+            _t_del_idx = None
+            for _di, _det in enumerate(_tdet_list):
+                _did   = _det["id"]
+                _dtype = _det["type"]
+                _dkey  = f"{_vkey}_{_did}"
+                _color = _DET_COLORS[_di % len(_DET_COLORS)]
+                _icon  = "📐" if _dtype == "傾き変化点" else "📏"
 
-        # 基準登録ボタン
-        bl_key = f"{pname}_{name}_{var}"
-        if st.button(f"📌 現データを基準として登録（{var}）",
-                     key=f"{_vkey}_bl_reg", type="secondary"):
-            _wv_bl[bl_key] = {
-                "t":    t_common.tolist(),
-                "mean": mean_v.tolist(),
-                "std":  std_v.tolist(),
-            }
-            st.session_state[pk(pname, "wv_baseline")] = _wv_bl
-            st.success(f"✅ {var} の波形基準を登録しました（{len(step_waves)} サイクル）")
-            st.rerun()
+                with st.expander(f"{_icon} #{_di+1} {_dtype}", expanded=True):
+                    _hd, _del_btn = st.columns([8, 1])
+                    with _del_btn:
+                        if st.button("🗑", key=f"{_dkey}_del", help="削除"):
+                            _t_del_idx = _di
 
-        if bl_key in _wv_bl:
-            if st.button(f"🗑 基準をリセット（{var}）",
-                         key=f"{_vkey}_bl_del", type="secondary"):
-                _wv_bl.pop(bl_key, None)
-                st.session_state[pk(pname, "wv_baseline")] = _wv_bl
+                    if _dtype == "傾き変化点":
+                        st.caption(
+                            "① 移動平均でノイズ除去 → "
+                            "② 左右 n サンプル離れた点で傾き L・R を計算 → "
+                            "③ |R − L| > 閾値 かつ 検出範囲内 の点を検出"
+                        )
+                        _pa, _pb, _pc, _pd, _pe = st.columns([2, 2, 2, 3, 1])
+                        with _pa:
+                            st.markdown("**① 平滑化幅**")
+                            st.number_input("サンプル数", min_value=1, max_value=50,
+                                            value=5, step=1, key=f"{_dkey}_smooth")
+                        with _pb:
+                            st.markdown("**n_L（左）**")
+                            st.number_input("左へ何サンプル", min_value=1, max_value=100,
+                                            value=3, step=1, key=f"{_dkey}_nleft",
+                                            help="L = (V[i]−V[i−n_L]) / Δt")
+                        with _pc:
+                            st.markdown("**n_R（右）**")
+                            st.number_input("右へ何サンプル", min_value=1, max_value=100,
+                                            value=3, step=1, key=f"{_dkey}_nright",
+                                            help="R = (V[i+n_R]−V[i]) / Δt")
+                        with _pd:
+                            _sm = int(st.session_state.get(f"{_dkey}_smooth", 5))
+                            _nl = int(st.session_state.get(f"{_dkey}_nleft",  3))
+                            _nr = int(st.session_state.get(f"{_dkey}_nright", 3))
+                            _ref = _slope_diff_max_ref_t(
+                                step_waves[:min(5, len(step_waves))],
+                                smooth_w=_sm, n_left=_nl, n_right=_nr)
+                            _stp = max(0.0001, round(_ref / 20, 4))
+                            st.markdown("**③ 閾値 |R − L|**")
+                            st.number_input(f"（参考最大 ≈ {_ref:.4f}）",
+                                            min_value=0.0, value=0.0,
+                                            step=_stp, format="%.4f",
+                                            key=f"{_dkey}_thresh")
+                        with _pe:
+                            st.markdown("**有効**")
+                            st.checkbox("ON", key=f"{_dkey}_on")
+
+                        # ── 方向指定 ─────────────────────────────
+                        _dir_ca, _dir_cb = st.columns(2)
+                        with _dir_ca:
+                            st.checkbox("📈 増加方向を検出 (R > L)",
+                                        value=True, key=f"{_dkey}_dir_inc")
+                        with _dir_cb:
+                            st.checkbox("📉 減少方向を検出 (L > R)",
+                                        value=True, key=f"{_dkey}_dir_dec")
+
+                        _rng_ca, _rng_cb, _rng_cc = st.columns([1, 2, 2])
+                        with _rng_ca:
+                            st.markdown("**🔍 検出範囲 [ms]**")
+                            st.checkbox("指定する", key=f"{_dkey}_use_range")
+                        _use_rng = bool(st.session_state.get(f"{_dkey}_use_range", False))
+                        with _rng_cb:
+                            st.number_input("開始", value=0.0, step=5.0,
+                                            key=f"{_dkey}_range_s",
+                                            disabled=not _use_rng)
+                        with _rng_cc:
+                            st.number_input("終了", value=200.0, step=5.0,
+                                            key=f"{_dkey}_range_e",
+                                            disabled=not _use_rng)
+
+                        _sm_d  = int(st.session_state.get(f"{_dkey}_smooth", 5))
+                        _nl_d  = int(st.session_state.get(f"{_dkey}_nleft",  3))
+                        _nr_d  = int(st.session_state.get(f"{_dkey}_nright", 3))
+                        _th_d  = float(st.session_state.get(f"{_dkey}_thresh", 0.0))
+                        _rs_d  = float(st.session_state.get(f"{_dkey}_range_s", 0.0)) \
+                                 if _use_rng else None
+                        _re_d  = float(st.session_state.get(f"{_dkey}_range_e", 200.0)) \
+                                 if _use_rng else None
+                        _dinc  = bool(st.session_state.get(f"{_dkey}_dir_inc", True))
+                        _ddec  = bool(st.session_state.get(f"{_dkey}_dir_dec", True))
+                        st.markdown("---")
+                        st.markdown("**📊 3段階プレビュー**（平均波形）")
+                        _render_inflection_debug_t(
+                            t_common, mean_v,
+                            smooth_w=_sm_d, n_left=_nl_d, n_right=_nr_d,
+                            threshold=_th_d, range_s=_rs_d, range_e=_re_d,
+                            y_label=var, chart_key=f"{_dkey}_preview",
+                        )
+
+                        # 全サイクルから検出点収集
+                        _det_on  = bool(st.session_state.get(f"{_dkey}_on", False))
+                        _det_thr = float(st.session_state.get(f"{_dkey}_thresh", 0.0))
+                        if _det_on and _det_thr > 0:
+                            _mkt, _mkv = [], []
+                            for (t_sw, v_sw) in step_waves:
+                                _ts = _detect_inflections(
+                                    t_sw, v_sw,
+                                    smooth_w=_sm_d, n_left=_nl_d, n_right=_nr_d,
+                                    threshold=_det_thr,
+                                    range_s=_rs_d, range_e=_re_d,
+                                    detect_increase=_dinc, detect_decrease=_ddec)
+                                for ti in _ts:
+                                    _mkt.append(float(ti))
+                                    _mkv.append(float(np.interp(ti, t_sw, v_sw)))
+                            if _mkt:
+                                all_inf_markers.append({
+                                    "t": _mkt, "v": _mkv,
+                                    "label": f"#{_di+1} 傾き変化点 ({len(_mkt)}点)",
+                                    "color": _color,
+                                })
+
+                    elif _dtype == "上下判定比較":
+                        # ── 上下判定比較 ─────────────────────────────
+                        st.caption("上下限の曲線を定義し、各サイクルの波形が範囲内に収まるか判定します。")
+                        _bnd_type = st.radio(
+                            "境界タイプ",
+                            ["絶対値キーポイント", "基準±Nσ",
+                             "現データ エンベロープ±マージン", "参照サイクル±オフセット"],
+                            horizontal=True, key=f"{_dkey}_btype",
+                        )
+                        _bnd_on = st.checkbox("有効", key=f"{_dkey}_on")
+
+                        # ── キーポイントテーブル または パラメータ ──
+                        if _bnd_type == "絶対値キーポイント":
+                            st.caption("t [ms] と上限・下限の値を直接入力してください。行を追加して折れ線を定義できます。")
+                            _kp_default = pd.DataFrame({
+                                "t [ms]": [0.0, 100.0],
+                                "上限": [float(np.nanmax(mean_v)) * 1.1,
+                                         float(np.nanmax(mean_v)) * 1.1],
+                                "下限": [float(np.nanmin(mean_v)) * 0.9,
+                                         float(np.nanmin(mean_v)) * 0.9],
+                            })
+                            _kp_key = f"{_dkey}_kp_df"
+                            if _kp_key not in st.session_state:
+                                st.session_state[_kp_key] = _kp_default
+                            _kp_edited = st.data_editor(
+                                st.session_state[_kp_key],
+                                num_rows="dynamic", use_container_width=True,
+                                key=f"{_dkey}_kp_editor",
+                            )
+                            _bnd_hi_fn = lambda t_arr: np.interp(
+                                t_arr,
+                                _kp_edited["t [ms]"].values.astype(float),
+                                _kp_edited["上限"].values.astype(float),
+                            )
+                            _bnd_lo_fn = lambda t_arr: np.interp(
+                                t_arr,
+                                _kp_edited["t [ms]"].values.astype(float),
+                                _kp_edited["下限"].values.astype(float),
+                            )
+
+                        elif _bnd_type == "基準±Nσ":
+                            _nsig_val = st.number_input(
+                                "N（±Nσ）", min_value=0.1, max_value=10.0,
+                                value=3.0, step=0.5, key=f"{_dkey}_nsig")
+                            _bl_key_t = f"{pname}_{name}_{var}"
+                            _wv_bl_t  = st.session_state.get(pk(pname, "wv_baseline"), {})
+                            _bl_t     = _wv_bl_t.get(_bl_key_t, {})
+                            if _bl_t:
+                                _bl_m = np.interp(t_common,
+                                                  np.array(_bl_t["t"]),
+                                                  np.array(_bl_t["mean"]))
+                                _bl_s = np.interp(t_common,
+                                                  np.array(_bl_t["t"]),
+                                                  np.array(_bl_t["std"]))
+                            else:
+                                _bl_m, _bl_s = mean_v, std_v
+                                st.caption("⚠️ 基準未登録のため現データ平均±Nσを仮使用")
+                            _nsig_val_f = float(st.session_state.get(f"{_dkey}_nsig", 3.0))
+                            _bnd_hi_fn = lambda t_arr: np.interp(
+                                t_arr, t_common, _bl_m + _nsig_val_f * _bl_s)
+                            _bnd_lo_fn = lambda t_arr: np.interp(
+                                t_arr, t_common, _bl_m - _nsig_val_f * _bl_s)
+
+                        elif _bnd_type == "現データ エンベロープ±マージン":
+                            _env_margin = st.number_input(
+                                "マージン（上下に加算）", value=0.0, step=0.1,
+                                key=f"{_dkey}_margin")
+                            # 全サイクル最大最小エンベロープ
+                            _env_mat = np.full((len(step_waves), len(t_common)), np.nan)
+                            for _ej, (t_sw, v_sw) in enumerate(step_waves):
+                                _env_mat[_ej] = np.interp(t_common, t_sw, v_sw,
+                                                           left=np.nan, right=np.nan)
+                            _env_hi_c = np.nanmax(_env_mat, axis=0)
+                            _env_lo_c = np.nanmin(_env_mat, axis=0)
+                            _env_mg   = float(st.session_state.get(f"{_dkey}_margin", 0.0))
+                            _bnd_hi_fn = lambda t_arr: np.interp(
+                                t_arr, t_common, _env_hi_c + _env_mg)
+                            _bnd_lo_fn = lambda t_arr: np.interp(
+                                t_arr, t_common, _env_lo_c - _env_mg)
+
+                        else:  # 参照サイクル±オフセット
+                            _ref_mode = st.radio(
+                                "参照元", ["基準登録データ", "サイクル番号指定"],
+                                horizontal=True, key=f"{_dkey}_refmode")
+                            _ref_offset = st.number_input(
+                                "±オフセット（上下に加算）", value=0.0, step=0.1,
+                                key=f"{_dkey}_offset")
+                            _ref_offset_f = float(st.session_state.get(
+                                f"{_dkey}_offset", 0.0))
+                            if _ref_mode == "基準登録データ":
+                                _bl_key_t = f"{pname}_{name}_{var}"
+                                _wv_bl_t  = st.session_state.get(
+                                    pk(pname, "wv_baseline"), {})
+                                _bl_t     = _wv_bl_t.get(_bl_key_t, {})
+                                if _bl_t:
+                                    _ref_wave = np.interp(t_common,
+                                                          np.array(_bl_t["t"]),
+                                                          np.array(_bl_t["mean"]))
+                                else:
+                                    _ref_wave = mean_v
+                                    st.caption("⚠️ 基準未登録のため現データ平均を仮使用")
+                            else:
+                                _ref_cyc = st.number_input(
+                                    "サイクル番号（0起算）", min_value=0,
+                                    max_value=max(0, len(step_waves) - 1),
+                                    value=0, step=1, key=f"{_dkey}_refcyc")
+                                _rc = int(st.session_state.get(f"{_dkey}_refcyc", 0))
+                                _rc = min(_rc, len(step_waves) - 1)
+                                _ref_wave = np.interp(t_common,
+                                                      step_waves[_rc][0],
+                                                      step_waves[_rc][1],
+                                                      left=np.nan, right=np.nan)
+                            _bnd_hi_fn = lambda t_arr: np.interp(
+                                t_arr, t_common, _ref_wave + _ref_offset_f)
+                            _bnd_lo_fn = lambda t_arr: np.interp(
+                                t_arr, t_common, _ref_wave - _ref_offset_f)
+
+                        # 境界プレビュー描画
+                        if has_envelope or True:
+                            _prev_hi = _bnd_hi_fn(t_common)
+                            _prev_lo = _bnd_lo_fn(t_common)
+                            _fig_bnd = go.Figure()
+                            _fig_bnd.add_trace(go.Scatter(
+                                x=np.concatenate([t_common, t_common[::-1]]),
+                                y=np.concatenate([_prev_hi, _prev_lo[::-1]]),
+                                fill="toself", fillcolor="rgba(0,180,80,0.12)",
+                                line=dict(color="rgba(0,0,0,0)"),
+                                name="合格範囲",
+                            ))
+                            _fig_bnd.add_trace(go.Scatter(
+                                x=t_common, y=_prev_hi, mode="lines",
+                                line=dict(color="green", width=1.5, dash="dash"),
+                                name="上限",
+                            ))
+                            _fig_bnd.add_trace(go.Scatter(
+                                x=t_common, y=_prev_lo, mode="lines",
+                                line=dict(color="green", width=1.5, dash="dash"),
+                                name="下限", showlegend=False,
+                            ))
+                            _fig_bnd.add_trace(go.Scatter(
+                                x=t_common, y=mean_v, mode="lines",
+                                line=dict(color="royalblue", width=1.5),
+                                name="平均波形",
+                            ))
+                            _fig_bnd.update_layout(
+                                height=200, margin=dict(t=10, b=30, l=50, r=10),
+                                xaxis_title="t [ms]", yaxis_title=var,
+                            )
+                            st.plotly_chart(_fig_bnd, use_container_width=True,
+                                            key=f"{_dkey}_bnd_preview")
+
+                        _eff_insp_wins_bnd = _render_item_insp_win_t(
+                            _dkey, step_waves, insp_windows)
+
+                        # NG 判定（各サイクル）
+                        if _bnd_on:
+                            _bnd_markers_hi = {"t": [], "v": [], "label": f"#{_di+1} 上限超過",
+                                               "color": _color}
+                            _bnd_markers_lo = {"t": [], "v": [], "label": f"#{_di+1} 下限超過",
+                                               "color": _color}
+                            for j, (t_sw, v_sw) in enumerate(step_waves):
+                                win = (_eff_insp_wins_bnd[j]
+                                       if j < len(_eff_insp_wins_bnd) else None)
+                                if win is not None:
+                                    ws_p, we_p = win
+                                    _mp = (t_sw >= ws_p) & (t_sw <= we_p)
+                                    t_insp, v_insp = t_sw[_mp], v_sw[_mp]
+                                else:
+                                    t_insp, v_insp = t_sw, v_sw
+                                if len(t_insp) == 0:
+                                    continue
+                                hi_j = _bnd_hi_fn(t_insp)
+                                lo_j = _bnd_lo_fn(t_insp)
+                                over_hi = v_insp > hi_j
+                                over_lo = v_insp < lo_j
+                                if np.any(over_hi) or np.any(over_lo):
+                                    peak_ng_flags[j] = True
+                                for ti, vi in zip(t_insp[over_hi], v_insp[over_hi]):
+                                    _bnd_markers_hi["t"].append(float(ti))
+                                    _bnd_markers_hi["v"].append(float(vi))
+                                for ti, vi in zip(t_insp[over_lo], v_insp[over_lo]):
+                                    _bnd_markers_lo["t"].append(float(ti))
+                                    _bnd_markers_lo["v"].append(float(vi))
+                            # グラフ用上下限ライン
+                            all_inf_markers.append({
+                                "t": [], "v": [],
+                                "label": f"#{_di+1} 上下限ライン",
+                                "color": _color,
+                                "_bnd_hi": _bnd_hi_fn(t_common).tolist(),
+                                "_bnd_lo": _bnd_lo_fn(t_common).tolist(),
+                                "_t_common": t_common.tolist(),
+                            })
+                            if _bnd_markers_hi["t"]:
+                                all_inf_markers.append(_bnd_markers_hi)
+                            if _bnd_markers_lo["t"]:
+                                all_inf_markers.append(_bnd_markers_lo)
+
+                    elif _dtype in ("最大値検査", "最小値検査"):
+                        _is_max = (_dtype == "最大値検査")
+                        _vlabel = "最大値" if _is_max else "最小値"
+                        st.caption(f"検査ウィンドウ内の{_vlabel}を各サイクルで計算し、合格基準と照合します。")
+                        _pk_ca, _pk_cb, _pk_cc = st.columns([1, 2, 2])
+                        with _pk_ca:
+                            st.markdown(f"**{_vlabel}**")
+                            st.checkbox("有効", key=f"{_dkey}_on")
+                        with _pk_cb:
+                            st.number_input("合格 上限（超えたらNG）",
+                                            value=0.0, step=0.1,
+                                            key=f"{_dkey}_hi", help="0 = 判定なし")
+                        with _pk_cc:
+                            st.number_input("合格 下限（下回ったらNG）",
+                                            value=0.0, step=0.1,
+                                            key=f"{_dkey}_lo", help="0 = 判定なし")
+
+                        _eff_insp_wins = _render_item_insp_win_t(
+                            _dkey, step_waves, insp_windows)
+
+                        _det_on = bool(st.session_state.get(f"{_dkey}_on", False))
+                        _det_hi = float(st.session_state.get(f"{_dkey}_hi", 0.0))
+                        _det_lo = float(st.session_state.get(f"{_dkey}_lo", 0.0))
+                        if _det_on:
+                            for j, (t_sw, v_sw) in enumerate(step_waves):
+                                win = _eff_insp_wins[j] if j < len(_eff_insp_wins) else None
+                                if win is not None:
+                                    ws_p, we_p = win
+                                    _mp = (t_sw >= ws_p) & (t_sw <= we_p)
+                                    _vp = v_sw[_mp] if _mp.sum() > 0 else v_sw
+                                else:
+                                    _vp = v_sw
+                                _val = float(np.nanmax(_vp) if _is_max else np.nanmin(_vp))
+                                if _det_hi != 0.0 and _val > _det_hi:
+                                    peak_ng_flags[j] = True
+                                if _det_lo != 0.0 and _val < _det_lo:
+                                    peak_ng_flags[j] = True
+
+                    else:  # 検出点比較
+                        # ── 検出点比較 ─────────────────────────────
+                        st.caption(
+                            "変曲点を検出し、その検出点が指定した合格ゾーン（t × V の矩形）に"
+                            "入るか/入らないかでNG判定します。"
+                        )
+                        # 傾き変化点パラメータ（コンパクト版）
+                        _zc1, _zc2, _zc3, _zc4, _zc5 = st.columns([2, 2, 2, 3, 1])
+                        with _zc1:
+                            st.markdown("**平滑化幅**")
+                            st.number_input("サンプル数", min_value=1, max_value=50,
+                                            value=5, step=1, key=f"{_dkey}_smooth")
+                        with _zc2:
+                            st.markdown("**n_L（左）**")
+                            st.number_input("左サンプル", min_value=1, max_value=100,
+                                            value=3, step=1, key=f"{_dkey}_nleft")
+                        with _zc3:
+                            st.markdown("**n_R（右）**")
+                            st.number_input("右サンプル", min_value=1, max_value=100,
+                                            value=3, step=1, key=f"{_dkey}_nright")
+                        with _zc4:
+                            _zsm = int(st.session_state.get(f"{_dkey}_smooth", 5))
+                            _znl = int(st.session_state.get(f"{_dkey}_nleft",  3))
+                            _znr = int(st.session_state.get(f"{_dkey}_nright", 3))
+                            _zref = _slope_diff_max_ref_t(
+                                step_waves[:min(5, len(step_waves))],
+                                smooth_w=_zsm, n_left=_znl, n_right=_znr)
+                            _zstp = max(0.0001, round(_zref / 20, 4))
+                            st.markdown("**閾値 |R − L|**")
+                            st.number_input(f"（参考最大 ≈ {_zref:.4f}）",
+                                            min_value=0.0, value=0.0,
+                                            step=_zstp, format="%.4f",
+                                            key=f"{_dkey}_thresh")
+                        with _zc5:
+                            st.markdown("**有効**")
+                            st.checkbox("ON", key=f"{_dkey}_on")
+                        _zd1, _zd2 = st.columns(2)
+                        with _zd1:
+                            st.checkbox("📈 増加方向を検出 (R > L)",
+                                        value=True, key=f"{_dkey}_dir_inc")
+                        with _zd2:
+                            st.checkbox("📉 減少方向を検出 (L > R)",
+                                        value=True, key=f"{_dkey}_dir_dec")
+
+                        st.markdown("**🎯 合格ゾーン（検出点がこの矩形に入ること）**")
+                        _zr1, _zr2, _zr3, _zr4 = st.columns(4)
+                        with _zr1:
+                            st.number_input("t 開始 [ms]", value=0.0, step=5.0,
+                                            key=f"{_dkey}_zt_s")
+                        with _zr2:
+                            st.number_input("t 終了 [ms]", value=100.0, step=5.0,
+                                            key=f"{_dkey}_zt_e")
+                        with _zr3:
+                            st.number_input("V 下限", value=0.0, step=0.1,
+                                            key=f"{_dkey}_zv_lo")
+                        with _zr4:
+                            st.number_input("V 上限", value=0.0, step=0.1,
+                                            key=f"{_dkey}_zv_hi")
+
+                        st.markdown("**⚠️ NG 条件（独立設定）**")
+                        _zng1, _zng2 = st.columns(2)
+                        with _zng1:
+                            st.checkbox("合格ゾーン内に検出点がない → NG",
+                                        key=f"{_dkey}_ng_empty")
+                        with _zng2:
+                            st.checkbox("合格ゾーン外に検出点がある → NG",
+                                        key=f"{_dkey}_ng_outside")
+
+                        _zdet_on     = bool(st.session_state.get(f"{_dkey}_on", False))
+                        _zdet_thr    = float(st.session_state.get(f"{_dkey}_thresh", 0.0))
+                        _zsm_d       = int(st.session_state.get(f"{_dkey}_smooth", 5))
+                        _znl_d       = int(st.session_state.get(f"{_dkey}_nleft",  3))
+                        _znr_d       = int(st.session_state.get(f"{_dkey}_nright", 3))
+                        _zdinc       = bool(st.session_state.get(f"{_dkey}_dir_inc", True))
+                        _zddec       = bool(st.session_state.get(f"{_dkey}_dir_dec", True))
+                        _zts         = float(st.session_state.get(f"{_dkey}_zt_s", 0.0))
+                        _zte         = float(st.session_state.get(f"{_dkey}_zt_e", 100.0))
+                        _zvlo        = float(st.session_state.get(f"{_dkey}_zv_lo", 0.0))
+                        _zvhi        = float(st.session_state.get(f"{_dkey}_zv_hi", 0.0))
+                        _zuse_vrange = _zvlo < _zvhi
+                        _zng_empty   = bool(st.session_state.get(f"{_dkey}_ng_empty", False))
+                        _zng_outside = bool(st.session_state.get(f"{_dkey}_ng_outside", False))
+
+                        if _zdet_on and _zdet_thr > 0 and (_zng_empty or _zng_outside):
+                            _zmkt_in, _zmkv_in   = [], []
+                            _zmkt_out, _zmkv_out = [], []
+                            for j, (t_sw, v_sw) in enumerate(step_waves):
+                                _zts_arr = _detect_inflections(
+                                    t_sw, v_sw,
+                                    smooth_w=_zsm_d, n_left=_znl_d, n_right=_znr_d,
+                                    threshold=_zdet_thr,
+                                    detect_increase=_zdinc, detect_decrease=_zddec)
+                                _z_in, _z_out = [], []
+                                for ti in _zts_arr:
+                                    vi = float(np.interp(ti, t_sw, v_sw))
+                                    in_t = _zts <= ti <= _zte
+                                    in_v = (not _zuse_vrange) or (_zvlo <= vi <= _zvhi)
+                                    if in_t and in_v:
+                                        _z_in.append((ti, vi))
+                                        _zmkt_in.append(ti); _zmkv_in.append(vi)
+                                    else:
+                                        _z_out.append((ti, vi))
+                                        _zmkt_out.append(ti); _zmkv_out.append(vi)
+                                # NG判定
+                                if _zng_empty and len(_z_in) == 0:
+                                    peak_ng_flags[j] = True
+                                if _zng_outside and len(_z_out) > 0:
+                                    peak_ng_flags[j] = True
+                            if _zmkt_in:
+                                all_inf_markers.append({
+                                    "t": _zmkt_in, "v": _zmkv_in,
+                                    "label": f"#{_di+1} 検出点（ゾーン内） ({len(_zmkt_in)}点)",
+                                    "color": _color,
+                                })
+                            if _zmkt_out:
+                                all_inf_markers.append({
+                                    "t": _zmkt_out, "v": _zmkv_out,
+                                    "label": f"#{_di+1} 検出点（ゾーン外） ({len(_zmkt_out)}点)",
+                                    "color": "red",
+                                })
+
+            if _t_del_idx is not None:
+                _tdet_list.pop(_t_del_idx)
+                st.session_state[_tdet_list_key] = _tdet_list
                 st.rerun()
-            st.caption(f"✅ 基準登録済み")
+
+            # ── グラフ描画 ─────────────────────────────────────────
+            fig = go.Figure()
+
+            _MAX_WAVE = 80
+            for j, (t_sw, v_sw) in enumerate(step_waves):
+                if j >= _MAX_WAVE:
+                    break
+                _env_ng  = ng_flags[j]      if j < len(ng_flags)      else False
+                _peak_ng = peak_ng_flags[j] if j < len(peak_ng_flags) else False
+                if _env_ng or _peak_ng:
+                    color_cyc = "rgba(220,50,50,0.25)"
+                else:
+                    color_cyc = "rgba(100,120,200,0.12)"
+                fig.add_trace(go.Scatter(
+                    x=t_sw, y=v_sw, mode="lines",
+                    line=dict(color=color_cyc, width=1),
+                    showlegend=False,
+                ))
+
+            fig.add_trace(go.Scatter(
+                x=t_common, y=mean_v, mode="lines",
+                line=dict(color="royalblue", width=2.5),
+                name="平均波形",
+            ))
+
+            if has_envelope and env_hi is not None:
+                fig.add_trace(go.Scatter(
+                    x=np.concatenate([t_common, t_common[::-1]]),
+                    y=np.concatenate([env_hi, env_lo[::-1]]),
+                    fill="toself", fillcolor="rgba(0,200,100,0.10)",
+                    line=dict(color="rgba(0,0,0,0)"),
+                    name="良品範囲", showlegend=True,
+                ))
+                fig.add_trace(go.Scatter(
+                    x=t_common, y=env_hi, mode="lines",
+                    line=dict(color="green", width=1.5, dash="dash"),
+                    name="上限", showlegend=False,
+                ))
+                fig.add_trace(go.Scatter(
+                    x=t_common, y=env_lo, mode="lines",
+                    line=dict(color="green", width=1.5, dash="dash"),
+                    name="下限", showlegend=False,
+                ))
+
+            fig.add_vline(x=0, line_color="gray", line_dash="dot",
+                          annotation_text="ステップ開始", annotation_position="top left")
+
+            _repr_win = next((w for w in insp_windows if w is not None), None)
+            if _repr_win is not None:
+                ws_r, we_r = _repr_win
+                fig.add_vrect(x0=ws_r, x1=we_r,
+                              fillcolor="rgba(255,200,0,0.08)",
+                              line_width=1, line_color="orange",
+                              annotation_text="検査ウィンドウ",
+                              annotation_position="top right")
+
+            ng_count = sum(ng_flags)
+            pk_ng_count = sum(peak_ng_flags)
+            if ng_count > 0:
+                fig.add_trace(go.Scatter(
+                    x=[None], y=[None], mode="lines",
+                    line=dict(color="rgba(220,50,50,0.7)", width=2),
+                    name=f"波形NG ({ng_count}/{len(step_waves)})",
+                ))
+            if pk_ng_count > 0:
+                fig.add_trace(go.Scatter(
+                    x=[None], y=[None], mode="lines",
+                    line=dict(color="rgba(200,50,200,0.7)", width=2),
+                    name=f"ピークNG ({pk_ng_count}/{len(step_waves)})",
+                ))
+
+            # 検出マーカー・上下判定比較ライン（各検出項目の色で描画）
+            for _mk in all_inf_markers:
+                if "_bnd_hi" in _mk:
+                    # 上下判定比較の境界ライン
+                    _tc = np.array(_mk["_t_common"])
+                    _hi = np.array(_mk["_bnd_hi"])
+                    _lo = np.array(_mk["_bnd_lo"])
+                    fig.add_trace(go.Scatter(
+                        x=np.concatenate([_tc, _tc[::-1]]),
+                        y=np.concatenate([_hi, _lo[::-1]]),
+                        fill="toself",
+                        fillcolor=f"rgba(0,180,80,0.08)",
+                        line=dict(color="rgba(0,0,0,0)"),
+                        name=_mk["label"], showlegend=True,
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=_tc, y=_hi, mode="lines",
+                        line=dict(color=_mk["color"], width=1.5, dash="dash"),
+                        name=f"{_mk['label']} 上限", showlegend=False,
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=_tc, y=_lo, mode="lines",
+                        line=dict(color=_mk["color"], width=1.5, dash="dash"),
+                        name=f"{_mk['label']} 下限", showlegend=False,
+                    ))
+                elif _mk["t"]:
+                    fig.add_trace(go.Scatter(
+                        x=_mk["t"], y=_mk["v"], mode="markers",
+                        marker=dict(symbol="diamond", color=_mk["color"], size=8,
+                                    line=dict(color="white", width=1)),
+                        name=_mk["label"],
+                    ))
+
+            fig.update_layout(
+                xaxis_title="ステップ開始からの時間 [ms]",
+                yaxis_title=var,
+                height=340,
+                margin=dict(t=20, b=40, l=60, r=20),
+                legend=dict(orientation="h", y=1.05, x=1, xanchor="right"),
+                hovermode="x unified",
+            )
+            st.plotly_chart(fig, use_container_width=True, key=f"{_vkey}_fig")
+
+            # ── サマリー & 基準登録 ───────────────────────────────────
+            total_w = len(step_waves)
+            sm_c1, sm_c2, sm_c3, sm_c4, sm_c5, sm_c6 = st.columns(6)
+            sm_c1.metric("サイクル数", total_w)
+            sm_c2.metric("波形NG数", ng_count,
+                         delta=None if ng_count == 0 else f"{ng_count/total_w*100:.1f}%")
+            sm_c3.metric("ピークNG数", pk_ng_count,
+                         delta=None if pk_ng_count == 0 else f"{pk_ng_count/total_w*100:.1f}%")
+            _mx_vals = [np.nanmax(v) for _, v in step_waves]
+            _mn_vals = [np.nanmin(v) for _, v in step_waves]
+            sm_c4.metric("最大値（平均）", f"{float(np.mean(_mx_vals)):.3f}")
+            sm_c5.metric("最小値（平均）", f"{float(np.mean(_mn_vals)):.3f}")
+            sm_c6.metric("最大値σ",       f"{float(np.std(_mx_vals)):.3f}")
+
+            bl_key = f"{pname}_{name}_{var}"
+            if st.button(f"📌 現データを基準として登録（{var}）",
+                         key=f"{_vkey}_bl_reg", type="secondary"):
+                _wv_bl[bl_key] = {
+                    "t":    t_common.tolist(),
+                    "mean": mean_v.tolist(),
+                    "std":  std_v.tolist(),
+                }
+                st.session_state[pk(pname, "wv_baseline")] = _wv_bl
+                st.success(f"✅ {var} の波形基準を登録しました（{len(step_waves)} サイクル）")
+                st.rerun()
+
+            if bl_key in _wv_bl:
+                if st.button(f"🗑 基準をリセット（{var}）",
+                             key=f"{_vkey}_bl_del", type="secondary"):
+                    _wv_bl.pop(bl_key, None)
+                    st.session_state[pk(pname, "wv_baseline")] = _wv_bl
+                    st.rerun()
+                st.caption(f"✅ 基準登録済み")
+
+        # ══════════════════════════════════════════════════════════
+        with _tab_xy:
+            # ── XY グラフ タブ ──────────────────────────────────────
+            _num_cols_xy = [c for c in df.columns
+                            if c != "time_offset_ms"
+                            and pd.api.types.is_numeric_dtype(df[c])
+                            and c != var]
+            if not _num_cols_xy:
+                st.info("XYグラフに使える数値変数が他にありません。")
+            else:
+                xy_xvar = st.selectbox(
+                    "X軸変数", _num_cols_xy, index=0,
+                    key=f"{_vkey}_xy_xvar",
+                )
+
+                # X軸変数を含めて波形取得（キャッシュ利用）
+                _vars_needed = tuple(sorted(set(waveform_vars) | {xy_xvar}))
+                try:
+                    _wf_xy = cached_waveforms(df, trigger_col, edge, _vars_needed)
+                except Exception as _e:
+                    st.error(f"波形取得エラー: {_e}")
+                    _wf_xy = []
+
+                # ── XY コントロールパネル ───────────────────────────
+                xy_c1, xy_c2, xy_c3, xy_c4 = st.columns([3, 3, 3, 3])
+                with xy_c1:
+                    st.markdown("**時間ウィンドウ（ステップ開始基準）**")
+                    st.caption("※ 時間軸タブの表示ウィンドウとは独立して設定可")
+                    xy_use_twin = st.checkbox("時間で絞り込む",
+                                              key=f"{_vkey}_xy_use_twin")
+                    if xy_use_twin:
+                        xy_t_s = st.number_input("開始 [ms]", min_value=-500,
+                                                  max_value=2000, value=0, step=5,
+                                                  key=f"{_vkey}_xy_ts")
+                        xy_t_e = st.number_input("終了 [ms]", min_value=-500,
+                                                  max_value=2000, value=300, step=5,
+                                                  key=f"{_vkey}_xy_te")
+                        xy_t_e = max(xy_t_e, xy_t_s + 1)
+                    else:
+                        # 時間軸タブの表示ウィンドウをデフォルトとして継承
+                        xy_t_s = -int(st.session_state.get(f"{_vkey}_wpre",  50))
+                        xy_t_e =  int(st.session_state.get(f"{_vkey}_wpost", 300))
+                with xy_c2:
+                    st.markdown("**X軸表示範囲**")
+                    xy_xlo = st.number_input("X下限", value=0.0, step=0.1,
+                                              key=f"{_vkey}_xy_xlo")
+                    xy_xhi = st.number_input("X上限", value=0.0, step=0.1,
+                                              key=f"{_vkey}_xy_xhi")
+                    _use_xlim = xy_xlo < xy_xhi
+                with xy_c3:
+                    st.markdown("**検査ウィンドウ（X範囲）**")
+                    xy_insp_xs = st.number_input("X 開始", value=0.0, step=0.1,
+                                                  key=f"{_vkey}_xy_ixs")
+                    xy_insp_xe = st.number_input("X 終了", value=0.0, step=0.1,
+                                                  key=f"{_vkey}_xy_ixe")
+                    _use_xy_insp = xy_insp_xs < xy_insp_xe
+                with xy_c4:
+                    st.markdown("**良品範囲（Y軸）**")
+                    xy_good_mode = st.radio("種別", ["手動入力", "自動（基準±Nσ）"],
+                                             horizontal=True, key=f"{_vkey}_xy_gmode")
+                    if xy_good_mode == "手動入力":
+                        xy_good_lo = st.number_input("Y下限", value=0.0, step=0.1,
+                                                      key=f"{_vkey}_xy_glo")
+                        xy_good_hi = st.number_input("Y上限", value=0.0, step=0.1,
+                                                      key=f"{_vkey}_xy_ghi")
+                        _use_xy_manual = xy_good_lo < xy_good_hi
+                        xy_good_nsig = None
+                    else:
+                        xy_good_nsig = st.number_input("N（±Nσ）", min_value=1.0,
+                                                        max_value=6.0, value=3.0,
+                                                        step=0.5, key=f"{_vkey}_xy_nsig")
+                        _use_xy_manual = False
+                        xy_good_lo = xy_good_hi = None
+
+                # ── XY 波形データ抽出 ─────────────────────────────────
+                xy_waves = []
+                _n_cyc_xy = min(len(_wf_xy), len(start_offsets))
+                for i in range(_n_cyc_xy):
+                    cyc      = _wf_xy[i]
+                    step_off = float(start_offsets[i]) \
+                               if not np.isnan(start_offsets[i]) else None
+                    if step_off is None:
+                        continue
+                    if xy_xvar not in cyc.columns or var not in cyc.columns:
+                        continue
+                    t_abs  = cyc["time_offset_ms"].values
+                    t_step = t_abs - step_off
+                    # 時間ウィンドウで絞り込み
+                    t_mask = (t_step >= xy_t_s) & (t_step <= xy_t_e)
+                    if t_mask.sum() < 2:
+                        continue
+                    x_arr = cyc[xy_xvar].values[t_mask].astype(np.float64)
+                    y_arr = cyc[var].values[t_mask].astype(np.float64)
+                    # さらに X 軸表示範囲でも絞り込み
+                    if _use_xlim:
+                        xmask = (x_arr >= xy_xlo) & (x_arr <= xy_xhi)
+                        if xmask.sum() < 2:
+                            continue
+                        x_arr, y_arr = x_arr[xmask], y_arr[xmask]
+                    xy_waves.append((x_arr, y_arr))
+
+                if not xy_waves:
+                    st.warning(f"{var} vs {xy_xvar}: 有効な波形データがありません")
+                else:
+                    # ── XY エンベロープ計算 ───────────────────────
+                    _all_x   = np.concatenate([xw for xw, _ in xy_waves])
+                    _x_min   = float(np.nanmin(_all_x))
+                    _x_max   = float(np.nanmax(_all_x))
+                    if _use_xlim:
+                        _x_min = max(_x_min, xy_xlo)
+                        _x_max = min(_x_max, xy_xhi)
+                    x_common_xy = np.linspace(_x_min, _x_max, 400)
+                    xy_mat = np.full((len(xy_waves), len(x_common_xy)), np.nan)
+                    for j, (xw, yw) in enumerate(xy_waves):
+                        si = np.argsort(xw)
+                        xws, yws = xw[si], yw[si]
+                        if len(np.unique(xws)) < 2:
+                            continue
+                        in_rng = (x_common_xy >= xws[0]) & (x_common_xy <= xws[-1])
+                        xy_mat[j, in_rng] = np.interp(x_common_xy[in_rng], xws, yws)
+
+                    xy_mean = np.nanmean(xy_mat, axis=0)
+                    xy_std  = np.nanstd(xy_mat, axis=0)
+
+                    # XY 良品範囲
+                    _xy_bl_all = st.session_state.get(pk(pname, "wv_xy_baseline"), {})
+                    _xy_bl_key = f"{pname}_{name}_{var}_{xy_xvar}"
+                    if xy_good_mode == "自動（基準±Nσ）":
+                        _xy_bl = _xy_bl_all.get(_xy_bl_key, {})
+                        if _xy_bl:
+                            _xbl_m = np.interp(x_common_xy, np.array(_xy_bl["x"]),
+                                               np.array(_xy_bl["mean"]),
+                                               left=np.nan, right=np.nan)
+                            _xbl_s = np.interp(x_common_xy, np.array(_xy_bl["x"]),
+                                               np.array(_xy_bl["std"]),
+                                               left=np.nan, right=np.nan)
+                            xy_env_hi = _xbl_m + xy_good_nsig * _xbl_s
+                            xy_env_lo = _xbl_m - xy_good_nsig * _xbl_s
+                            xy_has_env = True
+                        else:
+                            xy_env_hi = xy_mean + xy_good_nsig * xy_std
+                            xy_env_lo = xy_mean - xy_good_nsig * xy_std
+                            xy_has_env = True
+                            st.caption("⚠️ XY基準未登録のため現データ平均±Nσを仮表示")
+                    elif _use_xy_manual:
+                        xy_env_hi  = np.full_like(x_common_xy, xy_good_hi)
+                        xy_env_lo  = np.full_like(x_common_xy, xy_good_lo)
+                        xy_has_env = True
+                    else:
+                        xy_has_env = False
+                        xy_env_hi = xy_env_lo = None
+
+                    # ── XY NG判定 ─────────────────────────────────
+                    xy_ng_flags = []
+                    if xy_has_env and _use_xy_insp:
+                        for (xw, yw) in xy_waves:
+                            si = np.argsort(xw)
+                            xws, yws = xw[si], yw[si]
+                            mxi = (xws >= xy_insp_xs) & (xws <= xy_insp_xe)
+                            if mxi.sum() == 0:
+                                xy_ng_flags.append(False)
+                                continue
+                            hi_p = np.interp(xws[mxi], x_common_xy, xy_env_hi)
+                            lo_p = np.interp(xws[mxi], x_common_xy, xy_env_lo)
+                            xy_ng_flags.append(
+                                bool(np.any(yws[mxi] > hi_p) or np.any(yws[mxi] < lo_p)))
+                    else:
+                        xy_ng_flags = [False] * len(xy_waves)
+
+                    # ── XY 検出点リスト ──────────────────────────────────
+                    _xydet_list_key = f"{_vkey}_xy_det_list"
+                    _xydet_cnt_key  = f"{_vkey}_xy_det_cnt"
+                    if _xydet_list_key not in st.session_state:
+                        st.session_state[_xydet_list_key] = []
+                    if _xydet_cnt_key not in st.session_state:
+                        st.session_state[_xydet_cnt_key] = 0
+                    _xydet_list = st.session_state[_xydet_list_key]
+
+                    _DET_TYPES_XY = ["傾き変化点", "上下判定比較", "Y最大値検査", "Y最小値検査", "検出点比較"]
+                    _DET_COLORS_XY = ["darkorange", "deeppink", "limegreen", "dodgerblue", "gold"]
+
+                    _xy_add_ca, _xy_add_cb = st.columns([2, 4])
+                    with _xy_add_cb:
+                        st.selectbox("検出点タイプ", _DET_TYPES_XY,
+                                     key=f"{_vkey}_xy_det_type_sel")
+                    with _xy_add_ca:
+                        st.markdown("<div style='padding-top:28px'></div>",
+                                    unsafe_allow_html=True)
+                        if st.button("＋ 検出点を追加", key=f"{_vkey}_xy_det_add",
+                                     type="secondary"):
+                            _xcnt = st.session_state[_xydet_cnt_key]
+                            _xnew_type = st.session_state.get(
+                                f"{_vkey}_xy_det_type_sel", "傾き変化点")
+                            _xydet_list.append({"id": f"xyd{_xcnt}", "type": _xnew_type})
+                            st.session_state[_xydet_list_key] = _xydet_list
+                            st.session_state[_xydet_cnt_key] = _xcnt + 1
+                            st.rerun()
+
+                    # 結果収集用
+                    all_xy_inf_markers = []
+                    xy_peak_ng_flags   = [False] * len(xy_waves)
+                    xy_cyc_maxY = [float(np.nanmax(yw)) for _, yw in xy_waves]
+                    xy_cyc_minY = [float(np.nanmin(yw)) for _, yw in xy_waves]
+
+                    _xy_del_idx = None
+                    for _xdi, _xdet in enumerate(_xydet_list):
+                        _xdid   = _xdet["id"]
+                        _xdtype = _xdet["type"]
+                        _xdkey  = f"{_vkey}_{_xdid}"
+                        _xcolor = _DET_COLORS_XY[_xdi % len(_DET_COLORS_XY)]
+                        _xicon  = "📐" if _xdtype == "傾き変化点" else "📏"
+
+                        with st.expander(f"{_xicon} #{_xdi+1} {_xdtype}", expanded=True):
+                            _xhd, _xdel_btn = st.columns([8, 1])
+                            with _xdel_btn:
+                                if st.button("🗑", key=f"{_xdkey}_del", help="削除"):
+                                    _xy_del_idx = _xdi
+
+                            if _xdtype == "傾き変化点":
+                                st.caption(
+                                    "① 移動平均でノイズ除去 → "
+                                    "② 左右 n サンプル離れた点で傾き L・R を計算（dY/dX）→ "
+                                    "③ |R − L| > 閾値 かつ 検出範囲内 の点を検出"
+                                )
+                                xyi_c1, xyi_c2, xyi_c3, xyi_c4, xyi_c5 = st.columns(
+                                    [2, 2, 2, 3, 1])
+                                with xyi_c1:
+                                    st.markdown("**① 平滑化幅**")
+                                    st.number_input("サンプル数",
+                                                    min_value=1, max_value=50,
+                                                    value=5, step=1,
+                                                    key=f"{_xdkey}_smooth")
+                                with xyi_c2:
+                                    st.markdown("**n_L（左）**")
+                                    st.number_input("左へ何サンプル",
+                                                    min_value=1, max_value=100,
+                                                    value=3, step=1,
+                                                    key=f"{_xdkey}_nleft",
+                                                    help="L = (Y[i]−Y[i−n_L]) / ΔX")
+                                with xyi_c3:
+                                    st.markdown("**n_R（右）**")
+                                    st.number_input("右へ何サンプル",
+                                                    min_value=1, max_value=100,
+                                                    value=3, step=1,
+                                                    key=f"{_xdkey}_nright",
+                                                    help="R = (Y[i+n_R]−Y[i]) / ΔX")
+                                with xyi_c4:
+                                    _xsm = int(st.session_state.get(f"{_xdkey}_smooth", 5))
+                                    _xnl = int(st.session_state.get(f"{_xdkey}_nleft",  3))
+                                    _xnr = int(st.session_state.get(f"{_xdkey}_nright", 3))
+                                    _xref = _slope_diff_max_ref_xy(
+                                        xy_waves[:min(5, len(xy_waves))],
+                                        smooth_w=_xsm, n_left=_xnl, n_right=_xnr)
+                                    _xstp = max(0.0001, round(_xref / 20, 4))
+                                    st.markdown("**③ 閾値 |R − L|**")
+                                    st.number_input(f"（参考最大 ≈ {_xref:.4f}）",
+                                                    min_value=0.0, value=0.0,
+                                                    step=_xstp, format="%.4f",
+                                                    key=f"{_xdkey}_thresh")
+                                with xyi_c5:
+                                    st.markdown("**有効**")
+                                    st.checkbox("ON", key=f"{_xdkey}_on")
+
+                                # 方向指定
+                                _xdir_ca, _xdir_cb = st.columns(2)
+                                with _xdir_ca:
+                                    st.checkbox("📈 増加方向を検出 (R > L)",
+                                                value=True, key=f"{_xdkey}_dir_inc")
+                                with _xdir_cb:
+                                    st.checkbox("📉 減少方向を検出 (L > R)",
+                                                value=True, key=f"{_xdkey}_dir_dec")
+
+                                xyi_rng_c1, xyi_rng_c2, xyi_rng_c3 = st.columns([1, 2, 2])
+                                with xyi_rng_c1:
+                                    st.markdown("**🔍 検出範囲（X値）**")
+                                    st.checkbox("指定する", key=f"{_xdkey}_use_range")
+                                _xuse_rng = bool(st.session_state.get(
+                                    f"{_xdkey}_use_range", False))
+                                with xyi_rng_c2:
+                                    st.number_input("X 開始", value=0.0, step=0.5,
+                                                    key=f"{_xdkey}_range_s",
+                                                    disabled=not _xuse_rng)
+                                with xyi_rng_c3:
+                                    st.number_input("X 終了", value=0.0, step=0.5,
+                                                    key=f"{_xdkey}_range_e",
+                                                    disabled=not _xuse_rng)
+
+                                _xsm_d  = int(st.session_state.get(f"{_xdkey}_smooth", 5))
+                                _xnl_d  = int(st.session_state.get(f"{_xdkey}_nleft",  3))
+                                _xnr_d  = int(st.session_state.get(f"{_xdkey}_nright", 3))
+                                _xth_d  = float(st.session_state.get(f"{_xdkey}_thresh", 0.0))
+                                _xrs_d  = float(st.session_state.get(
+                                    f"{_xdkey}_range_s", 0.0)) if _xuse_rng else None
+                                _xre_d  = float(st.session_state.get(
+                                    f"{_xdkey}_range_e", 0.0)) if _xuse_rng else None
+                                _xdinc  = bool(st.session_state.get(
+                                    f"{_xdkey}_dir_inc", True))
+                                _xddec  = bool(st.session_state.get(
+                                    f"{_xdkey}_dir_dec", True))
+                                st.markdown("---")
+                                st.markdown("**📊 3段階プレビュー**（平均曲線）")
+                                _render_inflection_debug_xy(
+                                    x_common_xy, xy_mean,
+                                    smooth_w=_xsm_d, n_left=_xnl_d, n_right=_xnr_d,
+                                    threshold=_xth_d,
+                                    range_s=_xrs_d, range_e=_xre_d,
+                                    x_label=xy_xvar, y_label=var,
+                                    chart_key=f"{_xdkey}_preview",
+                                )
+
+                                _xdet_on  = bool(st.session_state.get(f"{_xdkey}_on", False))
+                                _xdet_thr = float(st.session_state.get(
+                                    f"{_xdkey}_thresh", 0.0))
+                                if _xdet_on and _xdet_thr > 0:
+                                    _xmkx, _xmky = [], []
+                                    for (xw, yw) in xy_waves:
+                                        ix_pts, _ = _detect_xy_inflections(
+                                            xw, yw, smooth_w=_xsm_d,
+                                            n_left=_xnl_d, n_right=_xnr_d,
+                                            threshold=_xdet_thr,
+                                            range_s=_xrs_d, range_e=_xre_d,
+                                            detect_increase=_xdinc,
+                                            detect_decrease=_xddec)
+                                        si = np.argsort(xw)
+                                        for xi in ix_pts:
+                                            _xmkx.append(float(xi))
+                                            _xmky.append(float(
+                                                np.interp(xi, xw[si], yw[si])))
+                                    if _xmkx:
+                                        all_xy_inf_markers.append({
+                                            "x": _xmkx, "y": _xmky,
+                                            "label": f"#{_xdi+1} 傾き変化点 ({len(_xmkx)}点)",
+                                            "color": _xcolor,
+                                        })
+
+                            elif _xdtype == "上下判定比較":
+                                # ── XY 上下判定比較 ──────────────────────────
+                                st.caption("X軸ごとに上下限を定義し、各サイクルの曲線が範囲内か判定します。")
+                                _xbnd_type = st.radio(
+                                    "境界タイプ",
+                                    ["絶対値キーポイント", "基準±Nσ",
+                                     "現データ エンベロープ±マージン",
+                                     "参照サイクル±オフセット"],
+                                    horizontal=True, key=f"{_xdkey}_btype",
+                                )
+                                _xbnd_on = st.checkbox("有効", key=f"{_xdkey}_on")
+
+                                if _xbnd_type == "絶対値キーポイント":
+                                    st.caption("X値と上限・下限を直接入力してください。")
+                                    _xkp_default = pd.DataFrame({
+                                        f"X ({xy_xvar})": [
+                                            float(_x_min), float(_x_max)],
+                                        "上限": [float(np.nanmax(xy_mean)) * 1.1,
+                                                float(np.nanmax(xy_mean)) * 1.1],
+                                        "下限": [float(np.nanmin(xy_mean)) * 0.9,
+                                                float(np.nanmin(xy_mean)) * 0.9],
+                                    })
+                                    _xkp_key = f"{_xdkey}_kp_df"
+                                    if _xkp_key not in st.session_state:
+                                        st.session_state[_xkp_key] = _xkp_default
+                                    _xkp_edited = st.data_editor(
+                                        st.session_state[_xkp_key],
+                                        num_rows="dynamic",
+                                        use_container_width=True,
+                                        key=f"{_xdkey}_kp_editor",
+                                    )
+                                    _xkp_x  = _xkp_edited.iloc[:, 0].values.astype(float)
+                                    _xkp_hi = _xkp_edited["上限"].values.astype(float)
+                                    _xkp_lo = _xkp_edited["下限"].values.astype(float)
+                                    _xbnd_hi_fn = lambda xa: np.interp(xa, _xkp_x, _xkp_hi)
+                                    _xbnd_lo_fn = lambda xa: np.interp(xa, _xkp_x, _xkp_lo)
+
+                                elif _xbnd_type == "基準±Nσ":
+                                    _xnsig = st.number_input(
+                                        "N（±Nσ）", min_value=0.1, max_value=10.0,
+                                        value=3.0, step=0.5, key=f"{_xdkey}_nsig")
+                                    _xnsig_f = float(st.session_state.get(
+                                        f"{_xdkey}_nsig", 3.0))
+                                    _xy_bl_all2 = st.session_state.get(
+                                        pk(pname, "wv_xy_baseline"), {})
+                                    _xy_bl2 = _xy_bl_all2.get(
+                                        f"{pname}_{name}_{var}_{xy_xvar}", {})
+                                    if _xy_bl2:
+                                        _xbl_m2 = np.interp(x_common_xy,
+                                                             np.array(_xy_bl2["x"]),
+                                                             np.array(_xy_bl2["mean"]))
+                                        _xbl_s2 = np.interp(x_common_xy,
+                                                             np.array(_xy_bl2["x"]),
+                                                             np.array(_xy_bl2["std"]))
+                                    else:
+                                        _xbl_m2, _xbl_s2 = xy_mean, xy_std
+                                        st.caption("⚠️ XY基準未登録のため現データ平均±Nσを仮使用")
+                                    _xbnd_hi_fn = lambda xa: np.interp(
+                                        xa, x_common_xy, _xbl_m2 + _xnsig_f * _xbl_s2)
+                                    _xbnd_lo_fn = lambda xa: np.interp(
+                                        xa, x_common_xy, _xbl_m2 - _xnsig_f * _xbl_s2)
+
+                                elif _xbnd_type == "現データ エンベロープ±マージン":
+                                    _xenv_mg = st.number_input(
+                                        "マージン（上下に加算）", value=0.0, step=0.1,
+                                        key=f"{_xdkey}_margin")
+                                    _xenv_mg_f = float(st.session_state.get(
+                                        f"{_xdkey}_margin", 0.0))
+                                    _xbnd_hi_fn = lambda xa: np.interp(
+                                        xa, x_common_xy,
+                                        np.nanmax(xy_mat, axis=0) + _xenv_mg_f)
+                                    _xbnd_lo_fn = lambda xa: np.interp(
+                                        xa, x_common_xy,
+                                        np.nanmin(xy_mat, axis=0) - _xenv_mg_f)
+
+                                else:  # 参照サイクル±オフセット
+                                    _xref_mode = st.radio(
+                                        "参照元", ["基準登録データ", "サイクル番号指定"],
+                                        horizontal=True, key=f"{_xdkey}_refmode")
+                                    _xref_ofs = st.number_input(
+                                        "±オフセット", value=0.0, step=0.1,
+                                        key=f"{_xdkey}_offset")
+                                    _xref_ofs_f = float(st.session_state.get(
+                                        f"{_xdkey}_offset", 0.0))
+                                    if _xref_mode == "基準登録データ":
+                                        _xy_bl_all3 = st.session_state.get(
+                                            pk(pname, "wv_xy_baseline"), {})
+                                        _xy_bl3 = _xy_bl_all3.get(
+                                            f"{pname}_{name}_{var}_{xy_xvar}", {})
+                                        if _xy_bl3:
+                                            _xref_wave = np.interp(
+                                                x_common_xy,
+                                                np.array(_xy_bl3["x"]),
+                                                np.array(_xy_bl3["mean"]))
+                                        else:
+                                            _xref_wave = xy_mean
+                                            st.caption("⚠️ XY基準未登録のため現データ平均を仮使用")
+                                    else:
+                                        _xref_cyc = st.number_input(
+                                            "サイクル番号（0起算）", min_value=0,
+                                            max_value=max(0, len(xy_waves) - 1),
+                                            value=0, step=1, key=f"{_xdkey}_refcyc")
+                                        _xrc = min(int(st.session_state.get(
+                                            f"{_xdkey}_refcyc", 0)),
+                                            len(xy_waves) - 1)
+                                        _rcxw, _rcyw = xy_waves[_xrc]
+                                        _xsi = np.argsort(_rcxw)
+                                        _xref_wave = np.interp(
+                                            x_common_xy, _rcxw[_xsi], _rcyw[_xsi])
+                                    _xbnd_hi_fn = lambda xa: np.interp(
+                                        xa, x_common_xy, _xref_wave + _xref_ofs_f)
+                                    _xbnd_lo_fn = lambda xa: np.interp(
+                                        xa, x_common_xy, _xref_wave - _xref_ofs_f)
+
+                                # プレビュー
+                                _xprev_hi = _xbnd_hi_fn(x_common_xy)
+                                _xprev_lo = _xbnd_lo_fn(x_common_xy)
+                                _xfig_bnd = go.Figure()
+                                _xfig_bnd.add_trace(go.Scatter(
+                                    x=np.concatenate([x_common_xy, x_common_xy[::-1]]),
+                                    y=np.concatenate([_xprev_hi, _xprev_lo[::-1]]),
+                                    fill="toself", fillcolor="rgba(0,180,80,0.12)",
+                                    line=dict(color="rgba(0,0,0,0)"), name="合格範囲",
+                                ))
+                                _xfig_bnd.add_trace(go.Scatter(
+                                    x=x_common_xy, y=_xprev_hi, mode="lines",
+                                    line=dict(color="green", width=1.5, dash="dash"),
+                                    name="上限",
+                                ))
+                                _xfig_bnd.add_trace(go.Scatter(
+                                    x=x_common_xy, y=_xprev_lo, mode="lines",
+                                    line=dict(color="green", width=1.5, dash="dash"),
+                                    name="下限", showlegend=False,
+                                ))
+                                _xfig_bnd.add_trace(go.Scatter(
+                                    x=x_common_xy, y=xy_mean, mode="lines",
+                                    line=dict(color="royalblue", width=1.5),
+                                    name="平均曲線",
+                                ))
+                                _xfig_bnd.update_layout(
+                                    height=200, margin=dict(t=10, b=30, l=50, r=10),
+                                    xaxis_title=xy_xvar, yaxis_title=var,
+                                )
+                                st.plotly_chart(_xfig_bnd, use_container_width=True,
+                                                key=f"{_xdkey}_bnd_preview")
+
+                                _xeff_xs_bnd, _xeff_xe_bnd, _xeff_use_bnd = \
+                                    _render_item_insp_win_xy(
+                                        _xdkey, _x_min, _x_max,
+                                        xy_insp_xs, xy_insp_xe, _use_xy_insp)
+
+                                # NG判定
+                                if _xbnd_on:
+                                    _xbnd_mk_hi = {"x": [], "y": [],
+                                                   "label": f"#{_xdi+1} 上限超過",
+                                                   "color": _xcolor}
+                                    _xbnd_mk_lo = {"x": [], "y": [],
+                                                   "label": f"#{_xdi+1} 下限超過",
+                                                   "color": _xcolor}
+                                    for j, (xw, yw) in enumerate(xy_waves):
+                                        if _xeff_use_bnd:
+                                            si_b = np.argsort(xw)
+                                            xws_b, yws_b = xw[si_b], yw[si_b]
+                                            mxi_b = ((xws_b >= _xeff_xs_bnd) &
+                                                     (xws_b <= _xeff_xe_bnd))
+                                            xi_j, yi_j = xws_b[mxi_b], yws_b[mxi_b]
+                                        else:
+                                            si_b = np.argsort(xw)
+                                            xi_j, yi_j = xw[si_b], yw[si_b]
+                                        if len(xi_j) == 0:
+                                            continue
+                                        hi_j = _xbnd_hi_fn(xi_j)
+                                        lo_j = _xbnd_lo_fn(xi_j)
+                                        o_hi = yi_j > hi_j
+                                        o_lo = yi_j < lo_j
+                                        if np.any(o_hi) or np.any(o_lo):
+                                            xy_peak_ng_flags[j] = True
+                                        for xi, yi in zip(xi_j[o_hi], yi_j[o_hi]):
+                                            _xbnd_mk_hi["x"].append(float(xi))
+                                            _xbnd_mk_hi["y"].append(float(yi))
+                                        for xi, yi in zip(xi_j[o_lo], yi_j[o_lo]):
+                                            _xbnd_mk_lo["x"].append(float(xi))
+                                            _xbnd_mk_lo["y"].append(float(yi))
+                                    all_xy_inf_markers.append({
+                                        "x": [], "y": [],
+                                        "label": f"#{_xdi+1} 上下限ライン",
+                                        "color": _xcolor,
+                                        "_bnd_hi": _xbnd_hi_fn(x_common_xy).tolist(),
+                                        "_bnd_lo": _xbnd_lo_fn(x_common_xy).tolist(),
+                                        "_x_common": x_common_xy.tolist(),
+                                    })
+                                    if _xbnd_mk_hi["x"]:
+                                        all_xy_inf_markers.append(_xbnd_mk_hi)
+                                    if _xbnd_mk_lo["x"]:
+                                        all_xy_inf_markers.append(_xbnd_mk_lo)
+
+                            elif _xdtype in ("Y最大値検査", "Y最小値検査"):
+                                _xis_max = (_xdtype == "Y最大値検査")
+                                _xvlabel = "Y最大値" if _xis_max else "Y最小値"
+                                st.caption(
+                                    f"検査ウィンドウ（X範囲）内の{_xvlabel}を各サイクルで"
+                                    "計算し、合格基準と照合します。")
+                                _xpk_ca, _xpk_cb, _xpk_cc = st.columns([1, 2, 2])
+                                with _xpk_ca:
+                                    st.markdown(f"**{_xvlabel}**")
+                                    st.checkbox("有効", key=f"{_xdkey}_on")
+                                with _xpk_cb:
+                                    st.number_input("合格 上限（超えたらNG）",
+                                                    value=0.0, step=0.1,
+                                                    key=f"{_xdkey}_hi", help="0 = 判定なし")
+                                with _xpk_cc:
+                                    st.number_input("合格 下限（下回ったらNG）",
+                                                    value=0.0, step=0.1,
+                                                    key=f"{_xdkey}_lo", help="0 = 判定なし")
+
+                                _xeff_xs, _xeff_xe, _xeff_use = _render_item_insp_win_xy(
+                                    _xdkey, _x_min, _x_max,
+                                    xy_insp_xs, xy_insp_xe, _use_xy_insp)
+
+                                _xdet_on = bool(st.session_state.get(f"{_xdkey}_on", False))
+                                _xdet_hi = float(st.session_state.get(f"{_xdkey}_hi", 0.0))
+                                _xdet_lo = float(st.session_state.get(f"{_xdkey}_lo", 0.0))
+                                if _xdet_on:
+                                    for j, (xw, yw) in enumerate(xy_waves):
+                                        if _xeff_use:
+                                            si_p = np.argsort(xw)
+                                            xws_p, yws_p = xw[si_p], yw[si_p]
+                                            mxi_p = ((xws_p >= _xeff_xs) &
+                                                     (xws_p <= _xeff_xe))
+                                            y_insp_p = (yws_p[mxi_p]
+                                                        if mxi_p.sum() > 0 else yw)
+                                        else:
+                                            y_insp_p = yw
+                                        _xval = float(
+                                            np.nanmax(y_insp_p) if _xis_max
+                                            else np.nanmin(y_insp_p))
+                                        if _xdet_hi != 0.0 and _xval > _xdet_hi:
+                                            xy_peak_ng_flags[j] = True
+                                        if _xdet_lo != 0.0 and _xval < _xdet_lo:
+                                            xy_peak_ng_flags[j] = True
+
+                            else:  # 検出点比較
+                                # ── XY 検出点比較 ────────────────────────────
+                                st.caption(
+                                    "変曲点を検出し、その検出点が指定した合格ゾーン"
+                                    "（X × Y の矩形）に入るか/入らないかでNG判定します。"
+                                )
+                                _xzc1, _xzc2, _xzc3, _xzc4, _xzc5 = st.columns(
+                                    [2, 2, 2, 3, 1])
+                                with _xzc1:
+                                    st.markdown("**平滑化幅**")
+                                    st.number_input("サンプル数", min_value=1,
+                                                    max_value=50, value=5, step=1,
+                                                    key=f"{_xdkey}_smooth")
+                                with _xzc2:
+                                    st.markdown("**n_L（左）**")
+                                    st.number_input("左サンプル", min_value=1,
+                                                    max_value=100, value=3, step=1,
+                                                    key=f"{_xdkey}_nleft")
+                                with _xzc3:
+                                    st.markdown("**n_R（右）**")
+                                    st.number_input("右サンプル", min_value=1,
+                                                    max_value=100, value=3, step=1,
+                                                    key=f"{_xdkey}_nright")
+                                with _xzc4:
+                                    _xzsm = int(st.session_state.get(
+                                        f"{_xdkey}_smooth", 5))
+                                    _xznl = int(st.session_state.get(
+                                        f"{_xdkey}_nleft",  3))
+                                    _xznr = int(st.session_state.get(
+                                        f"{_xdkey}_nright", 3))
+                                    _xzref = _slope_diff_max_ref_xy(
+                                        xy_waves[:min(5, len(xy_waves))],
+                                        smooth_w=_xzsm, n_left=_xznl, n_right=_xznr)
+                                    _xzstp = max(0.0001, round(_xzref / 20, 4))
+                                    st.markdown("**閾値 |R − L|**")
+                                    st.number_input(
+                                        f"（参考最大 ≈ {_xzref:.4f}）",
+                                        min_value=0.0, value=0.0,
+                                        step=_xzstp, format="%.4f",
+                                        key=f"{_xdkey}_thresh")
+                                with _xzc5:
+                                    st.markdown("**有効**")
+                                    st.checkbox("ON", key=f"{_xdkey}_on")
+                                _xzdir1, _xzdir2 = st.columns(2)
+                                with _xzdir1:
+                                    st.checkbox("📈 増加方向を検出 (R > L)",
+                                                value=True, key=f"{_xdkey}_dir_inc")
+                                with _xzdir2:
+                                    st.checkbox("📉 減少方向を検出 (L > R)",
+                                                value=True, key=f"{_xdkey}_dir_dec")
+
+                                st.markdown("**🎯 合格ゾーン（検出点がこの矩形に入ること）**")
+                                _xzr1, _xzr2, _xzr3, _xzr4 = st.columns(4)
+                                with _xzr1:
+                                    st.number_input("X 開始", value=float(_x_min),
+                                                    step=0.5, key=f"{_xdkey}_zx_s")
+                                with _xzr2:
+                                    st.number_input("X 終了", value=float(_x_max),
+                                                    step=0.5, key=f"{_xdkey}_zx_e")
+                                with _xzr3:
+                                    st.number_input("Y 下限", value=0.0, step=0.1,
+                                                    key=f"{_xdkey}_zy_lo")
+                                with _xzr4:
+                                    st.number_input("Y 上限", value=0.0, step=0.1,
+                                                    key=f"{_xdkey}_zy_hi")
+
+                                st.markdown("**⚠️ NG 条件（独立設定）**")
+                                _xzng1, _xzng2 = st.columns(2)
+                                with _xzng1:
+                                    st.checkbox("合格ゾーン内に検出点がない → NG",
+                                                key=f"{_xdkey}_ng_empty")
+                                with _xzng2:
+                                    st.checkbox("合格ゾーン外に検出点がある → NG",
+                                                key=f"{_xdkey}_ng_outside")
+
+                                _xzdet_on  = bool(st.session_state.get(
+                                    f"{_xdkey}_on", False))
+                                _xzdet_thr = float(st.session_state.get(
+                                    f"{_xdkey}_thresh", 0.0))
+                                _xzsm_d    = int(st.session_state.get(
+                                    f"{_xdkey}_smooth", 5))
+                                _xznl_d    = int(st.session_state.get(
+                                    f"{_xdkey}_nleft",  3))
+                                _xznr_d    = int(st.session_state.get(
+                                    f"{_xdkey}_nright", 3))
+                                _xzdinc    = bool(st.session_state.get(
+                                    f"{_xdkey}_dir_inc", True))
+                                _xzddec    = bool(st.session_state.get(
+                                    f"{_xdkey}_dir_dec", True))
+                                _xzxs      = float(st.session_state.get(
+                                    f"{_xdkey}_zx_s", _x_min))
+                                _xzxe      = float(st.session_state.get(
+                                    f"{_xdkey}_zx_e", _x_max))
+                                _xzylo     = float(st.session_state.get(
+                                    f"{_xdkey}_zy_lo", 0.0))
+                                _xzyhi     = float(st.session_state.get(
+                                    f"{_xdkey}_zy_hi", 0.0))
+                                _xzuse_y   = _xzylo < _xzyhi
+                                _xzng_empty   = bool(st.session_state.get(
+                                    f"{_xdkey}_ng_empty", False))
+                                _xzng_outside = bool(st.session_state.get(
+                                    f"{_xdkey}_ng_outside", False))
+
+                                if (_xzdet_on and _xzdet_thr > 0 and
+                                        (_xzng_empty or _xzng_outside)):
+                                    _xzmk_in_x, _xzmk_in_y   = [], []
+                                    _xzmk_out_x, _xzmk_out_y = [], []
+                                    for j, (xw, yw) in enumerate(xy_waves):
+                                        ix_pts, _ = _detect_xy_inflections(
+                                            xw, yw, smooth_w=_xzsm_d,
+                                            n_left=_xznl_d, n_right=_xznr_d,
+                                            threshold=_xzdet_thr,
+                                            detect_increase=_xzdinc,
+                                            detect_decrease=_xzddec)
+                                        si = np.argsort(xw)
+                                        _xz_in, _xz_out = [], []
+                                        for xi in ix_pts:
+                                            yi = float(np.interp(xi, xw[si], yw[si]))
+                                            in_x = _xzxs <= xi <= _xzxe
+                                            in_y = (not _xzuse_y) or (_xzylo <= yi <= _xzyhi)
+                                            if in_x and in_y:
+                                                _xz_in.append((xi, yi))
+                                                _xzmk_in_x.append(xi)
+                                                _xzmk_in_y.append(yi)
+                                            else:
+                                                _xz_out.append((xi, yi))
+                                                _xzmk_out_x.append(xi)
+                                                _xzmk_out_y.append(yi)
+                                        if _xzng_empty and len(_xz_in) == 0:
+                                            xy_peak_ng_flags[j] = True
+                                        if _xzng_outside and len(_xz_out) > 0:
+                                            xy_peak_ng_flags[j] = True
+                                    if _xzmk_in_x:
+                                        all_xy_inf_markers.append({
+                                            "x": _xzmk_in_x, "y": _xzmk_in_y,
+                                            "label": f"#{_xdi+1} 検出点（ゾーン内）"
+                                                     f" ({len(_xzmk_in_x)}点)",
+                                            "color": _xcolor,
+                                        })
+                                    if _xzmk_out_x:
+                                        all_xy_inf_markers.append({
+                                            "x": _xzmk_out_x, "y": _xzmk_out_y,
+                                            "label": f"#{_xdi+1} 検出点（ゾーン外）"
+                                                     f" ({len(_xzmk_out_x)}点)",
+                                            "color": "red",
+                                        })
+
+                    if _xy_del_idx is not None:
+                        _xydet_list.pop(_xy_del_idx)
+                        st.session_state[_xydet_list_key] = _xydet_list
+                        st.rerun()
+
+                    # ── XY グラフ描画 ─────────────────────────────
+                    fig_xy = go.Figure()
+
+                    for j, (xw, yw) in enumerate(xy_waves):
+                        if j >= _MAX_WAVE:
+                            break
+                        _env_ng_xy  = xy_ng_flags[j]      if j < len(xy_ng_flags)      else False
+                        _peak_ng_xy = xy_peak_ng_flags[j] if j < len(xy_peak_ng_flags) else False
+                        c_xy = "rgba(220,50,50,0.25)" if (_env_ng_xy or _peak_ng_xy) \
+                               else "rgba(100,120,200,0.12)"
+                        si = np.argsort(xw)
+                        fig_xy.add_trace(go.Scatter(
+                            x=xw[si], y=yw[si], mode="lines",
+                            line=dict(color=c_xy, width=1),
+                            showlegend=False,
+                        ))
+
+                    fig_xy.add_trace(go.Scatter(
+                        x=x_common_xy, y=xy_mean, mode="lines",
+                        line=dict(color="royalblue", width=2.5),
+                        name="平均曲線",
+                    ))
+
+                    if xy_has_env and xy_env_hi is not None:
+                        fig_xy.add_trace(go.Scatter(
+                            x=np.concatenate([x_common_xy, x_common_xy[::-1]]),
+                            y=np.concatenate([xy_env_hi, xy_env_lo[::-1]]),
+                            fill="toself", fillcolor="rgba(0,200,100,0.10)",
+                            line=dict(color="rgba(0,0,0,0)"),
+                            name="良品範囲",
+                        ))
+                        fig_xy.add_trace(go.Scatter(
+                            x=x_common_xy, y=xy_env_hi, mode="lines",
+                            line=dict(color="green", width=1.5, dash="dash"),
+                            name="上限", showlegend=False,
+                        ))
+                        fig_xy.add_trace(go.Scatter(
+                            x=x_common_xy, y=xy_env_lo, mode="lines",
+                            line=dict(color="green", width=1.5, dash="dash"),
+                            name="下限", showlegend=False,
+                        ))
+
+                    if _use_xy_insp:
+                        fig_xy.add_vrect(
+                            x0=xy_insp_xs, x1=xy_insp_xe,
+                            fillcolor="rgba(255,200,0,0.08)",
+                            line_width=1, line_color="orange",
+                            annotation_text="検査ウィンドウ",
+                            annotation_position="top right",
+                        )
+
+                    xy_ng_count   = sum(xy_ng_flags)
+                    xy_pk_ng_count = sum(xy_peak_ng_flags)
+                    if xy_ng_count > 0:
+                        fig_xy.add_trace(go.Scatter(
+                            x=[None], y=[None], mode="lines",
+                            line=dict(color="rgba(220,50,50,0.7)", width=2),
+                            name=f"波形NG ({xy_ng_count}/{len(xy_waves)})",
+                        ))
+                    if xy_pk_ng_count > 0:
+                        fig_xy.add_trace(go.Scatter(
+                            x=[None], y=[None], mode="lines",
+                            line=dict(color="rgba(200,50,200,0.7)", width=2),
+                            name=f"ピークNG ({xy_pk_ng_count}/{len(xy_waves)})",
+                        ))
+
+                    for _xmk in all_xy_inf_markers:
+                        if "_bnd_hi" in _xmk:
+                            _xc = np.array(_xmk["_x_common"])
+                            _xhi = np.array(_xmk["_bnd_hi"])
+                            _xlo = np.array(_xmk["_bnd_lo"])
+                            fig_xy.add_trace(go.Scatter(
+                                x=np.concatenate([_xc, _xc[::-1]]),
+                                y=np.concatenate([_xhi, _xlo[::-1]]),
+                                fill="toself",
+                                fillcolor="rgba(0,180,80,0.08)",
+                                line=dict(color="rgba(0,0,0,0)"),
+                                name=_xmk["label"], showlegend=True,
+                            ))
+                            fig_xy.add_trace(go.Scatter(
+                                x=_xc, y=_xhi, mode="lines",
+                                line=dict(color=_xmk["color"], width=1.5, dash="dash"),
+                                name=f"{_xmk['label']} 上限", showlegend=False,
+                            ))
+                            fig_xy.add_trace(go.Scatter(
+                                x=_xc, y=_xlo, mode="lines",
+                                line=dict(color=_xmk["color"], width=1.5, dash="dash"),
+                                name=f"{_xmk['label']} 下限", showlegend=False,
+                            ))
+                        elif _xmk["x"]:
+                            fig_xy.add_trace(go.Scatter(
+                                x=_xmk["x"], y=_xmk["y"], mode="markers",
+                                marker=dict(symbol="diamond", color=_xmk["color"],
+                                            size=8, line=dict(color="white", width=1)),
+                                name=_xmk["label"],
+                            ))
+
+                    fig_xy.update_layout(
+                        xaxis_title=xy_xvar,
+                        yaxis_title=var,
+                        height=360,
+                        margin=dict(t=20, b=40, l=60, r=20),
+                        legend=dict(orientation="h", y=1.05, x=1, xanchor="right"),
+                        hovermode="closest",
+                    )
+                    st.plotly_chart(fig_xy, use_container_width=True,
+                                    key=f"{_vkey}_xy_fig")
+
+                    # ── XY サマリー & 基準登録 ─────────────────────
+                    _xy_maxY = xy_cyc_maxY if xy_cyc_maxY else [np.nanmax(yw) for _, yw in xy_waves]
+                    _xy_minY = xy_cyc_minY if xy_cyc_minY else [np.nanmin(yw) for _, yw in xy_waves]
+                    xy_sm1, xy_sm2, xy_sm3, xy_sm4, xy_sm5, xy_sm6 = st.columns(6)
+                    xy_sm1.metric("サイクル数", len(xy_waves))
+                    xy_sm2.metric("波形NG数", xy_ng_count,
+                                  delta=None if xy_ng_count == 0
+                                  else f"{xy_ng_count/len(xy_waves)*100:.1f}%")
+                    xy_sm3.metric("ピークNG数", xy_pk_ng_count,
+                                  delta=None if xy_pk_ng_count == 0
+                                  else f"{xy_pk_ng_count/len(xy_waves)*100:.1f}%")
+                    xy_sm4.metric("Y最大値（平均）", f"{float(np.nanmean(_xy_maxY)):.3f}")
+                    xy_sm5.metric("Y最小値（平均）", f"{float(np.nanmean(_xy_minY)):.3f}")
+                    xy_sm6.metric("Y最大値σ",       f"{float(np.nanstd(_xy_maxY)):.3f}")
+
+                    if st.button(f"📌 XY基準を登録（{var} vs {xy_xvar}）",
+                                 key=f"{_vkey}_xy_bl_reg", type="secondary"):
+                        _xy_bl_all[_xy_bl_key] = {
+                            "x":    x_common_xy.tolist(),
+                            "mean": xy_mean.tolist(),
+                            "std":  xy_std.tolist(),
+                        }
+                        st.session_state[pk(pname, "wv_xy_baseline")] = _xy_bl_all
+                        st.success(
+                            f"✅ XY基準登録: {var} vs {xy_xvar}（{len(xy_waves)}サイクル）")
+                        st.rerun()
+
+                    if _xy_bl_key in _xy_bl_all:
+                        if st.button(f"🗑 XY基準リセット（{var} vs {xy_xvar}）",
+                                     key=f"{_vkey}_xy_bl_del", type="secondary"):
+                            _xy_bl_all.pop(_xy_bl_key, None)
+                            st.session_state[pk(pname, "wv_xy_baseline")] = _xy_bl_all
+                            st.rerun()
+                        st.caption("✅ XY基準登録済み")
 
 
 # ═══════════════════════════════════════════════════════════════

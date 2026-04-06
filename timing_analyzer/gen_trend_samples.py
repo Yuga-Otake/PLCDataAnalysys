@@ -154,37 +154,45 @@ def generate(filename: str, n_cycles: int, seed: int, start_dt: datetime,
         fill_range('圧入工程.圧入完了',  pb_complete, pb_up)
         fill_range('圧入工程.プレス上昇', pb_up,       pb_end)
 
-        peak_f = 25.0 + (1.5 if (cyc in anomaly_pb_slow or cyc in anomaly_pb_extreme) else 0.0)
-        # 劣化でピーク力が上昇（摩擦増加）
-        peak_f += pb_contact_drift * 0.05
-        span   = max(1, pb_complete - pb_contact)
-        for t in range(pb_contact, min(pb_up + 30, base + CYCLE_MS)):
-            if t >= total_rows: break
-            p = (t - pb_contact) / span
-            if   p < 0.20: v = peak_f * p / 0.20
-            elif p < 0.85: v = peak_f
-            else:          v = peak_f * max(0.0, 1.0 - (p - 0.85) / 0.15) * 0.5
-            data['圧入工程.プレス力[kN]'][t] = max(0.0, v + rng.normal(0, 0.25 * pb_noise_scale))
+        # ── 圧入 物理モデル（gen_sample.py と同一ロジック）─────────
+        CONTACT_DISP = 8.0    # 接触時変位 [mm]
+        PRESS_DEPTH  = 32.0   # 圧入深さ [mm]
+        FORCE_EXP    = 1.3    # 力-変位の非線形指数
+        TORQUE_RATIO = 0.50   # 力→トルク換算係数 [N·m/kN]
 
-        disp_peak = 40.0 + (3.0 if cyc in anomaly_pb_extreme else 0.0)
-        press_span = max(1, pb_up - pb_down)
-        for t in range(pb_down, min(pb_up + 50, base + CYCLE_MS)):
+        is_anom = cyc in anomaly_pb_slow or cyc in anomaly_pb_extreme
+        is_ext  = cyc in anomaly_pb_extreme
+        # 劣化が進むにつれてピーク力が上昇（レール摩耗 → 摩擦力増加）
+        peak_f = (27.5 if is_anom else 25.0) + pb_contact_drift * 0.05
+        disp_peak = CONTACT_DISP + PRESS_DEPTH + (3.0 if is_ext else 0.0)
+        actual_depth = disp_peak - CONTACT_DISP
+        k_cyc = peak_f / (actual_depth ** FORCE_EXP)
+
+        approach_span = max(1, pb_contact - pb_down)
+        press_span    = max(1, pb_complete - pb_contact)
+        retract_span  = max(1, pb_up - pb_complete)
+
+        for t in range(pb_down, min(pb_up + 30, base + CYCLE_MS)):
             if t >= total_rows: break
-            p = min(1.0, (t - pb_down) / press_span)
-            if p < 0.6:
-                disp = disp_peak * np.sin(p / 0.6 * np.pi / 2)
+            if t < pb_contact:
+                p     = (t - pb_down) / approach_span
+                disp  = CONTACT_DISP * p
+                force = 0.0
+            elif t < pb_complete:
+                p     = (t - pb_contact) / press_span
+                disp  = CONTACT_DISP + actual_depth * p
+                force = k_cyc * (max(0.0, disp - CONTACT_DISP) ** FORCE_EXP)
             else:
-                disp = disp_peak * (1.0 - (p - 0.6) / 0.4)
-            data['圧入工程.プレス変位[mm]'][t] = max(0.0, disp + rng.normal(0, 0.15 * pb_noise_scale))
+                p     = (t - pb_complete) / retract_span
+                disp  = disp_peak * max(0.0, 1.0 - p)
+                pen   = max(0.0, disp - CONTACT_DISP)
+                force = k_cyc * (pen ** FORCE_EXP) * max(0.0, 1.0 - p / 0.3)
 
-        torque_peak = 12.0 + pb_contact_drift * 0.08 + (1.0 if (cyc in anomaly_pb_slow or cyc in anomaly_pb_extreme) else 0.0)
-        for t in range(pb_contact, min(pb_complete + 20, base + CYCLE_MS)):
-            if t >= total_rows: break
-            p = (t - pb_contact) / max(1, pb_complete - pb_contact)
-            if   p < 0.15: v = torque_peak * p / 0.15
-            elif p < 0.90: v = torque_peak * (1.0 + 0.1 * np.sin(p * np.pi))
-            else:          v = torque_peak * (1.0 - (p - 0.90) / 0.10)
-            data['圧入工程.モータトルク[N·m]'][t] = max(0.0, v + rng.normal(0, 0.2 * pb_noise_scale))
+            ns = pb_noise_scale
+            data['圧入工程.プレス変位[mm]'][t] = max(0.0, disp + rng.normal(0, 0.15 * ns))
+            data['圧入工程.プレス力[kN]'][t]   = max(0.0, force + rng.normal(0, 0.25 * ns))
+            data['圧入工程.モータトルク[N·m]'][t] = max(
+                0.0, force * TORQUE_RATIO + rng.normal(0, 0.18 * ns))
 
         # ── 検査排出工程 ─────────────────────────────────────────
         pc_base = base
