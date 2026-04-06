@@ -924,6 +924,45 @@ def _render_item_insp_win_xy(dkey: str, x_min: float, x_max: float,
     return _xs, _xe, (_xs < _xe)
 
 
+import ast as _ast_mod
+import re as _re_mod
+
+
+def _safe_eval_expr(expr_str: str, var_dict: dict):
+    """
+    AST-based safe expression evaluator for 数式 detection type.
+    expr_str: Python式文字列（#N.t/#N.v → pNt/pNv 変換済み）
+    var_dict: {"p1t": 12.3, "p1v": 5.6, ...}
+    Returns: float | None（エラー・未解決変数時）
+    """
+    allowed_nodes = (
+        _ast_mod.Expression, _ast_mod.BoolOp, _ast_mod.And, _ast_mod.Or,
+        _ast_mod.Compare, _ast_mod.Lt, _ast_mod.Gt, _ast_mod.LtE, _ast_mod.GtE,
+        _ast_mod.Eq, _ast_mod.NotEq,
+        _ast_mod.BinOp, _ast_mod.Add, _ast_mod.Sub, _ast_mod.Mult, _ast_mod.Div,
+        _ast_mod.UnaryOp, _ast_mod.USub, _ast_mod.UAdd,
+        _ast_mod.Constant, _ast_mod.Name, _ast_mod.Load,
+    )
+    try:
+        tree = _ast_mod.parse(expr_str, mode="eval")
+        for node in _ast_mod.walk(tree):
+            if not isinstance(node, allowed_nodes):
+                return None
+        result = eval(compile(tree, "<expr>", "eval"),
+                      {"__builtins__": {}}, var_dict)
+        return float(result)
+    except Exception:
+        return None
+
+
+def _translate_formula(expr_str: str) -> str:
+    """#N.t → pNt、#N.v → pNv、AND/OR → and/or に変換。"""
+    s = expr_str.replace("AND", " and ").replace("OR", " or ")
+    s = _re_mod.sub(r"#(\d+)\.t", r"p\1t", s)
+    s = _re_mod.sub(r"#(\d+)\.v", r"p\1v", s)
+    return s
+
+
 # ═══════════════════════════════════════════════════════════════
 # 傾き変化点検出 — 3段階アルゴリズム可視化
 # ═══════════════════════════════════════════════════════════════
@@ -1333,7 +1372,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
             _tdet_list = st.session_state[_tdet_list_key]
 
             _DET_TYPES_T = ["傾き変化点", "閾値超え検出", "上下判定比較",
-                            "最大値検査", "最小値検査", "検出点比較"]
+                            "最大値検査", "最小値検査", "検出点比較", "数式"]
             _DET_COLORS  = ["darkorange", "deeppink", "limegreen", "dodgerblue", "gold"]
 
             _add_ca, _add_cb = st.columns([2, 4])
@@ -1354,6 +1393,8 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
             peak_ng_flags   = [False] * len(step_waves)
             cyc_max_vals    = [float(np.nanmax(v)) for _, v in step_waves]
             cyc_min_vals    = [float(np.nanmin(v)) for _, v in step_waves]
+            # 数式タイプが参照するサイクルごとの検出点 {di: [(coord, val)|None, ...]}
+            _det_pts_per_cycle = {}
 
             _t_del_idx = None
             for _di, _det in enumerate(_tdet_list):
@@ -1362,7 +1403,8 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                 _dkey  = f"{_vkey}_{_did}"
                 _color = _DET_COLORS[_di % len(_DET_COLORS)]
                 _icon  = {"傾き変化点": "📐", "閾値超え検出": "🎯",
-                          "上下判定比較": "📊", "検出点比較": "🔲"}.get(_dtype, "📏")
+                          "上下判定比較": "📊", "検出点比較": "🔲",
+                          "数式": "🧮"}.get(_dtype, "📏")
 
                 with st.expander(f"{_icon} #{_di+1} {_dtype}", expanded=True):
                     _hd, _del_btn = st.columns([8, 1])
@@ -1467,6 +1509,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                         _det_nth = int(st.session_state.get(f"{_dkey}_nth", 0))
                         if _det_on and _det_thr > 0:
                             _mkt, _mkv = [], []
+                            _cyc_pts_inf = []
                             for (t_sw, v_sw) in step_waves:
                                 _ts = _detect_inflections(
                                     t_sw, v_sw,
@@ -1476,8 +1519,11 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     detect_increase=_dinc, detect_decrease=_ddec)
                                 _pts = [(float(ti), float(np.interp(ti, t_sw, v_sw)))
                                         for ti in _ts]
-                                for ti, vi in _select_nth_pts(_pts, _det_nth):
+                                _sel = _select_nth_pts(_pts, _det_nth)
+                                for ti, vi in _sel:
                                     _mkt.append(ti); _mkv.append(vi)
+                                _cyc_pts_inf.append(_sel[0] if _sel else None)
+                            _det_pts_per_cycle[_di] = _cyc_pts_inf
                             if _mkt:
                                 all_inf_markers.append({
                                     "t": _mkt, "v": _mkv,
@@ -1777,13 +1823,17 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
 
                         if _t_det_on:
                             _tmkt, _tmkv = [], []
+                            _cyc_pts_thr = []
                             for (t_sw, v_sw) in step_waves:
                                 _crs = _detect_threshold_crossings(
                                     t_sw, v_sw, _tv_val,
                                     direction=_tdir_str,
                                     range_s=_t_rs, range_e=_t_re)
-                                for tc, vc in _select_nth_pts(_crs, _t_nth):
+                                _sel = _select_nth_pts(_crs, _t_nth)
+                                for tc, vc in _sel:
                                     _tmkt.append(tc); _tmkv.append(vc)
+                                _cyc_pts_thr.append(_sel[0] if _sel else None)
+                            _det_pts_per_cycle[_di] = _cyc_pts_thr
                             if _tmkt:
                                 all_inf_markers.append({
                                     "t": _tmkt, "v": _tmkv,
@@ -1791,7 +1841,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     "color": _color,
                                 })
 
-                    else:  # 検出点比較
+                    elif _dtype == "検出点比較":  # 検出点比較
                         # ── 検出点比較 ─────────────────────────────
                         st.caption(
                             "変曲点を検出し、その検出点が指定した合格ゾーン（t × V の矩形）に"
@@ -1911,6 +1961,103 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     "label": f"#{_di+1} 検出点（ゾーン外） ({len(_zmkt_out)}点)",
                                     "color": "red",
                                 })
+
+                    elif _dtype == "数式":
+                        # ── 数式 ─────────────────────────────────────
+                        st.caption(
+                            "他の検出点の座標・値を組み合わせた数式でNG判定します。  \n"
+                            "構文: `#N.t`（N番目の検出点の時間座標）、`#N.v`（N番目の検出点の値）  \n"
+                            "演算子: `+` `-` `*` `/` `<` `>` `AND` `OR`  \n"
+                            "例: `#1.t - #2.t`（1番目と2番目の検出時間差）"
+                        )
+                        _fm_c1, _fm_c2 = st.columns([5, 1])
+                        with _fm_c1:
+                            st.text_input("数式", value="",
+                                          placeholder="#1.t - #2.t",
+                                          key=f"{_dkey}_expr")
+                        with _fm_c2:
+                            st.markdown("**有効**")
+                            st.checkbox("ON", key=f"{_dkey}_on")
+
+                        _fm_hi_c, _fm_lo_c = st.columns(2)
+                        with _fm_hi_c:
+                            st.number_input("NG 上限（超えたらNG、0=判定なし）",
+                                            value=0.0, step=0.1,
+                                            key=f"{_dkey}_hi")
+                        with _fm_lo_c:
+                            st.number_input("NG 下限（下回ったらNG、0=判定なし）",
+                                            value=0.0, step=0.1,
+                                            key=f"{_dkey}_lo")
+
+                        _fm_expr = str(st.session_state.get(f"{_dkey}_expr", ""))
+                        _fm_on   = bool(st.session_state.get(f"{_dkey}_on", False))
+                        _fm_hi   = float(st.session_state.get(f"{_dkey}_hi", 0.0))
+                        _fm_lo   = float(st.session_state.get(f"{_dkey}_lo", 0.0))
+
+                        if _fm_on and _fm_expr.strip():
+                            _fm_expr_py = _translate_formula(_fm_expr)
+                            _fm_results = []
+                            for _fj in range(len(step_waves)):
+                                _vd = {}
+                                for _ref_di, _ref_pts in _det_pts_per_cycle.items():
+                                    if _fj < len(_ref_pts) and _ref_pts[_fj] is not None:
+                                        _rc, _rv = _ref_pts[_fj]
+                                        _vd[f"p{_ref_di + 1}t"] = _rc
+                                        _vd[f"p{_ref_di + 1}v"] = _rv
+                                _res = _safe_eval_expr(_fm_expr_py, _vd)
+                                _fm_results.append(_res)
+                                if _res is not None:
+                                    if _fm_hi != 0.0 and _res > _fm_hi:
+                                        peak_ng_flags[_fj] = True
+                                    if _fm_lo != 0.0 and _res < _fm_lo:
+                                        peak_ng_flags[_fj] = True
+
+                            # トレンドグラフ（サイクルごとの数式結果）
+                            _fm_valid = [(j, r) for j, r in enumerate(_fm_results)
+                                         if r is not None]
+                            if _fm_valid:
+                                _fm_cycs = [v[0] for v in _fm_valid]
+                                _fm_vals = [v[1] for v in _fm_valid]
+                                _fm_bar_colors = [
+                                    "red" if (
+                                        (_fm_hi != 0.0 and v > _fm_hi) or
+                                        (_fm_lo != 0.0 and v < _fm_lo)
+                                    ) else _color
+                                    for v in _fm_vals
+                                ]
+                                _fig_fm = go.Figure()
+                                _fig_fm.add_trace(go.Bar(
+                                    x=_fm_cycs, y=_fm_vals,
+                                    marker_color=_fm_bar_colors,
+                                    name="数式結果",
+                                ))
+                                if _fm_hi != 0.0:
+                                    _fig_fm.add_hline(
+                                        y=_fm_hi, line_color="red",
+                                        line_dash="dash",
+                                        annotation_text=f"上限 {_fm_hi}",
+                                        annotation_position="top right",
+                                    )
+                                if _fm_lo != 0.0:
+                                    _fig_fm.add_hline(
+                                        y=_fm_lo, line_color="blue",
+                                        line_dash="dash",
+                                        annotation_text=f"下限 {_fm_lo}",
+                                        annotation_position="bottom right",
+                                    )
+                                _fig_fm.update_layout(
+                                    height=220,
+                                    margin=dict(t=10, b=30, l=50, r=10),
+                                    xaxis_title="サイクル番号",
+                                    yaxis_title="数式結果",
+                                )
+                                st.plotly_chart(_fig_fm, use_container_width=True,
+                                                key=f"{_dkey}_fm_trend")
+                            else:
+                                st.info(
+                                    "参照している検出点が未検出のため数式を評価できません。  \n"
+                                    "参照先の検出点タイプ（傾き変化点・閾値超え検出）を先に追加し有効にしてください。"
+                                )
 
             if _t_del_idx is not None:
                 _tdet_list.pop(_t_del_idx)
@@ -2244,7 +2391,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                     _xydet_list = st.session_state[_xydet_list_key]
 
                     _DET_TYPES_XY = ["傾き変化点", "閾値超え検出", "上下判定比較",
-                                     "Y最大値検査", "Y最小値検査", "検出点比較"]
+                                     "Y最大値検査", "Y最小値検査", "検出点比較", "数式"]
                     _DET_COLORS_XY = ["darkorange", "deeppink", "limegreen", "dodgerblue", "gold"]
 
                     _xy_add_ca, _xy_add_cb = st.columns([2, 4])
@@ -2269,6 +2416,8 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                     xy_peak_ng_flags   = [False] * len(xy_waves)
                     xy_cyc_maxY = [float(np.nanmax(yw)) for _, yw in xy_waves]
                     xy_cyc_minY = [float(np.nanmin(yw)) for _, yw in xy_waves]
+                    # 数式タイプが参照するサイクルごとの検出点 {xdi: [(coord, val)|None, ...]}
+                    _xdet_pts_per_cycle = {}
 
                     _xy_del_idx = None
                     for _xdi, _xdet in enumerate(_xydet_list):
@@ -2277,7 +2426,8 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                         _xdkey  = f"{_vkey}_{_xdid}"
                         _xcolor = _DET_COLORS_XY[_xdi % len(_DET_COLORS_XY)]
                         _xicon  = {"傾き変化点": "📐", "閾値超え検出": "🎯",
-                                   "上下判定比較": "📊", "検出点比較": "🔲"}.get(_xdtype, "📏")
+                                   "上下判定比較": "📊", "検出点比較": "🔲",
+                                   "数式": "🧮"}.get(_xdtype, "📏")
 
                         with st.expander(f"{_xicon} #{_xdi+1} {_xdtype}", expanded=True):
                             _xhd, _xdel_btn = st.columns([8, 1])
@@ -2395,6 +2545,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                 _xdet_nth = int(st.session_state.get(f"{_xdkey}_nth", 0))
                                 if _xdet_on and _xdet_thr > 0:
                                     _xmkx, _xmky = [], []
+                                    _xcyc_pts_inf = []
                                     for (xw, yw) in xy_waves:
                                         ix_pts, _ = _detect_xy_inflections(
                                             xw, yw, smooth_w=_xsm_d,
@@ -2407,8 +2558,12 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                         _xpts = [(float(xi),
                                                   float(np.interp(xi, xw[si], yw[si])))
                                                  for xi in ix_pts]
-                                        for xi, yi in _select_nth_pts(_xpts, _xdet_nth):
+                                        _xsel = _select_nth_pts(_xpts, _xdet_nth)
+                                        for xi, yi in _xsel:
                                             _xmkx.append(xi); _xmky.append(yi)
+                                        _xcyc_pts_inf.append(
+                                            _xsel[0] if _xsel else None)
+                                    _xdet_pts_per_cycle[_xdi] = _xcyc_pts_inf
                                     if _xmkx:
                                         all_xy_inf_markers.append({
                                             "x": _xmkx, "y": _xmky,
@@ -2720,14 +2875,19 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
 
                                 if _xt_on:
                                     _xtmkx, _xtmky = [], []
+                                    _xcyc_pts_thr = []
                                     for (xw, yw) in xy_waves:
                                         si = np.argsort(xw)
                                         _xcs = _detect_threshold_crossings(
                                             xw[si], yw[si], _xtv_val,
                                             direction=_xtdir_str,
                                             range_s=_xtrs, range_e=_xtre)
-                                        for xc, yc in _select_nth_pts(_xcs, _xt_nth):
+                                        _xsel = _select_nth_pts(_xcs, _xt_nth)
+                                        for xc, yc in _xsel:
                                             _xtmkx.append(xc); _xtmky.append(yc)
+                                        _xcyc_pts_thr.append(
+                                            _xsel[0] if _xsel else None)
+                                    _xdet_pts_per_cycle[_xdi] = _xcyc_pts_thr
                                     if _xtmkx:
                                         all_xy_inf_markers.append({
                                             "x": _xtmkx, "y": _xtmky,
@@ -2735,7 +2895,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                             "color": _xcolor,
                                         })
 
-                            else:  # 検出点比較
+                            elif _xdtype == "検出点比較":  # 検出点比較
                                 # ── XY 検出点比較 ────────────────────────────
                                 st.caption(
                                     "変曲点を検出し、その検出点が指定した合格ゾーン"
@@ -2881,6 +3041,111 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                                      f" ({len(_xzmk_out_x)}点)",
                                             "color": "red",
                                         })
+
+                            elif _xdtype == "数式":
+                                # ── XY 数式 ──────────────────────────────────
+                                st.caption(
+                                    "他の検出点の座標・値を組み合わせた数式でNG判定します。  \n"
+                                    "構文: `#N.t`（N番目の検出点のX座標）、`#N.v`（Y値）  \n"
+                                    "演算子: `+` `-` `*` `/` `<` `>` `AND` `OR`  \n"
+                                    "例: `#1.v - #2.v`（1番目と2番目の検出点Y値の差）"
+                                )
+                                _xfm_c1, _xfm_c2 = st.columns([5, 1])
+                                with _xfm_c1:
+                                    st.text_input("数式", value="",
+                                                  placeholder="#1.v - #2.v",
+                                                  key=f"{_xdkey}_expr")
+                                with _xfm_c2:
+                                    st.markdown("**有効**")
+                                    st.checkbox("ON", key=f"{_xdkey}_on")
+
+                                _xfm_hi_c, _xfm_lo_c = st.columns(2)
+                                with _xfm_hi_c:
+                                    st.number_input("NG 上限（超えたらNG、0=判定なし）",
+                                                    value=0.0, step=0.1,
+                                                    key=f"{_xdkey}_hi")
+                                with _xfm_lo_c:
+                                    st.number_input("NG 下限（下回ったらNG、0=判定なし）",
+                                                    value=0.0, step=0.1,
+                                                    key=f"{_xdkey}_lo")
+
+                                _xfm_expr = str(st.session_state.get(
+                                    f"{_xdkey}_expr", ""))
+                                _xfm_on   = bool(st.session_state.get(
+                                    f"{_xdkey}_on", False))
+                                _xfm_hi   = float(st.session_state.get(
+                                    f"{_xdkey}_hi", 0.0))
+                                _xfm_lo   = float(st.session_state.get(
+                                    f"{_xdkey}_lo", 0.0))
+
+                                if _xfm_on and _xfm_expr.strip():
+                                    _xfm_expr_py = _translate_formula(_xfm_expr)
+                                    _xfm_results = []
+                                    for _xfj in range(len(xy_waves)):
+                                        _xvd = {}
+                                        for _xref_di, _xref_pts in \
+                                                _xdet_pts_per_cycle.items():
+                                            if (_xfj < len(_xref_pts) and
+                                                    _xref_pts[_xfj] is not None):
+                                                _xrc, _xrv = _xref_pts[_xfj]
+                                                _xvd[f"p{_xref_di + 1}t"] = _xrc
+                                                _xvd[f"p{_xref_di + 1}v"] = _xrv
+                                        _xres = _safe_eval_expr(_xfm_expr_py, _xvd)
+                                        _xfm_results.append(_xres)
+                                        if _xres is not None:
+                                            if _xfm_hi != 0.0 and _xres > _xfm_hi:
+                                                xy_peak_ng_flags[_xfj] = True
+                                            if _xfm_lo != 0.0 and _xres < _xfm_lo:
+                                                xy_peak_ng_flags[_xfj] = True
+
+                                    _xfm_valid = [(j, r) for j, r in
+                                                   enumerate(_xfm_results)
+                                                   if r is not None]
+                                    if _xfm_valid:
+                                        _xfm_cycs = [v[0] for v in _xfm_valid]
+                                        _xfm_vals = [v[1] for v in _xfm_valid]
+                                        _xfm_bar_colors = [
+                                            "red" if (
+                                                (_xfm_hi != 0.0 and v > _xfm_hi) or
+                                                (_xfm_lo != 0.0 and v < _xfm_lo)
+                                            ) else _xcolor
+                                            for v in _xfm_vals
+                                        ]
+                                        _xfig_fm = go.Figure()
+                                        _xfig_fm.add_trace(go.Bar(
+                                            x=_xfm_cycs, y=_xfm_vals,
+                                            marker_color=_xfm_bar_colors,
+                                            name="数式結果",
+                                        ))
+                                        if _xfm_hi != 0.0:
+                                            _xfig_fm.add_hline(
+                                                y=_xfm_hi, line_color="red",
+                                                line_dash="dash",
+                                                annotation_text=f"上限 {_xfm_hi}",
+                                                annotation_position="top right",
+                                            )
+                                        if _xfm_lo != 0.0:
+                                            _xfig_fm.add_hline(
+                                                y=_xfm_lo, line_color="blue",
+                                                line_dash="dash",
+                                                annotation_text=f"下限 {_xfm_lo}",
+                                                annotation_position="bottom right",
+                                            )
+                                        _xfig_fm.update_layout(
+                                            height=220,
+                                            margin=dict(t=10, b=30, l=50, r=10),
+                                            xaxis_title="サイクル番号",
+                                            yaxis_title="数式結果",
+                                        )
+                                        st.plotly_chart(
+                                            _xfig_fm, use_container_width=True,
+                                            key=f"{_xdkey}_fm_trend")
+                                    else:
+                                        st.info(
+                                            "参照している検出点が未検出のため数式を評価できません。  \n"
+                                            "参照先の検出点タイプ（傾き変化点・閾値超え検出）を"
+                                            "先に追加し有効にしてください。"
+                                        )
 
                     if _xy_del_idx is not None:
                         _xydet_list.pop(_xy_del_idx)
