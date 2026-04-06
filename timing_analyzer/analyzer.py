@@ -28,7 +28,10 @@ def load_csv(file) -> pd.DataFrame:
             parse_dates=["Date Time"],
             date_format="%Y-%m-%d %H:%M:%S.%f",
         )
-        return df.rename(columns={"Date Time": "Timestamp"})
+        df = df.rename(columns={"Date Time": "Timestamp"})
+        # pandas 2.0 以降は datetime64[us] になる場合があるため ns に統一
+        df["Timestamp"] = df["Timestamp"].astype("datetime64[ns]")
+        return df
     except Exception:
         pass
 
@@ -60,6 +63,8 @@ def load_csv(file) -> pd.DataFrame:
                     "タイムスタンプのフォーマットが認識できません。"
                     "「Date Time」または「Timestamp」列が必要です。"
                 )
+    # pandas 2.0 以降は datetime64[us] になる場合があるため ns に統一
+    df["Timestamp"] = df["Timestamp"].astype("datetime64[ns]")
     return df
 
 
