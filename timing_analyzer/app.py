@@ -1391,9 +1391,10 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                         _dinc  = bool(st.session_state.get(f"{_dkey}_dir_inc", True))
                         _ddec  = bool(st.session_state.get(f"{_dkey}_dir_dec", True))
                         st.markdown("---")
-                        st.markdown("**📊 3段階プレビュー**（平均波形）")
+                        st.markdown("**📊 3段階プレビュー**（サンプル波形 #1）")
+                        _prev_t0, _prev_v0 = step_waves[0]
                         _render_inflection_debug_t(
-                            t_common, mean_v,
+                            _prev_t0, _prev_v0,
                             smooth_w=_sm_d, n_left=_nl_d, n_right=_nr_d,
                             threshold=_th_d, range_s=_rs_d, range_e=_re_d,
                             y_label=var, chart_key=f"{_dkey}_preview",
@@ -1560,10 +1561,11 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                 line=dict(color="green", width=1.5, dash="dash"),
                                 name="下限", showlegend=False,
                             ))
+                            _bnd_prev_t, _bnd_prev_v = step_waves[0]
                             _fig_bnd.add_trace(go.Scatter(
-                                x=t_common, y=mean_v, mode="lines",
+                                x=_bnd_prev_t, y=_bnd_prev_v, mode="lines",
                                 line=dict(color="royalblue", width=1.5),
-                                name="平均波形",
+                                name="サンプル波形 #1",
                             ))
                             _fig_bnd.update_layout(
                                 height=200, margin=dict(t=10, b=30, l=50, r=10),
@@ -2230,9 +2232,11 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                 _xddec  = bool(st.session_state.get(
                                     f"{_xdkey}_dir_dec", True))
                                 st.markdown("---")
-                                st.markdown("**📊 3段階プレビュー**（平均曲線）")
+                                st.markdown("**📊 3段階プレビュー**（サンプル波形 #1）")
+                                _xprev_xw0, _xprev_yw0 = xy_waves[0]
+                                _xprev_si0 = np.argsort(_xprev_xw0)
                                 _render_inflection_debug_xy(
-                                    x_common_xy, xy_mean,
+                                    _xprev_xw0[_xprev_si0], _xprev_yw0[_xprev_si0],
                                     smooth_w=_xsm_d, n_left=_xnl_d, n_right=_xnr_d,
                                     threshold=_xth_d,
                                     range_s=_xrs_d, range_e=_xre_d,
@@ -2399,10 +2403,14 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     line=dict(color="green", width=1.5, dash="dash"),
                                     name="下限", showlegend=False,
                                 ))
+                                _xbnd_prev_xw, _xbnd_prev_yw = xy_waves[0]
+                                _xbnd_prev_si = np.argsort(_xbnd_prev_xw)
                                 _xfig_bnd.add_trace(go.Scatter(
-                                    x=x_common_xy, y=xy_mean, mode="lines",
+                                    x=_xbnd_prev_xw[_xbnd_prev_si],
+                                    y=_xbnd_prev_yw[_xbnd_prev_si],
+                                    mode="lines",
                                     line=dict(color="royalblue", width=1.5),
-                                    name="平均曲線",
+                                    name="サンプル波形 #1",
                                 ))
                                 _xfig_bnd.update_layout(
                                     height=200, margin=dict(t=10, b=30, l=50, r=10),
