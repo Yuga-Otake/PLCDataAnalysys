@@ -1067,7 +1067,7 @@ def _render_inflection_debug_t(t_arr, v_arr, smooth_w: int,
     fig.update_yaxes(title_text="傾き",     row=2, col=1)
     fig.update_yaxes(title_text="|R − L|", row=3, col=1)
     fig.update_xaxes(title_text="ステップ開始からの時間 [ms]", row=3, col=1)
-    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+    st.plotly_chart(fig, width="stretch", key=chart_key)
 
 
 def _render_inflection_debug_xy(x_arr, y_arr, smooth_w: int,
@@ -1172,7 +1172,7 @@ def _render_inflection_debug_xy(x_arr, y_arr, smooth_w: int,
     fig.update_yaxes(title_text="傾き",     row=2, col=1)
     fig.update_yaxes(title_text="|R − L|", row=3, col=1)
     fig.update_xaxes(title_text=x_label,   row=3, col=1)
-    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+    st.plotly_chart(fig, width="stretch", key=chart_key)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1680,7 +1680,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                 height=200, margin=dict(t=10, b=30, l=50, r=10),
                                 xaxis_title="t [ms]", yaxis_title=var,
                             )
-                            st.plotly_chart(_fig_bnd, use_container_width=True,
+                            st.plotly_chart(_fig_bnd, width="stretch",
                                             key=f"{_dkey}_bnd_preview")
 
                         _eff_insp_wins_bnd = _render_item_insp_win_t(
@@ -2051,7 +2051,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     xaxis_title="サイクル番号",
                                     yaxis_title="数式結果",
                                 )
-                                st.plotly_chart(_fig_fm, use_container_width=True,
+                                st.plotly_chart(_fig_fm, width="stretch",
                                                 key=f"{_dkey}_fm_trend")
                             else:
                                 st.info(
@@ -2176,7 +2176,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                 legend=dict(orientation="h", y=1.05, x=1, xanchor="right"),
                 hovermode="x unified",
             )
-            st.plotly_chart(fig, use_container_width=True, key=f"{_vkey}_fig")
+            st.plotly_chart(fig, width="stretch", key=f"{_vkey}_fig")
 
             # ── サマリー & 基準登録 ───────────────────────────────────
             total_w = len(step_waves)
@@ -2718,7 +2718,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     height=200, margin=dict(t=10, b=30, l=50, r=10),
                                     xaxis_title=xy_xvar, yaxis_title=var,
                                 )
-                                st.plotly_chart(_xfig_bnd, use_container_width=True,
+                                st.plotly_chart(_xfig_bnd, width="stretch",
                                                 key=f"{_xdkey}_bnd_preview")
 
                                 _xeff_xs_bnd, _xeff_xe_bnd, _xeff_use_bnd = \
@@ -3138,7 +3138,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                             yaxis_title="数式結果",
                                         )
                                         st.plotly_chart(
-                                            _xfig_fm, use_container_width=True,
+                                            _xfig_fm, width="stretch",
                                             key=f"{_xdkey}_fm_trend")
                                     else:
                                         st.info(
@@ -3257,7 +3257,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                         legend=dict(orientation="h", y=1.05, x=1, xanchor="right"),
                         hovermode="closest",
                     )
-                    st.plotly_chart(fig_xy, use_container_width=True,
+                    st.plotly_chart(fig_xy, width="stretch",
                                     key=f"{_vkey}_xy_fig")
 
                     # ── XY サマリー & 基準登録 ─────────────────────
