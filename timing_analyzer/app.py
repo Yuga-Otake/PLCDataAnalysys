@@ -4032,9 +4032,17 @@ def edit_step_dialog(pname: str, step_idx: int, bool_cols: list, df: pd.DataFram
     name        = step.get("name", "")
     color       = step.get("color", _default_color(step_idx))
 
-    # 削除
-    _, del_col = st.columns([5, 1])
-    with del_col:
+    # 名前・色・削除（最上部）
+    nc1, nc2, nc3 = st.columns([4, 1, 1])
+    with nc1:
+        new_name  = st.text_input("ステップ名", value=name,
+                                   key=f"_ename_{pname}_{step_idx}",
+                                   placeholder="表示名を入力…")
+    with nc2:
+        new_color = st.color_picker("色", value=color,
+                                     key=f"_ecolor_{pname}_{step_idx}")
+    with nc3:
+        st.markdown("<div style='padding-top:28px'></div>", unsafe_allow_html=True)
         if st.button("🗑", width="stretch", key=f"_edel_{pname}_{step_idx}"):
             steps.pop(step_idx)
             st.session_state[pk(pname, "steps_list")] = steps
@@ -4152,15 +4160,6 @@ def edit_step_dialog(pname: str, step_idx: int, bool_cols: list, df: pd.DataFram
         help="ステップ開始を基準に各サイクルの波形を重ね合わせ表示します",
     )
     upd["waveform_vars"] = new_wvars
-
-    # 名前 & 色
-    nc1, nc2 = st.columns([4, 1])
-    with nc1:
-        new_name  = st.text_input("ステップ名", value=name,
-                                   key=f"_ename_{pname}_{step_idx}")
-    with nc2:
-        new_color = st.color_picker("色", value=color,
-                                     key=f"_ecolor_{pname}_{step_idx}")
 
     # 並べ替え
     r1, r2, _ = st.columns([1, 1, 3])
