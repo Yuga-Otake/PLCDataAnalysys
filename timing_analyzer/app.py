@@ -502,8 +502,14 @@ def detect_outliers_iqr(result_df: pd.DataFrame, step_stats: list) -> list:
 # ═══════════════════════════════════════════════════════════════
 
 def _get_wv_cfg(pname: str, step_name: str, var: str) -> dict:
-    """_render_waveform_overlay が使うウィジェットキーから設定を読み取る（デフォルト付き）"""
-    _vkey = f"wvol_{pname}_{step_name}_{var}"
+    """_render_waveform_overlay が使うウィジェットキーから設定を読み取る（デフォルト付き）。
+    スタンドアロン波形検査タブ（wvol_{pname}_{var}）を優先し、
+    なければステップ別キー（wvol_{pname}_{step_name}_{var}）を使う。
+    """
+    _sa_vkey   = f"wvol_{pname}_{var}"           # スタンドアロン（波形検査タブ）
+    _step_vkey = f"wvol_{pname}_{step_name}_{var}"
+    # スタンドアロンキーに検出点が登録されていればそちらを優先
+    _vkey = _sa_vkey if st.session_state.get(f"{_sa_vkey}_t_det_list") else _step_vkey
     return {
         "win_pre":        int(st.session_state.get(f"{_vkey}_wpre",   50)),
         "win_post":       int(st.session_state.get(f"{_vkey}_wpost",  300)),
@@ -1181,27 +1187,50 @@ def _render_inflection_debug_xy(x_arr, y_arr, smooth_w: int,
 
 def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                               step_stat: dict, step: dict, pname: str,
-                              result_df: pd.DataFrame):
-    """アナログ波形重ね合わせ表示（ステップ開始基準）"""
-    mode         = step.get("mode", "single")
-    name         = step_stat["name"]
-    waveform_vars = [v for v in step.get("waveform_vars", []) if v in df.columns]
+                              result_df: pd.DataFrame,
+                              _sa_vars: list = None,
+                              _ref_df: pd.DataFrame = None):
+    """アナログ波形重ね合わせ表示（ステップ開始基準 or スタンドアロン）
+
+    _sa_vars が指定された場合はスタンドアロンモード:
+      - waveform_vars = _sa_vars
+      - _vkey = wvol_{pname}_{var}  (ステップ名なし)
+      - start_offsets = ゼロ (トリガー開始基準)
+    """
+    _standalone = _sa_vars is not None
+
+    if _standalone:
+        name  = ""          # bl_key 等で参照されるためデフォルト設定
+        mode  = "single"
+        waveform_vars = [v for v in _sa_vars if v in df.columns]
+    else:
+        mode  = step.get("mode", "single")
+        name  = step_stat["name"]
+        waveform_vars = [v for v in step.get("waveform_vars", []) if v in df.columns]
 
     if not waveform_vars:
-        st.info("波形監視変数が未設定です。ステップ設定の「📈 波形監視変数」でアナログ変数を選択してください。")
+        if _standalone:
+            st.info("変数を選択してください")
+        else:
+            st.info("波形監視変数が未設定です。ステップ設定の「📈 波形監視変数」でアナログ変数を選択してください。")
         return
 
-    # ステップ開始時刻列（サイクル開始からのオフセット[ms]）
-    if mode == "single":
-        start_col = f"{name}_遅れ[ms]"
+    # start_offsets: スタンドアロン=ゼロ、通常=ステップ開始時刻
+    if _standalone:
+        try:
+            _n_cycles_sa = len(cached_detect_cycles(df, trigger_col, edge))
+        except Exception:
+            _n_cycles_sa = 1
+        start_offsets = np.zeros(_n_cycles_sa)
     else:
-        start_col = f"{name}_start[ms]"
-
-    if start_col not in result_df.columns:
-        st.warning(f"ステップ開始時刻列 `{start_col}` が見つかりません（解析を実行してください）")
-        return
-
-    start_offsets = result_df[start_col].values  # ms, per cycle
+        if mode == "single":
+            start_col = f"{name}_遅れ[ms]"
+        else:
+            start_col = f"{name}_start[ms]"
+        if start_col not in result_df.columns:
+            st.warning(f"ステップ開始時刻列 `{start_col}` が見つかりません（解析を実行してください）")
+            return
+        start_offsets = result_df[start_col].values  # ms, per cycle
 
     # 全サイクル波形取得
     try:
@@ -1221,7 +1250,8 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
 
     for var in waveform_vars:
         st.markdown(f"---\n#### 📈 {var}")
-        _vkey = f"wvol_{pname}_{name}_{var}"
+        # スタンドアロン: wvol_{pname}_{var} / 通常: wvol_{pname}_{step}_{var}
+        _vkey = f"wvol_{pname}_{var}" if _standalone else f"wvol_{pname}_{name}_{var}"
         _tab_time, _tab_xy = st.tabs(["⏱ 時間軸", "📊 XY グラフ"])
 
         with _tab_time:
@@ -1304,6 +1334,35 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
 
             mean_v = np.nanmean(mat, axis=0)
             std_v  = np.nanstd(mat, axis=0)
+
+            # ── 基準CSV 参照波形の計算 ────────────────────────────────
+            _ref_mean_v = None
+            _ref_std_v  = None
+            if _ref_df is not None and len(_ref_df) > 0:
+                try:
+                    _rw_all = cached_waveforms(_ref_df, trigger_col, edge,
+                                               tuple(waveform_vars))
+                    _ref_sw = []
+                    for _ri in range(len(_rw_all)):
+                        _rcyc = _rw_all[_ri]
+                        if var not in _rcyc.columns:
+                            continue
+                        _rt = _rcyc["time_offset_ms"].values
+                        _rv = _rcyc[var].values.astype(np.float64)
+                        _rm = (_rt >= -win_pre) & (_rt <= win_post)
+                        if _rm.sum() >= 2:
+                            _ref_sw.append((_rt[_rm], _rv[_rm]))
+                    if _ref_sw:
+                        _ref_mat2 = np.full((len(_ref_sw), len(t_common)), np.nan)
+                        for _rj, (_rts, _rvs) in enumerate(_ref_sw):
+                            _ridx = np.searchsorted(_rts, t_common).clip(
+                                0, len(_rts) - 1)
+                            _rin  = (t_common >= _rts[0]) & (t_common <= _rts[-1])
+                            _ref_mat2[_rj, _rin] = _rvs[_ridx[_rin]]
+                        _ref_mean_v = np.nanmean(_ref_mat2, axis=0)
+                        _ref_std_v  = np.nanstd(_ref_mat2,  axis=0)
+                except Exception:
+                    pass
 
             # 良品範囲の確定
             if good_mode == "自動（基準±Nσ）":
@@ -2086,8 +2145,27 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
             fig.add_trace(go.Scatter(
                 x=t_common, y=mean_v, mode="lines",
                 line=dict(color="royalblue", width=2.5),
-                name="平均波形",
+                name="平均波形（比較）" if _ref_df is not None else "平均波形",
             ))
+
+            # ── 基準CSV オーバーレイ（参照データ）──────────────────────
+            if _ref_mean_v is not None:
+                _rhi = _ref_mean_v + _ref_std_v
+                _rlo = _ref_mean_v - _ref_std_v
+                fig.add_trace(go.Scatter(
+                    x=np.concatenate([t_common, t_common[::-1]]),
+                    y=np.concatenate([_rhi, _rlo[::-1]]),
+                    fill="toself",
+                    fillcolor="rgba(255,140,0,0.12)",
+                    line=dict(color="rgba(0,0,0,0)"),
+                    name="基準 ±1σ",
+                    showlegend=True,
+                ))
+                fig.add_trace(go.Scatter(
+                    x=t_common, y=_ref_mean_v, mode="lines",
+                    line=dict(color="darkorange", width=2.5, dash="dash"),
+                    name="基準 平均",
+                ))
 
             if has_envelope and env_hi is not None:
                 fig.add_trace(go.Scatter(
@@ -3303,28 +3381,14 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
 def render_step_detail(df: pd.DataFrame, trigger_col: str, edge: str,
                        step_stat: dict, step: dict, pname: str,
                        result_df: pd.DataFrame):
+    """タイミング解析のみ表示（波形監視は🔍波形検査タブへ移動済み）"""
     mode = step.get("mode", "single")
-    name = step_stat["name"]
-    waveform_vars = [v for v in step.get("waveform_vars", []) if v in df.columns]
-
-    if waveform_vars:
-        tab_timing, tab_wave = st.tabs(["⏱ タイミング解析", "📈 波形監視"])
-        with tab_timing:
-            if mode == "single":
-                _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
-            elif mode == "numeric":
-                _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
-            else:
-                _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
-        with tab_wave:
-            _render_waveform_overlay(df, trigger_col, edge, step_stat, step, pname, result_df)
+    if mode == "single":
+        _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
+    elif mode == "numeric":
+        _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
     else:
-        if mode == "single":
-            _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
-        elif mode == "numeric":
-            _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
-        else:
-            _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
+        _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_df)
 
 
 def _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_df):
@@ -3876,6 +3940,127 @@ def cycle_settings_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
         pass
 
 
+# ── 全サイクル横断で RISE 時刻を収集するヘルパー ──────────────
+def _collect_rise_times(df: pd.DataFrame, bool_cols: list, trigger_col: str,
+                        edge: str, cs: list) -> dict:
+    """全サイクルを横断して各 Bool 変数の最初の RISE 時刻（平均）を返す。
+    1サイクルだけで検出漏れが起きにくいよう、全サイクルで1度でも検出されれば採用する。
+    返り値: {var: mean_t_ms}（RISE なし変数は除外）
+    """
+    accum: dict = {}   # {var: [t_ms, ...]}
+    for ci, csi in enumerate(cs):
+        cei  = cs[ci + 1] if ci + 1 < len(cs) else len(df) - 1
+        cdf  = df.loc[csi:cei]
+        t0   = df.loc[csi, "Timestamp"]
+        for var in bool_cols:
+            if var == trigger_col:
+                continue
+            try:
+                t = find_edge_time(cdf, var, "RISE", t0)
+                if t is not None and t >= 0:
+                    accum.setdefault(var, []).append(t)
+            except Exception:
+                pass
+    # 中央値で代表（外れ値に強い）
+    return {var: float(np.median(ts)) for var, ts in accum.items()}
+
+
+# ── ① 自動ステップ候補（1サイクルCSV 時）────────────────────
+
+@st.dialog("🔍 ステップを自動検出", width="large")
+def auto_step_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
+    """1サイクル内の Bool RISE イベントを時系列順に列挙し、一括追加する。"""
+    trigger_col = st.session_state.get(pk(pname, "trigger"), bool_cols[0])
+    edge        = st.session_state.get(pk(pname, "edge"), "RISE")
+    steps       = list(st.session_state.get(pk(pname, "steps_list"), []))
+    added_vars  = {s.get("variable", s.get("start_var", "")) for s in steps}
+
+    st.caption("サイクル内で最初に RISE するタイミング順に候補を表示します。"
+               "チェックを入れて「一括追加」してください。")
+
+    # サイクル検出
+    try:
+        cs = cached_detect_cycles(df, trigger_col, edge)
+    except Exception:
+        cs = []
+
+    if len(cs) == 0:
+        st.error("サイクルが検出できません。トリガー設定を確認してください。")
+        return
+
+    # 全サイクル横断で RISE 時刻を収集（漏れにくい）
+    _rise_times = _collect_rise_times(df, bool_cols, trigger_col, edge, cs)
+
+    if not _rise_times:
+        st.warning("全サイクルを検索しましたが、RISE イベントが検出された変数がありません。"
+                   "トリガー設定かCSVデータを確認してください。")
+        return
+
+    _sorted_vars = sorted(_rise_times.items(), key=lambda x: x[1])
+    st.markdown(f"**{len(_sorted_vars)} 変数**が検出されました（RISE 順）:")
+
+    # チェックボックス一覧
+    _sel_key = f"_auto_sel_{pname}"
+    if _sel_key not in st.session_state:
+        st.session_state[_sel_key] = {v: (v not in added_vars) for v, _ in _sorted_vars}
+
+    _sel_all, _clr_all = st.columns(2)
+    with _sel_all:
+        if st.button("全選択", key=f"_asel_all_{pname}", width="stretch"):
+            st.session_state[_sel_key] = {v: (v not in added_vars) for v, _ in _sorted_vars}
+    with _clr_all:
+        if st.button("全解除", key=f"_asel_none_{pname}", width="stretch"):
+            st.session_state[_sel_key] = {v: False for v, _ in _sorted_vars}
+
+    st.divider()
+    _checks: dict = {}
+    for _vi, (var, t_ms) in enumerate(_sorted_vars):
+        _already = var in added_vars
+        _col_chk, _col_lbl = st.columns([1, 9])
+        with _col_chk:
+            _default = st.session_state[_sel_key].get(var, not _already)
+            _checks[var] = st.checkbox(
+                " ", value=_default, key=f"_asel_{pname}_{_vi}",
+                disabled=_already,
+            )
+        with _col_lbl:
+            _badge = " ✅ 追加済" if _already else f"  {t_ms:.1f} ms"
+            st.markdown(f"`{var}`{_badge}")
+
+    st.divider()
+    _add_mode = st.radio(
+        "追加モード",
+        ["RISE 時刻（単一変数）", "ON 期間（1 の間）"],
+        index=1,
+        horizontal=True,
+        key=f"_auto_mode_{pname}",
+    )
+    _mode_val = "single" if "RISE" in _add_mode else "on_period"
+
+    _to_add = [v for v, chk in _checks.items() if chk and v not in added_vars]
+    if st.button(
+        f"＋ {len(_to_add)} 件を一括追加" if _to_add else "＋ 追加（未選択）",
+        disabled=not _to_add,
+        type="primary",
+        width="stretch",
+        key=f"_auto_add_{pname}",
+    ):
+        # RISE 時刻順を維持して追加
+        _sorted_to_add = sorted(_to_add, key=lambda v: _rise_times.get(v, float("inf")))
+        for v in _sorted_to_add:
+            steps.append({
+                "name":     v,
+                "color":    _default_color(len(steps)),
+                "mode":     _mode_val,
+                "variable": v,
+                "edge":     "RISE",
+            })
+        st.session_state[pk(pname, "steps_list")] = steps
+        st.session_state.pop(_sel_key, None)
+        st.toast(f"✅ {len(_sorted_to_add)} ステップを追加しました（RISE 順）")
+        st.rerun()
+
+
 # ── ② ステップ追加（＋ ボタン）──────────────────────────────
 
 @st.dialog("＋ ステップを追加", width="large")
@@ -3954,6 +4139,7 @@ def add_step_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
         add_mode_lbl = st.radio(
             "追加モード",
             ["RISE 時刻（単一変数）", "ON 期間（1 の間）"],
+            index=1,
             horizontal=True,
             key=f"bulk_add_mode_{pname}",
         )
@@ -4345,41 +4531,655 @@ if "_expand_new" not in st.session_state:
     st.session_state["_expand_new"] = None
 
 
+# ── 複数CSV 一括基準値算出ダイアログ ───────────────────────────
+
+@st.dialog("📂 複数CSV から基準値を一括算出", width="large")
+def bulk_baseline_dialog(pname: str, steps_list: list):
+    """複数の「良品」CSVを選択し、全ステップの平均基準値を一括算出・登録する。"""
+    csv_store   = st.session_state.get("csv_store", {})
+    trigger_col = st.session_state.get(pk(pname, "trigger"), "")
+    edge        = st.session_state.get(pk(pname, "edge"), "RISE")
+
+    if len(csv_store) < 1:
+        st.warning("CSVが読み込まれていません。サイドバーからCSVをアップロードしてください。")
+        return
+
+    st.caption("基準値の算出に使う CSV を選択してください（複数選択可）")
+    _all_keys   = list(csv_store.keys())
+    _label_map  = {
+        k: ("📌 " if csv_store[k].get("is_ref") else "📊 ") + csv_store[k].get("label", k)
+        for k in _all_keys
+    }
+    _selected = st.multiselect(
+        "良品CSV を選択",
+        _all_keys,
+        default=_all_keys,
+        format_func=lambda k: _label_map[k],
+        key="_bulk_bl_sel",
+        label_visibility="collapsed",
+    )
+    if not _selected:
+        st.info("CSVを1件以上選択してください")
+        return
+
+    steps_json = json.dumps(steps_list, ensure_ascii=False, sort_keys=True)
+    _accum: dict = {}   # {step_name: {"vals": [], "mode": str}}
+    _n_total_cyc = 0
+
+    _prog = st.progress(0, text="解析中…")
+    for _bi, _bck in enumerate(_selected):
+        _prog.progress((_bi + 1) / len(_selected), text=f"解析中… {_bck}")
+        _bcdf = csv_store[_bck].get("df", pd.DataFrame())
+        if _bcdf.empty:
+            continue
+        try:
+            _bcrd = cached_analyze_v2(_bcdf, trigger_col, edge, steps_json)
+            if _bcrd is None or len(_bcrd) == 0:
+                continue
+            _, _bcss = build_gantt_v2(_bcrd, steps_list, 0)
+            _n_total_cyc += len(_bcrd)
+            for _bcs in _bcss:
+                _sn  = _bcs["name"]
+                _sm  = _bcs["mode"]
+                _col = f"{_sn}_遅れ[ms]" if _sm == "single" else f"{_sn}_dur[ms]"
+                if _col in _bcrd.columns:
+                    _vals = _bcrd[_col].dropna().tolist()
+                    _accum.setdefault(_sn, {"vals": [], "mode": _sm})["vals"].extend(_vals)
+        except Exception:
+            continue
+    _prog.empty()
+
+    if not _accum:
+        st.error("解析できたステップがありません。トリガー設定を確認してください。")
+        return
+
+    # プレビューテーブル
+    _prev_rows = []
+    for _sn, _sd in _accum.items():
+        _v = np.array(_sd["vals"])
+        if len(_v) == 0:
+            continue
+        _prev_rows.append({
+            "ステップ":     _sn,
+            "モード":      "単一" if _sd["mode"] == "single" else "範囲",
+            "平均[ms]":   round(float(np.mean(_v)), 2),
+            "σ[ms]":     round(float(np.std(_v)), 2),
+            "サンプル数":  len(_v),
+        })
+
+    st.markdown(f"**基準値プレビュー**（合計 **{_n_total_cyc}** サイクル / **{len(_selected)}** ファイル）")
+    st.dataframe(pd.DataFrame(_prev_rows), hide_index=True, width="stretch")
+
+    if st.button("✅ この基準値を登録する", type="primary", width="stretch",
+                 key="_bulk_bl_reg"):
+        _new_bl = {}
+        for _sn, _sd in _accum.items():
+            _v = np.array(_sd["vals"])
+            if len(_v) == 0:
+                continue
+            _mean = float(np.mean(_v))
+            _std  = float(np.std(_v))
+            if _sd["mode"] == "single":
+                _new_bl[_sn] = {
+                    "mode":   "single",
+                    "ref_ms": round(_mean, 3),
+                    "std_ms": round(_std, 3),
+                }
+            else:
+                _new_bl[_sn] = {
+                    "mode":          _sd["mode"],
+                    "ref_dur_ms":    round(_mean, 3),
+                    "std_dur_ms":    round(_std, 3),
+                    "ref_start_ms":  0.0,
+                    "std_start_ms":  0.0,
+                }
+        st.session_state[pk(pname, "baseline")] = _new_bl
+        st.session_state[pk(pname, "baseline_meta")] = {
+            "source":     f"{len(_selected)} 件のCSV",
+            "n_cycles":   _n_total_cyc,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+        st.success("✅ 基準値を登録しました")
+        st.rerun()
+
+
+# ── セットアップウィザード ────────────────────────────────────
+
+def _render_wizard(pname: str, step: int, bool_cols: list, df: pd.DataFrame):
+    """4ステップのセットアップウィザードをメイン領域に描画する。"""
+    trigger_col = st.session_state.get(pk(pname, "trigger"), bool_cols[0])
+    edge        = st.session_state.get(pk(pname, "edge"), "RISE")
+    steps_list  = list(st.session_state.get(pk(pname, "steps_list"), []))
+
+    _STEPS = ["① トリガー確認", "② ステップ自動検出", "③ ガントプレビュー", "④ 設定保存"]
+    _N = len(_STEPS)
+
+    # ヘッダー
+    st.markdown(f"## 🚀 セットアップウィザード　—　**{pname}**")
+    st.progress((step - 1) / (_N - 1), text=f"**{_STEPS[step-1]}** （{step}/{_N}）")
+    st.divider()
+
+    # ─────────────────────────────────────────────────────────────
+    if step == 1:
+        st.markdown("### ① トリガー変数を確認")
+        st.caption("「サイクル開始」を示すBool変数を選択してください。選択した瞬間に自動で適用されます。")
+
+        _tr_new = st.selectbox(
+            "トリガー変数", bool_cols,
+            index=bool_cols.index(trigger_col) if trigger_col in bool_cols else 0,
+            key="_wiz_trigger",
+        )
+        _ed_new = st.radio("エッジ", ["RISE", "FALL"], horizontal=True, key="_wiz_edge")
+
+        # 即時反映（ボタン不要）
+        if _tr_new != trigger_col or _ed_new != edge:
+            st.session_state[pk(pname, "trigger")] = _tr_new
+            st.session_state[pk(pname, "edge")]    = _ed_new
+            trigger_col = _tr_new
+            edge        = _ed_new
+
+        # サイクル数確認
+        try:
+            _cs = cached_detect_cycles(df, trigger_col, edge)
+            _n  = len(_cs)
+        except Exception:
+            _n = 0
+
+        # 全 Bool 変数のサイクル数をプレビューして最適なトリガー候補を強調
+        _cyc_candidates = []
+        for _bc in bool_cols:
+            try:
+                _bc_n = len(cached_detect_cycles(df, _bc, "RISE"))
+                _cyc_candidates.append((_bc, _bc_n))
+            except Exception:
+                pass
+        _best_n = max((n for _, n in _cyc_candidates), default=0)
+        if _cyc_candidates and _best_n > 0:
+            st.caption("💡 **候補**: サイクル数が多い変数がトリガーに向いています")
+            _cand_rows = [{"変数": bc, "RISEサイクル数": n,
+                           "推奨": "⭐" if n == _best_n else ""}
+                          for bc, n in sorted(_cyc_candidates, key=lambda x: -x[1])[:8]]
+            st.dataframe(pd.DataFrame(_cand_rows), hide_index=True, width="stretch")
+
+        if _n == 0:
+            st.error("サイクルが検出できません。変数・エッジを変更してください。")
+        elif _n <= 10:
+            st.info(f"✅ {_n} サイクル検出。基準サンプルとして登録できます。")
+        else:
+            st.success(f"✅ {_n} サイクル検出。")
+
+    # ─────────────────────────────────────────────────────────────
+    elif step == 2:
+        st.markdown("### ② ステップ候補を選択")
+        st.caption("サイクル内で最初にRISEするタイミング順に一覧します。"
+                   "チェックを入れて一括追加してください。")
+
+        try:
+            _cs2 = cached_detect_cycles(df, trigger_col, edge)
+        except Exception:
+            _cs2 = []
+
+        if not _cs2:
+            st.error("サイクルが検出できません。前ステップでトリガーを確認してください。")
+        else:
+            st.caption(f"全 {len(_cs2)} サイクルを横断して変数を検索中...")
+            _rise_times2 = _collect_rise_times(df, bool_cols, trigger_col, edge, _cs2)
+
+            # RISE 未検出の変数も「サイクル開始時 ON」として候補に追加
+            _on_at_start: dict = {}   # {var: median_on_duration_ms}
+            for _v2 in bool_cols:
+                if _v2 == trigger_col or _v2 in _rise_times2:
+                    continue
+                _on_durs = []
+                for _ci2, _csi2 in enumerate(_cs2):
+                    _cei2 = _cs2[_ci2 + 1] if _ci2 + 1 < len(_cs2) else len(df) - 1
+                    _cdf2 = df.loc[_csi2:_cei2]
+                    try:
+                        from analyzer import normalize_bool_series as _nbs
+                        _fv = int(_nbs(_cdf2[_v2]).iloc[0]) if len(_cdf2) > 0 else 0
+                        if _fv == 1:
+                            # ON duration: how long stays ON from start
+                            _bv2 = _nbs(_cdf2[_v2]).values
+                            _off = next((i for i, x in enumerate(_bv2) if x == 0), len(_bv2))
+                            _t0ns = df.loc[_csi2, "Timestamp"].value
+                            if _off < len(_cdf2):
+                                _toff = _cdf2["Timestamp"].iloc[_off].value
+                                _on_durs.append((_toff - _t0ns) / 1e6)
+                    except Exception:
+                        pass
+                if _on_durs:
+                    _on_at_start[_v2] = float(np.median(_on_durs))
+
+            # 全候補をまとめてリスト化: RISE検出 → ON開始 → 残り
+            _all_cands = (
+                [(v, t, "RISE") for v, t in sorted(_rise_times2.items(), key=lambda x: x[1])]
+                + [(v, d, "ON開始") for v, d in sorted(_on_at_start.items(), key=lambda x: x[1])]
+            )
+            _added = {s.get("variable", s.get("start_var", "")) for s in steps_list}
+
+            if not _all_cands:
+                st.warning("変数が検出できませんでした。「次へ →」でスキップして設定モードから手動追加できます。")
+            else:
+                st.caption(f"**{len(_all_cands)} 変数**を検出しました"
+                           f"（RISE: {len(_rise_times2)} 件、サイクル開始時ON: {len(_on_at_start)} 件）")
+
+                _sel_key2 = f"_wiz_sel_{pname}"
+                if _sel_key2 not in st.session_state:
+                    # RISE検出変数のみデフォルト選択（ON開始は任意）
+                    st.session_state[_sel_key2] = {
+                        v: (v not in _added and kind == "RISE")
+                        for v, _, kind in _all_cands
+                    }
+
+                _ca, _cb = st.columns(2)
+                with _ca:
+                    if st.button("全選択", key="_wiz_all", width="stretch"):
+                        st.session_state[_sel_key2] = {v: (v not in _added) for v, _, _ in _all_cands}
+                with _cb:
+                    if st.button("全解除", key="_wiz_none", width="stretch"):
+                        st.session_state[_sel_key2] = {v: False for v, _, _ in _all_cands}
+
+                _checks2: dict = {}
+                for _wi, (var, t_ms, kind) in enumerate(_all_cands):
+                    _already2 = var in _added
+                    _cc, _cl  = st.columns([1, 9])
+                    with _cc:
+                        _checks2[var] = st.checkbox(
+                            " ", value=st.session_state[_sel_key2].get(var, not _already2 and kind == "RISE"),
+                            key=f"_wiz_chk_{pname}_{_wi}", disabled=_already2,
+                        )
+                    with _cl:
+                        if _already2:
+                            st.markdown(f"`{var}` ✅ 追加済")
+                        elif kind == "RISE":
+                            st.markdown(f"`{var}` &nbsp; 🟢 RISE &nbsp; **{t_ms:.1f} ms**")
+                        else:
+                            st.markdown(f"`{var}` &nbsp; 🔵 ON開始 &nbsp; 持続 **{t_ms:.1f} ms**")
+
+                _wiz_mode2 = st.radio(
+                    "追加モード",
+                    ["RISE 時刻（単一変数）", "ON 期間（1 の間）"],
+                    index=1, horizontal=True, key="_wiz_add_mode2",
+                )
+                _wiz_mode2_val = "single" if "RISE" in _wiz_mode2 else "on_period"
+
+                _to_add2 = [v for v, _, _ in _all_cands
+                            if _checks2.get(v, False) and v not in _added]
+                if st.button(
+                    f"＋ {len(_to_add2)} 件を追加してプレビューへ",
+                    disabled=not _to_add2,
+                    type="primary", key="_wiz_add2", width="stretch",
+                ):
+                    _sort_map2 = {v: t for v, t, _ in _all_cands}
+                    _sorted_add = sorted(_to_add2, key=lambda v: _sort_map2.get(v, 9999))
+                    for v in _sorted_add:
+                        steps_list.append({
+                            "name": v, "color": _default_color(len(steps_list)),
+                            "mode": _wiz_mode2_val, "variable": v, "edge": "RISE",
+                        })
+                    st.session_state[pk(pname, "steps_list")] = steps_list
+                    st.session_state.pop(_sel_key2, None)
+                    st.session_state["wizard_step"] = 3
+                    st.rerun()
+
+    # ─────────────────────────────────────────────────────────────
+    elif step == 3:
+        st.markdown("### ③ ガントプレビュー")
+        if not steps_list:
+            st.warning("ステップが未設定です。前ステップでステップを追加してください。")
+        else:
+            try:
+                _sj3 = json.dumps(steps_list, ensure_ascii=False, sort_keys=True)
+                _rd3 = cached_analyze_v2(df, trigger_col, edge, _sj3)
+                _fg3, _ss3 = build_gantt_v2(_rd3, steps_list, int(st.session_state.get(pk(pname, "takt"), 0)))
+                if _fg3:
+                    st.plotly_chart(_fg3, width="stretch", key="_wiz_gantt")
+                    st.caption(f"✅ {len(_rd3)} サイクル / {len(_ss3)} ステップ")
+
+                    # ── 基準登録 ─────────────────────────────────────
+                    _bl_exist = st.session_state.get(pk(pname, "baseline"), {})
+                    _n_rd3    = len(_rd3)
+                    if _bl_exist:
+                        st.success("📐 基準値登録済み — 上書きする場合は下のボタンを押してください。")
+                    else:
+                        st.info(f"💡 このCSV（{_n_rd3} サイクル平均）を基準サンプルとして登録できます"
+                                "（比較時の差分表示・ヒストグラムに使用）。")
+
+                    if st.button(
+                        f"📐 このCSV（{_n_rd3} サイクル平均）を基準として登録",
+                        key="_wiz_bl_reg",
+                        type="secondary",
+                        width="stretch",
+                    ):
+                        # 各ステップの平均値をそのまま基準値として登録
+                        _new_bl: dict = {}
+                        for _bs in _ss3:
+                            _bsmode = _bs.get("mode", "single")
+                            if _bsmode == "single":
+                                _new_bl[_bs["name"]] = {
+                                    "mode":    "single",
+                                    "ref_ms":  round(_bs["abs_mean"], 3),
+                                    "std_ms":  round(_bs["abs_std"], 3),
+                                }
+                            else:
+                                _new_bl[_bs["name"]] = {
+                                    "mode":         _bsmode,
+                                    "ref_start_ms": round(_bs.get("abs_start", 0), 3),
+                                    "ref_dur_ms":   round(_bs["mean"], 3),
+                                    "std_dur_ms":   round(_bs["abs_std"], 3),
+                                    "std_start_ms": 0.0,
+                                }
+                        st.session_state[pk(pname, "baseline")] = _new_bl
+                        st.session_state[pk(pname, "baseline_meta")] = {
+                            "source":     "ウィザード（1サイクル平均）",
+                            "n_cycles":   len(_rd3),
+                            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        }
+                        st.toast("✅ 基準値を登録しました")
+                        st.rerun()
+                else:
+                    st.warning("ガントを描画できません。")
+            except Exception as _we:
+                st.error(f"解析エラー: {_we}")
+
+        if st.button("この設定でOK → 保存へ", type="primary", key="_wiz_ok3", width="stretch"):
+            st.session_state["wizard_step"] = 4
+            st.rerun()
+
+    # ─────────────────────────────────────────────────────────────
+    elif step == 4:
+        st.markdown("### ④ 設定を保存")
+        st.success("セットアップが完了しました。設定をJSONに保存してください。")
+        st.caption(f"工程: **{pname}** / ステップ: {len(steps_list)} 件")
+
+        # JSON 生成（エクスポートロジックを再利用）
+        _det_conds4 = {
+            k: v for k, v in st.session_state.items()
+            if isinstance(k, str) and k.startswith(f"wvol_{pname}_")
+            and isinstance(v, (bool, int, float, str, list, dict, type(None)))
+        }
+        _exp4 = {
+            "version": "1.1",
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "source_csv": st.session_state.get("uploaded_filename", ""),
+            "processes": {
+                pname: {
+                    "trigger":        trigger_col,
+                    "edge":           edge,
+                    "takt_target_ms": int(st.session_state.get(pk(pname, "takt"), 0)),
+                    "steps":          steps_list,
+                    "baseline":       st.session_state.get(pk(pname, "baseline"), {}),
+                    "baseline_meta":  st.session_state.get(pk(pname, "baseline_meta"), {}),
+                    "det_conditions": _det_conds4,
+                }
+            }
+        }
+        st.download_button(
+            "📥 設定をJSONで保存",
+            data=json.dumps(_exp4, ensure_ascii=False, indent=2),
+            file_name=f"apb_{pname}_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+            mime="application/json",
+            width="stretch",
+            key="_wiz_dl4",
+        )
+        if st.button("✅ ウィザードを終了して解析を開始", type="primary",
+                     key="_wiz_done4", width="stretch"):
+            st.session_state["wizard_step"]  = 0
+            st.session_state.pop("wizard_pname", None)
+            st.rerun()
+
+    # ─ ナビゲーション ────────────────────────────────────────────
+    st.divider()
+    _nav_prev, _nav_cancel, _nav_next = st.columns([2, 2, 2])
+    with _nav_prev:
+        if st.button("← 前へ", disabled=(step == 1), width="stretch", key="_wiz_prev"):
+            st.session_state["wizard_step"] = step - 1
+            st.rerun()
+    with _nav_cancel:
+        if st.button("✖ キャンセル", width="stretch", key="_wiz_cancel"):
+            st.session_state["wizard_step"] = 0
+            st.session_state.pop("wizard_pname", None)
+            st.rerun()
+    with _nav_next:
+        if step < _N:
+            if st.button("次へ →", type="primary", width="stretch", key="_wiz_next"):
+                st.session_state["wizard_step"] = step + 1
+                st.rerun()
+
+
+# ── CSVファイル名からラベルを自動パース ─────────────────────────
+import re as _re_label
+def _parse_csv_label(filename: str) -> str:
+    """ファイル名から自動ラベルを生成（例: 20260418_am_line1_good.csv → 2026-04-18 朝番 L1 良品）"""
+    stem = _re_label.sub(r"\.csv$", "", filename, flags=_re_label.IGNORECASE)
+    # 日付パターン
+    _d = _re_label.search(r"(\d{4})(\d{2})(\d{2})", stem)
+    date_str = f"{_d.group(1)}-{_d.group(2)}-{_d.group(3)}" if _d else ""
+    stem2 = _re_label.sub(r"\d{8}", "", stem)
+    # シフト
+    shift_map = {"am": "朝番", "pm": "夕番", "night": "夜番", "day": "日勤"}
+    shift_str = ""
+    for k, v in shift_map.items():
+        if _re_label.search(rf"\b{k}\b", stem2, _re_label.IGNORECASE):
+            shift_str = v; stem2 = _re_label.sub(rf"\b{k}\b", "", stem2, flags=_re_label.IGNORECASE); break
+    # ライン
+    _l = _re_label.search(r"line(\d+)", stem2, _re_label.IGNORECASE)
+    line_str = f"L{_l.group(1)}" if _l else ""
+    # 品質
+    qual_map = {"good": "良品", "ng": "NG", "ok": "良品", "fail": "NG"}
+    qual_str = ""
+    for k, v in qual_map.items():
+        if _re_label.search(rf"\b{k}\b", stem2, _re_label.IGNORECASE):
+            qual_str = v; break
+    parts = [p for p in [date_str, shift_str, line_str, qual_str] if p]
+    return " ".join(parts) if parts else stem
+
+
 # ═══════════════════════════════════════════════════════════════
 # サイドバー: データ読み込み
 # ═══════════════════════════════════════════════════════════════
 
 with st.sidebar:
     st.header("📂 データ")
+
+    # ─── 表示モード切替 ──────────────────────────────────────────
+    _vm_labels = ["⚙️ 設定", "👁️ 監視", "📊 品質分析"]
+    view_mode = st.radio(
+        "表示モード",
+        _vm_labels,
+        horizontal=True,
+        key="view_mode",
+        label_visibility="collapsed",
+    )
+    # ウィザード開始ボタン（設定モード時のみ表示）
+    if view_mode == "⚙️ 設定" and st.session_state.get("processes"):
+        _wiz_pnames = list(st.session_state["processes"].keys())
+        if len(_wiz_pnames) == 1:
+            _wiz_target = _wiz_pnames[0]
+        else:
+            _wiz_target = st.selectbox(
+                "ウィザード対象工程", _wiz_pnames, key="_wiz_pname_sel",
+                label_visibility="collapsed",
+            )
+        if st.button("🚀 セットアップウィザード", width="stretch",
+                     help="ガイド付きで初期設定を進めます",
+                     key="_wiz_start_btn"):
+            st.session_state["wizard_step"]  = 1
+            st.session_state["wizard_pname"] = _wiz_target
+            st.rerun()
+    st.divider()
+
+    if "csv_store" not in st.session_state:
+        st.session_state["csv_store"]    = {}
+    if "ref_csv_key"  not in st.session_state:
+        st.session_state["ref_csv_key"]  = None   # 基準CSV キー
+
     use_sample = st.toggle("サンプルデータを使用", value=True, key="use_sample")
 
+    # ════════════════════════════════════════════════════════════
+    # ① 基準CSV（2〜3サイクル程度の型定義用CSV）
+    # ════════════════════════════════════════════════════════════
+    st.markdown("##### 📌 ① 基準CSV（型定義用）")
+
     if use_sample:
-        sample_path = os.path.join(os.path.dirname(__file__), "sample_playback.csv")
+        # ① 基準CSV: sample_baseline_3cyc.csv (3サイクル、ウィザード用)
+        _ref_sample_name = "sample_baseline_3cyc.csv"
+        _ref_sample_path = os.path.join(os.path.dirname(__file__), _ref_sample_name)
+        # フォールバック: 3サイクル版がなければ従来版を使用
+        if not os.path.exists(_ref_sample_path):
+            _ref_sample_name = "sample_playback.csv"
+            _ref_sample_path = os.path.join(os.path.dirname(__file__), _ref_sample_name)
+        _sample_key = _ref_sample_name
         try:
-            df, col_types = cached_load_sample(sample_path)
-            st.success(f"sample_playback.csv（{len(df):,}行）")
+            df, col_types = cached_load_sample(_ref_sample_path)
+            _n_ref_cyc = len(df) // 600  # 概算サイクル数
+            _is_first_load = _sample_key not in st.session_state["csv_store"]
+            st.session_state["csv_store"][_sample_key] = {
+                "df": df, "col_types": col_types,
+                "label": f"基準サンプル（{_ref_sample_name}）", "is_ref": True,
+            }
+            st.session_state["ref_csv_key"] = _sample_key
+            # active_csv は初回のみ基準CSVに設定する（ユーザーが比較CSVに切替後は上書きしない）
+            _cur_active = st.session_state.get("active_csv")
+            if _is_first_load or _cur_active not in st.session_state["csv_store"]:
+                st.session_state["active_csv"] = _sample_key
+            st.caption(f"📌 {_ref_sample_name}（{len(df):,}行）")
+            # 少サイクルならウィザード提案フラグ（初回のみ）
+            if _n_ref_cyc <= 10 and not st.session_state.get("_ref_sample_loaded"):
+                st.session_state["_suggest_wizard"] = True
+                st.session_state["_ref_sample_loaded"] = True
+        except FileNotFoundError:
+            st.error(f"{_ref_sample_name} が見つかりません")
+            st.stop()
+
+        # ② 比較CSV: sample_playback.csv (30サイクル) を自動追加
+        _cmp_sample_name = "sample_playback.csv"
+        _cmp_sample_path = os.path.join(os.path.dirname(__file__), _cmp_sample_name)
+        if (_cmp_sample_name != _ref_sample_name
+                and os.path.exists(_cmp_sample_path)
+                and _cmp_sample_name not in st.session_state["csv_store"]):
+            try:
+                _cdf, _cct = cached_load_sample(_cmp_sample_path)
+                st.session_state["csv_store"][_cmp_sample_name] = {
+                    "df": _cdf, "col_types": _cct,
+                    "label": "比較サンプル（sample_playback.csv）", "is_ref": False,
+                }
+            except Exception:
+                pass
+    else:
+        _ref_up = st.file_uploader(
+            "基準CSV（2〜10サイクル推奨）", type=["csv"], key="upload_ref",
+            help="ステップ定義・基準値登録に使う少サイクルCSVをアップロードしてください",
+        )
+        if _ref_up:
+            _ref_key = _ref_up.name
+            if _ref_key not in st.session_state["csv_store"] or \
+               not st.session_state["csv_store"][_ref_key].get("is_ref"):
+                try:
+                    _rdf  = load_csv(_ref_up)
+                    _rct  = detect_bool_columns(_rdf)
+                    _rlbl = _parse_csv_label(_ref_up.name)
+                    st.session_state["csv_store"][_ref_key] = {
+                        "df": _rdf, "col_types": _rct, "label": _rlbl, "is_ref": True,
+                    }
+                    st.session_state["ref_csv_key"] = _ref_key
+                    st.session_state["active_csv"]  = _ref_key
+                    st.toast(f"✅ 基準CSV: {_ref_up.name}")
+                    # 少サイクルならウィザード自動提案フラグ
+                    try:
+                        _rprocs = st.session_state.get("processes", {})
+                        _rtrig  = (list(_rprocs.values())[0].get("trigger_col", "")
+                                   if _rprocs else "")
+                        _rn = len(cached_detect_cycles(_rdf,
+                            st.session_state.get(list(_rprocs.keys())[0] + "__trigger", _rtrig) if _rprocs else "",
+                            "RISE")) if _rprocs else 0
+                    except Exception:
+                        _rn = 0
+                    if _rn <= 10:
+                        st.session_state["_suggest_wizard"] = True
+                except Exception as _re:
+                    st.error(f"読み込みエラー: {_re}")
+                    st.stop()
+            # 基準CSVをアクティブに
+            st.session_state["ref_csv_key"] = _ref_key
+            st.session_state["active_csv"]  = _ref_key
+            _rentry   = st.session_state["csv_store"][_ref_key]
+            df        = _rentry["df"]
+            col_types = _rentry["col_types"]
+            _rlbl     = _rentry.get("label", _ref_key)
+            st.success(f"📌 {_rlbl}  ({len(df):,}行)")
             st.session_state["df"] = df
             st.session_state["col_types"] = col_types
-            st.session_state["uploaded_filename"] = "sample_playback.csv"
-        except FileNotFoundError:
-            st.error("sample_playback.csv が見つかりません")
-            st.stop()
-    else:
-        uploaded = st.file_uploader("CSVをアップロード", type=["csv"], key="upload_main")
-        if uploaded:
-            try:
-                df       = load_csv(uploaded)
-                col_types = detect_bool_columns(df)
-                st.success(f"{len(df):,}行 読み込み完了")
+            st.session_state["uploaded_filename"] = _ref_key
+        else:
+            # 既存の基準CSVがあればそれを使う
+            _rk = st.session_state.get("ref_csv_key")
+            if _rk and _rk in st.session_state["csv_store"]:
+                _rentry   = st.session_state["csv_store"][_rk]
+                df        = _rentry["df"]
+                col_types = _rentry["col_types"]
                 st.session_state["df"] = df
                 st.session_state["col_types"] = col_types
-                st.session_state["uploaded_filename"] = uploaded.name
-            except Exception as e:
-                st.error(f"読み込みエラー: {e}")
+                st.session_state["active_csv"] = _rk
+                st.caption(f"📌 {_rentry.get('label', _rk)}")
+            else:
+                st.info("基準CSVをアップロードしてください（2〜10サイクル推奨）")
                 st.stop()
-        else:
-            st.info("CSVをアップロードしてください")
-            st.stop()
+
+    # ════════════════════════════════════════════════════════════
+    # ② 比較CSV（複数・日常監視・傾向解析用）
+    # ════════════════════════════════════════════════════════════
+    st.markdown("##### 📊 ② 比較CSV（監視・傾向解析用）")
+    _cmp_ups = st.file_uploader(
+        "比較CSV（複数選択可）", type=["csv"],
+        key="upload_cmp", accept_multiple_files=True,
+        help="日常データや複数ロットのCSVを追加して傾向比較できます",
+    )
+    if _cmp_ups:
+        _cmp_names = {uf.name for uf in _cmp_ups}
+        for uf in _cmp_ups:
+            if uf.name not in st.session_state["csv_store"]:
+                try:
+                    _cdf = load_csv(uf)
+                    _cct = detect_bool_columns(_cdf)
+                    _clbl = _parse_csv_label(uf.name)
+                    st.session_state["csv_store"][uf.name] = {
+                        "df": _cdf, "col_types": _cct, "label": _clbl, "is_ref": False,
+                    }
+                    st.toast(f"✅ {uf.name}")
+                except Exception as _ce:
+                    st.error(f"{uf.name}: {_ce}")
+        # アップローダーから消えたファイルは削除（基準CSVは残す）
+        for _ck in [k for k in list(st.session_state["csv_store"].keys())
+                    if k not in _cmp_names
+                    and not st.session_state["csv_store"][k].get("is_ref", False)]:
+            del st.session_state["csv_store"][_ck]
+
+    # 全CSV一覧（基準 + 比較）からアクティブを選択
+    _all_keys = list(st.session_state["csv_store"].keys())
+    if len(_all_keys) > 1:
+        _active_now = st.session_state.get("active_csv", _all_keys[0])
+        if _active_now not in _all_keys:
+            _active_now = _all_keys[0]
+        _active_idx = _all_keys.index(_active_now)
+        st.radio(
+            "表示中CSV",
+            _all_keys,
+            index=_active_idx,
+            key="active_csv",
+            format_func=lambda k: (
+                "📌 " + st.session_state["csv_store"][k].get("label", k)
+                if st.session_state["csv_store"][k].get("is_ref")
+                else "📊 " + st.session_state["csv_store"][k].get("label", k)
+            ),
+        )
+        _chosen = st.session_state["active_csv"]
+        _entry    = st.session_state["csv_store"][_chosen]
+        df        = _entry["df"]
+        col_types = _entry["col_types"]
+        st.session_state["df"] = df
+        st.session_state["col_types"] = col_types
+        st.session_state["uploaded_filename"] = _chosen
 
     bool_cols = [c for c, t in col_types.items() if t == "bool"]
     num_cols  = [c for c, t in col_types.items() if t == "numeric"]
@@ -4394,10 +5194,10 @@ with st.sidebar:
             st.caption(f"📅 {_ts0}  〜  {_ts1}")
         st.caption(f"🔀 Bool列: **{_n_bool}**　　📊 アナログ列: **{_n_num}**")
 
-    # CSV 変更検知 → 工程を自動登録
-    csv_hash = hashlib.md5(df.iloc[:, 0].astype(str).str.cat().encode()).hexdigest()[:8]
-    if st.session_state.get("_csv_hash") != csv_hash:
-        st.session_state["_csv_hash"]   = csv_hash
+    # スキーマ変更検知 → 工程を自動登録（列構成が変わった場合のみリセット）
+    schema_hash = hashlib.md5(str(sorted(col_types.keys())).encode()).hexdigest()[:8]
+    if st.session_state.get("_schema_hash") != schema_hash:
+        st.session_state["_schema_hash"] = schema_hash
         st.session_state["processes"]   = {}
         st.session_state["_expand_new"] = None
         starts = [c for c in bool_cols if any(
@@ -4414,9 +5214,37 @@ with st.sidebar:
             }
         if st.session_state["processes"]:
             st.session_state["_expand_new"] = list(st.session_state["processes"].keys())[0]
+            # 基準CSVが少サイクルならウィザード自動提案
+            try:
+                _auto_pname = list(st.session_state["processes"].keys())[0]
+                _auto_tr    = st.session_state["processes"][_auto_pname].get("trigger_col", bool_cols[0] if bool_cols else "")
+                _auto_n     = len(cached_detect_cycles(df, _auto_tr, "RISE")) if _auto_tr else 0
+                if _auto_n <= 10:
+                    st.session_state["_suggest_wizard"] = True
+                    st.session_state["_suggest_wizard_pname"] = _auto_pname
+            except Exception:
+                pass
 
     for pname, pinfo in st.session_state["processes"].items():
         init_proc_widgets(pname, pinfo, bool_cols)
+
+    # ウィザード自動提案バナー
+    if st.session_state.pop("_suggest_wizard", False):
+        _sw_pname = st.session_state.get("_suggest_wizard_pname", "")
+        try:
+            _sw_n = len(cached_detect_cycles(df,
+                st.session_state.get(pk(_sw_pname, "trigger"), bool_cols[0] if bool_cols else ""),
+                "RISE"))
+        except Exception:
+            _sw_n = 0
+        if _sw_n <= 10 and _sw_pname:
+            st.info(f"🔰 **{_sw_n} サイクル**の基準CSVを検出しました。"
+                    "ウィザードでステップを自動設定しますか？")
+            if st.button("🚀 ウィザードを開始", key="_wiz_auto_start", width="stretch",
+                         type="primary"):
+                st.session_state["wizard_step"]  = 1
+                st.session_state["wizard_pname"] = _sw_pname
+                st.rerun()
 
     # ─── 設定ファイル 保存 / 読み込み ───────────────────────────
     st.divider()
@@ -4426,6 +5254,12 @@ with st.sidebar:
     if st.session_state.get("processes"):
         _exp_procs = {}
         for _ep in st.session_state["processes"]:
+            # 波形検出条件（wvol_{pname}_* のsession_stateキーを全収集）
+            _det_conds = {
+                k: v for k, v in st.session_state.items()
+                if isinstance(k, str) and k.startswith(f"wvol_{_ep}_")
+                and isinstance(v, (bool, int, float, str, list, dict, type(None)))
+            }
             _exp_procs[_ep] = {
                 "trigger":        st.session_state.get(pk(_ep, "trigger"), ""),
                 "edge":           st.session_state.get(pk(_ep, "edge"), "RISE"),
@@ -4433,10 +5267,12 @@ with st.sidebar:
                 "steps":          st.session_state.get(pk(_ep, "steps_list"), []),
                 "baseline":       st.session_state.get(pk(_ep, "baseline"), {}),
                 "baseline_meta":  st.session_state.get(pk(_ep, "baseline_meta"), {}),
+                "det_conditions": _det_conds,
             }
         _exp_json = json.dumps(
-            {"version": "1.0",
+            {"version": "1.1",
              "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+             "source_csv": st.session_state.get("uploaded_filename", ""),
              "processes": _exp_procs},
             ensure_ascii=False, indent=2,
         )
@@ -4477,9 +5313,13 @@ with st.sidebar:
                         st.session_state[pk(_ip, "baseline")] = _ipd["baseline"]
                     if _ipd.get("baseline_meta"):
                         st.session_state[pk(_ip, "baseline_meta")] = _ipd["baseline_meta"]
+                    # 波形検出条件を復元
+                    for _dc_k, _dc_v in _ipd.get("det_conditions", {}).items():
+                        st.session_state[_dc_k] = _dc_v
                 st.session_state["processes"]   = _new_procs
                 st.session_state["_expand_new"] = next(iter(_new_procs), None)
-                st.toast("✅ 設定を読み込みました")
+                _n_det = sum(len(v.get("det_conditions", {})) for v in _imp["processes"].values())
+                st.toast(f"✅ 設定を読み込みました（波形検出条件 {_n_det} 件）")
                 st.rerun()
         except Exception as _imp_e:
             st.error(f"読み込みエラー: {_imp_e}")
@@ -4497,26 +5337,164 @@ with st.sidebar:
 st.title("🏭 APB タイミング解析")
 
 processes = st.session_state["processes"]
+view_mode = st.session_state.get("view_mode", "⚙️ 設定")
+
+_active_key   = st.session_state.get("active_csv", "")
+_active_label = (st.session_state.get("csv_store", {})
+                 .get(_active_key, {}).get("label", _active_key))
 
 hc1, hc2 = st.columns([6, 1])
 with hc1:
-    st.caption(f"登録済み工程: {len(processes)}件")
+    _csv_badge = f"  |  📂 {_active_label}" if _active_label else ""
+    st.caption(f"登録済み工程: {len(processes)}件{_csv_badge}")
 with hc2:
-    if st.button("＋ 工程を追加", type="primary", width="stretch"):
-        add_process_dialog(bool_cols)
+    if view_mode == "⚙️ 設定":
+        if st.button("＋ 工程を追加", type="primary", width="stretch"):
+            add_process_dialog(bool_cols)
 
 if not processes:
     st.info("「＋ 工程を追加」から工程を登録してください。")
+    st.stop()
+
+# ── セットアップウィザード優先表示 ─────────────────────────────
+_wizard_step  = st.session_state.get("wizard_step", 0)
+_wizard_pname = st.session_state.get("wizard_pname", "")
+if _wizard_step > 0 and _wizard_pname in processes:
+    _render_wizard(_wizard_pname, _wizard_step, bool_cols, df)
     st.stop()
 
 # ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═
 # ページタブ
 # ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═
 
-_page_tabs = st.tabs(["⚙️ 画面設定", "📐 新データ評価", "📈 傾向解析"])
+_page_tabs = st.tabs(["⚙️ 画面設定", "📐 新データ評価", "📈 傾向解析", "🔍 波形検査"])
 
 with _page_tabs[0]:
 
+    # ═══════════════════════════════════════════════════════════════
+    # 品質分析モード: 工程横断 Cpk サマリーテーブル
+    # ═══════════════════════════════════════════════════════════════
+    if view_mode == "📊 品質分析":
+        st.markdown("### 📊 工程横断 Cpk サマリー")
+        _cpk_rows = []
+        for _qpn in processes:
+            _qsl  = st.session_state.get(pk(_qpn, "steps_list"), [])
+            _qtr  = st.session_state.get(pk(_qpn, "trigger"), bool_cols[0])
+            _qed  = st.session_state.get(pk(_qpn, "edge"), "RISE")
+            _qtk  = int(st.session_state.get(pk(_qpn, "takt"), 0))
+            _qbl  = st.session_state.get(pk(_qpn, "baseline"), {})
+            if not _qsl:
+                continue
+            try:
+                _qrj = json.dumps(_qsl, ensure_ascii=False, sort_keys=True)
+                _qrd = cached_analyze_v2(df, _qtr, _qed, _qrj)
+                if _qrd is None or len(_qrd) == 0:
+                    continue
+                _, _qss = build_gantt_v2(_qrd, _qsl, _qtk)
+            except Exception:
+                continue
+            for _qs in _qss:
+                _qmean = _qs["abs_mean"]
+                _qstd  = _qs["abs_std"]
+                # Cpk: USL = takt_target, LSL = 0
+                if _qtk > 0 and _qstd > 0:
+                    _qcpk = round(min((_qtk - _qmean) / (3 * _qstd),
+                                      _qmean / (3 * _qstd)), 2)
+                    _qcpk_str = (f"🟢 {_qcpk}" if _qcpk >= 1.33
+                                 else f"🟡 {_qcpk}" if _qcpk >= 1.0
+                                 else f"🔴 {_qcpk}")
+                else:
+                    _qcpk_str = "—"
+                # vs 基準
+                _qbl_step = _qbl.get(_qs["name"], {})
+                if _qbl_step:
+                    _qbl_ref = (
+                        _qbl_step.get("ref_start_ms", 0) + _qbl_step.get("ref_dur_ms", 0)
+                        if _qs.get("mode") != "single"
+                        else _qbl_step.get("ref_ms", 0)
+                    )
+                    _qdelta = round(_qmean - _qbl_ref, 1)
+                    _qd_str = f"{_qdelta:+.1f}"
+                else:
+                    _qd_str = "—"
+                _cpk_rows.append({
+                    "工程":      _qpn,
+                    "ステップ":  _qs["name"],
+                    "平均[ms]":  round(_qmean, 1),
+                    "σ[ms]":    round(_qstd, 1),
+                    "min[ms]":  round(_qs.get("abs_min", 0), 1),
+                    "max[ms]":  round(_qs.get("abs_max", 0), 1),
+                    "Cpk":      _qcpk_str,
+                    "vs基準[ms]": _qd_str,
+                })
+        if _cpk_rows:
+            _cpk_df = pd.DataFrame(_cpk_rows)
+            _cpk_dl, _cpk_tbl = st.columns([1, 9])
+            with _cpk_dl:
+                st.download_button(
+                    "📊 CSV",
+                    data=_cpk_df.to_csv(index=False, encoding="utf-8-sig"),
+                    file_name=f"cpk_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                    mime="text/csv",
+                    width="stretch",
+                    key="_cpk_dl_btn",
+                )
+            with _cpk_tbl:
+                st.dataframe(_cpk_df, hide_index=True, width="stretch")
+            if not any(st.session_state.get(pk(p, "takt"), 0) > 0 for p in processes):
+                st.caption("💡 Cpk を表示するにはサイクル設定でタクト目標を設定してください")
+        else:
+            st.info("解析可能なステップがありません。まず設定モードでステップを追加してください。")
+
+        # ── 良品条件一覧（登録済み基準値テーブル）──────────────────
+        st.markdown("### 📐 良品条件一覧（登録済み基準値）")
+        _bl_list_rows = []
+        for _blpn in processes:
+            _blbl  = st.session_state.get(pk(_blpn, "baseline"), {})
+            _blmeta = st.session_state.get(pk(_blpn, "baseline_meta"), {})
+            _blsl  = st.session_state.get(pk(_blpn, "steps_list"), [])
+            if not _blbl:
+                continue
+            for _blstep in _blsl:
+                _blsn = _blstep.get("name", "")
+                _blse = _blbl.get(_blsn, {})
+                if not _blse:
+                    continue
+                _blmode = _blse.get("mode", "single")
+                if _blmode == "single":
+                    _blref  = _blse.get("ref_ms", 0)
+                    _blstd  = _blse.get("std_ms", 0)
+                    _blrefl = f"{_blref:.1f}"
+                else:
+                    _blref  = _blse.get("ref_dur_ms", 0)
+                    _blstd  = _blse.get("std_dur_ms", 0)
+                    _blrefl = f"{_blref:.1f} (持続)"
+                _bl_list_rows.append({
+                    "工程":       _blpn,
+                    "ステップ":   _blsn,
+                    "モード":     "単一" if _blmode == "single" else "範囲",
+                    "基準値[ms]": _blrefl,
+                    "±σ[ms]":    f"±{_blstd:.1f}",
+                    "登録元":     _blmeta.get("source", "—"),
+                    "登録日時":   _blmeta.get("created_at", "—"),
+                })
+        if _bl_list_rows:
+            _bl_list_df = pd.DataFrame(_bl_list_rows)
+            _bll_dl, _bll_tbl = st.columns([1, 9])
+            with _bll_dl:
+                st.download_button(
+                    "📊 CSV",
+                    data=_bl_list_df.to_csv(index=False, encoding="utf-8-sig"),
+                    file_name=f"baseline_conditions_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                    mime="text/csv",
+                    width="stretch",
+                    key="_bll_dl_btn",
+                )
+            with _bll_tbl:
+                st.dataframe(_bl_list_df, hide_index=True, width="stretch")
+        else:
+            st.info("基準値が未登録です。設定モードで各工程の基準値を登録してください。")
+        st.divider()
 
     # ═══════════════════════════════════════════════════════════════
     # 工程タイムライン概要（アコーディオン形式）
@@ -4716,35 +5694,52 @@ with _page_tabs[0]:
             expanded=_is_new,
         ):
             # ── ヘッダ: 工程名変更 ＋ サイクル設定 ＋ ステップ追加 ──
-            name_col, cyc_col, add_col = st.columns([4, 1, 1.5])
-            with name_col:
-                new_name = st.text_input(
-                    "工程名", value=pname,
-                    key=f"rename_input_{pname}",
-                    label_visibility="collapsed",
-                    placeholder="工程名を変更",
-                )
-            with cyc_col:
-                if st.button("⚙️", key=f"open_cyc_{pname}",
-                             width="stretch", help="サイクル設定"):
-                    cycle_settings_dialog(pname, bool_cols, df)
-            with add_col:
-                if st.button("＋ ステップを追加", key=f"open_add_{pname}",
-                             width="stretch", type="primary"):
-                    add_step_dialog(pname, bool_cols, df)
+            if view_mode == "⚙️ 設定":
+                # 1サイクル時は「🔍 自動検出」ボタンを追加
+                _is_setup_mode = n_cyc <= 10  # 少サイクルは初期セットアップと判断
+                if _is_setup_mode:
+                    st.info(f"🔰 **セットアップモード**: {n_cyc} サイクル検出。"
+                            "「🔍 ステップ自動検出」で変数を自動的に候補として表示できます。",
+                            icon=None)
+                    name_col, cyc_col, add_col, auto_col = st.columns([3, 1, 1.5, 1.5])
+                else:
+                    name_col, cyc_col, add_col = st.columns([4, 1, 1.5])
+                    auto_col = None
+                with name_col:
+                    new_name = st.text_input(
+                        "工程名", value=pname,
+                        key=f"rename_input_{pname}",
+                        label_visibility="collapsed",
+                        placeholder="工程名を変更",
+                    )
+                with cyc_col:
+                    if st.button("⚙️", key=f"open_cyc_{pname}",
+                                 width="stretch", help="サイクル設定"):
+                        cycle_settings_dialog(pname, bool_cols, df)
+                with add_col:
+                    if st.button("＋ ステップを追加", key=f"open_add_{pname}",
+                                 width="stretch", type="primary"):
+                        add_step_dialog(pname, bool_cols, df)
+                if auto_col is not None:
+                    with auto_col:
+                        if st.button("🔍 自動検出", key=f"open_auto_{pname}",
+                                     width="stretch"):
+                            auto_step_dialog(pname, bool_cols, df)
 
-            new_name_stripped = new_name.strip()
-            if (new_name_stripped and
-                    new_name_stripped != pname and
-                    new_name_stripped not in processes):
-                rename_process(pname, new_name_stripped)
-                st.toast(f"✏️ 工程名を {pname} → {new_name_stripped} に変更しました")
-                st.rerun()
+                new_name_stripped = new_name.strip()
+                if (new_name_stripped and
+                        new_name_stripped != pname and
+                        new_name_stripped not in processes):
+                    rename_process(pname, new_name_stripped)
+                    st.toast(f"✏️ 工程名を {pname} → {new_name_stripped} に変更しました")
+                    st.rerun()
+            else:
+                st.caption(f"📌 {pname}　　{trigger_col} {edge_s}　|　{n_cyc}サイクル")
 
             # ── ステップチップ（クリックで編集ダイアログ）──────────
             # ボタン自体をステップ色のチップとして表示。
             # CSS :has() で直前マーカー span を起点にボタンを着色。
-            if steps_list:
+            if steps_list and view_mode == "⚙️ 設定":
                 n_chips = len(steps_list)
                 chip_cols = st.columns(min(6, n_chips))
                 for ci, step in enumerate(steps_list):
@@ -4790,7 +5785,10 @@ with _page_tabs[0]:
             result_df = pd.DataFrame()
 
             if not steps_list:
-                st.info("「＋ ステップを追加」からステップ変数を追加するとガントチャートが表示されます")
+                if view_mode == "⚙️ 設定":
+                    st.info("「＋ ステップを追加」からステップ変数を追加するとガントチャートが表示されます")
+                else:
+                    st.info("ステップが未設定です。設定モードでステップを追加してください。")
             else:
                 # ステップ JSON をキャッシュキーに使用
                 steps_json = json.dumps(steps_list, ensure_ascii=False, sort_keys=True)
@@ -4805,8 +5803,127 @@ with _page_tabs[0]:
                 else:
                     fig_gantt, step_stats = build_gantt_v2(result_df, steps_list, takt_target)
 
+                    # ── 基準値オーバーレイ（比較CSV閲覧時）──────────────────
+                    _csv_store_g = st.session_state.get("csv_store", {})
+                    _ref_key_g   = st.session_state.get("ref_csv_key", "")
+                    _act_key_g   = st.session_state.get("active_csv", "")
+                    _is_cmp_g    = bool(
+                        fig_gantt and step_stats
+                        and _ref_key_g and _act_key_g
+                        and _act_key_g != _ref_key_g
+                    )
+
+                    if _is_cmp_g:
+                        _bl_g = st.session_state.get(pk(pname, "baseline"), {})
+                        _bl_source_g = "登録済み"
+
+                        # 基準未登録 → 基準サンプルCSV から算出
+                        if not _bl_g and _ref_key_g in _csv_store_g:
+                            try:
+                                _ref_df_g  = _csv_store_g[_ref_key_g]["df"]
+                                _ref_res_g = cached_analyze_v2(
+                                    _ref_df_g, trigger_col, edge, steps_json)
+                                if _ref_res_g is not None and len(_ref_res_g) > 0:
+                                    _, _ref_ss_g = build_gantt_v2(
+                                        _ref_res_g, steps_list, 0)
+                                    _bl_g = {}
+                                    for _rs_g in _ref_ss_g:
+                                        _rn_g = _rs_g["name"]
+                                        _rm_g = _rs_g["mode"]
+                                        if _rm_g == "single":
+                                            _bl_g[_rn_g] = {
+                                                "mode":   _rm_g,
+                                                "ref_ms": _rs_g["mean"],
+                                            }
+                                        else:
+                                            _bl_g[_rn_g] = {
+                                                "mode":         _rm_g,
+                                                "ref_start_ms": _rs_g.get(
+                                                    "abs_start", _rs_g["start"]),
+                                                "ref_dur_ms":   _rs_g["mean"],
+                                            }
+                                    _bl_source_g = "基準CSV平均"
+                            except Exception:
+                                pass
+
+                        if _bl_g:
+                            # 各ステップ行に赤い縦線を add_shape で描画
+                            # カテゴリ軸では y0/y1 にカテゴリインデックス(整数)を使用
+                            _any_shape = False
+                            for _gi, _ss_g in enumerate(step_stats):
+                                _sn_g = _ss_g["name"]
+                                _sb_g = _bl_g.get(_sn_g, {})
+                                if not _sb_g:
+                                    continue
+                                _bmode = _sb_g.get("mode", "single")
+                                _half  = 0.38   # バー幅 0.5 の内側に収める
+
+                                if _bmode == "single":
+                                    _rx = float(_sb_g.get("ref_ms", 0.0))
+                                    fig_gantt.add_shape(
+                                        type="line",
+                                        x0=_rx, x1=_rx,
+                                        y0=_gi - _half, y1=_gi + _half,
+                                        xref="x", yref="y",
+                                        line=dict(color="red", width=4),
+                                    )
+                                    # ホバー用の不可視 scatter（tooltip）
+                                    fig_gantt.add_trace(go.Scatter(
+                                        x=[_rx], y=[_sn_g],
+                                        mode="markers",
+                                        marker=dict(size=12, color="rgba(0,0,0,0)",
+                                                    line=dict(width=0)),
+                                        hovertemplate=(
+                                            f"📐 基準({_bl_source_g}): {_rx:.1f} ms"
+                                            "<extra></extra>"),
+                                        showlegend=False,
+                                    ))
+                                else:
+                                    _rs_x = float(_sb_g.get("ref_start_ms", 0.0))
+                                    _rd_g = float(_sb_g.get("ref_dur_ms", 0.0))
+                                    _re_x = _rs_x + _rd_g
+                                    # 開始側：細め破線
+                                    fig_gantt.add_shape(
+                                        type="line",
+                                        x0=_rs_x, x1=_rs_x,
+                                        y0=_gi - _half, y1=_gi + _half,
+                                        xref="x", yref="y",
+                                        line=dict(color="red", width=2, dash="dash"),
+                                    )
+                                    # 終了側：太め実線
+                                    fig_gantt.add_shape(
+                                        type="line",
+                                        x0=_re_x, x1=_re_x,
+                                        y0=_gi - _half, y1=_gi + _half,
+                                        xref="x", yref="y",
+                                        line=dict(color="red", width=4),
+                                    )
+                                    fig_gantt.add_trace(go.Scatter(
+                                        x=[_rs_x, _re_x], y=[_sn_g, _sn_g],
+                                        mode="markers",
+                                        marker=dict(size=12, color="rgba(0,0,0,0)",
+                                                    line=dict(width=0)),
+                                        hovertemplate=(
+                                            f"📐 基準({_bl_source_g})<br>"
+                                            f"開始: {_rs_x:.1f} ms / "
+                                            f"終了: {_re_x:.1f} ms（継続 {_rd_g:.1f} ms）"
+                                            "<extra></extra>"),
+                                        showlegend=False,
+                                    ))
+                                _any_shape = True
+
+                            # 凡例エントリ（shape は凡例に出ないため dummy trace）
+                            if _any_shape:
+                                fig_gantt.add_trace(go.Scatter(
+                                    x=[None], y=[None], mode="lines",
+                                    line=dict(color="red", width=4),
+                                    name=f"📐 基準値（{_bl_source_g}）",
+                                    showlegend=True,
+                                ))
+                                fig_gantt.update_layout(showlegend=True)
+
                     # ── 時系列自動並び替え ──────────────────────────
-                    if step_stats:
+                    if step_stats and view_mode == "⚙️ 設定":
                         _sort_col, _ = st.columns([2, 8])
                         with _sort_col:
                             if st.button(
@@ -4827,7 +5944,19 @@ with _page_tabs[0]:
                                 st.toast("⇅ ステップを時系列順に並び替えました")
                                 st.rerun()
 
-                    if fig_gantt:
+                    # ── NG サマリー（監視 / 品質分析モード）────────────
+                    if view_mode in ("👁️ 監視", "📊 品質分析") and step_stats:
+                        _outliers_sum = detect_outliers_iqr(result_df, step_stats)
+                        if _outliers_sum:
+                            _ng_msg = "  |  ".join(
+                                f"**{o['name']}** {len(o['cycles'])}サイクルNG"
+                                for o in _outliers_sum
+                            )
+                            st.error(f"🚨 NG検出: {_ng_msg}")
+                        else:
+                            st.success(f"✅ {pname}: 全{len(result_df)}サイクル正常")
+
+                    if fig_gantt and view_mode != "📊 品質分析":
                         # ── ヒストグラム詳細ページ用コンテキストを保存 ─────
                         st.session_state[f"_hist_ctx_{pname}"] = {
                             "step_stats": step_stats,
@@ -4951,8 +6080,20 @@ with _page_tabs[0]:
                                 "Cpk":      cpk_str,
                             }
                             rows.append(row)
-                        st.dataframe(pd.DataFrame(rows), hide_index=True,
-                                     width="stretch")
+                        _stats_df = pd.DataFrame(rows)
+                        _dl_col, _tbl_col = st.columns([1, 7])
+                        with _dl_col:
+                            st.download_button(
+                                "📊 CSV",
+                                data=result_df.to_csv(index=False, encoding="utf-8-sig"),
+                                file_name=f"{pname}_cycles_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                                mime="text/csv",
+                                width="stretch",
+                                key=f"dl_result_{pname}",
+                                help="サイクル解析結果をCSVでダウンロード",
+                            )
+                        with _tbl_col:
+                            st.dataframe(_stats_df, hide_index=True, width="stretch")
                         if takt_target == 0:
                             st.caption("💡 Cpk を表示するにはサイクル設定でタクト目標を設定してください")
 
@@ -4966,51 +6107,173 @@ with _page_tabs[0]:
                                     f"（IQR境界: {_ov['lo']:.1f}〜{_ov['hi']:.1f} ms）"
                                 )
 
-                        # ── 基準値管理 ──────────────────────────────────
-                        st.divider()
-                        _bl      = st.session_state.get(pk(pname, "baseline"), {})
-                        _bl_meta = st.session_state.get(pk(pname, "baseline_meta"), {})
-                        bl_l, bl_r = st.columns([7, 3])
-                        with bl_l:
-                            if _bl:
-                                st.success(
-                                    f"📐 基準値登録済み — {_bl_meta.get('source','?')} / "
-                                    f"{_bl_meta.get('n_cycles','?')} サイクル "
-                                    f"({_bl_meta.get('created_at','')})"
-                                )
-                            else:
-                                st.caption("📐 基準値を登録するとヒストグラムが差分表示になります")
-                        with bl_r:
-                            if st.button(
-                                "📐 基準値を登録・編集",
-                                key=f"bl_btn_{pname}",
-                                width="stretch",
-                                disabled=not step_stats,
-                            ):
-                                baseline_dialog(pname, step_stats, result_df)
+                        if view_mode == "⚙️ 設定":
+                            # ── 基準値管理 ──────────────────────────────────
+                            st.divider()
+                            _bl      = st.session_state.get(pk(pname, "baseline"), {})
+                            _bl_meta = st.session_state.get(pk(pname, "baseline_meta"), {})
+                            bl_l, bl_r = st.columns([7, 3])
+                            with bl_l:
+                                if _bl:
+                                    st.success(
+                                        f"📐 基準値登録済み — {_bl_meta.get('source','?')} / "
+                                        f"{_bl_meta.get('n_cycles','?')} サイクル "
+                                        f"({_bl_meta.get('created_at','')})"
+                                    )
+                                else:
+                                    st.caption("📐 基準値を登録するとヒストグラムが差分表示になります")
+                            with bl_r:
+                                _bl_c1, _bl_c2 = st.columns(2)
+                                with _bl_c1:
+                                    if st.button(
+                                        "📐 登録・編集",
+                                        key=f"bl_btn_{pname}",
+                                        width="stretch",
+                                        disabled=not step_stats,
+                                        help="現在のCSVの統計から基準値を登録",
+                                    ):
+                                        baseline_dialog(pname, step_stats, result_df)
+                                with _bl_c2:
+                                    _has_multi = len(st.session_state.get("csv_store", {})) > 1
+                                    if st.button(
+                                        "📂 複数CSV",
+                                        key=f"bl_bulk_btn_{pname}",
+                                        width="stretch",
+                                        disabled=not (step_stats and _has_multi),
+                                        help="複数の良品CSVから一括算出",
+                                    ):
+                                        bulk_baseline_dialog(pname, steps_list)
 
-                        st.divider()
+                            st.divider()
 
-                        # ── ステップ詳細 ──────────────────────────────
-                        st.markdown("**ステップ詳細**")
-                        step_names = [s["name"] for s in step_stats]
-                        cur_sel = st.session_state.get(f"sel_step_{pname}", step_names[0] if step_names else "")
-                        if cur_sel not in step_names and step_names:
-                            cur_sel = step_names[0]
-                        sel_name = st.selectbox(
-                            "詳細を見るステップ", step_names,
-                            index=step_names.index(cur_sel) if cur_sel in step_names else 0,
-                            key=f"sel_step_{pname}",
-                            label_visibility="collapsed",
+                            # ── ステップ詳細 ──────────────────────────────
+                            st.markdown("**ステップ詳細**")
+                            step_names = [s["name"] for s in step_stats]
+                            cur_sel = st.session_state.get(f"sel_step_{pname}", step_names[0] if step_names else "")
+                            if cur_sel not in step_names and step_names:
+                                cur_sel = step_names[0]
+                            sel_name = st.selectbox(
+                                "詳細を見るステップ", step_names,
+                                index=step_names.index(cur_sel) if cur_sel in step_names else 0,
+                                key=f"sel_step_{pname}",
+                                label_visibility="collapsed",
+                            )
+                            sel_stat = next((s for s in step_stats if s["name"] == sel_name), None)
+                            sel_step = next((s for s in steps_list if s.get("name") == sel_name), None)
+                            if sel_stat and sel_step:
+                                render_step_detail(df, trigger_col, edge,
+                                                   sel_stat, sel_step, pname, result_df)
+
+            # ── 複数CSV 比較テーブル（監視モード）──────────────────
+            _csv_store = st.session_state.get("csv_store", {})
+            _store_keys = [k for k in _csv_store if k != "sample_playback.csv" or len(_csv_store) == 1]
+            if view_mode == "👁️ 監視" and len(_csv_store) > 1 and steps_list:
+                st.divider()
+                st.markdown("**📊 CSV 横断比較**")
+                _steps_json_cmp = json.dumps(steps_list, ensure_ascii=False, sort_keys=True)
+                _bl_base = st.session_state.get(pk(pname, "baseline"), {})
+                _cmp_rows = []
+                _all_csv_step_means: dict = {}  # {csv_key: {step_name: mean_ms}}
+
+                for _ck, _centry in _csv_store.items():
+                    _cdf = _centry.get("df", pd.DataFrame())
+                    _clbl = _centry.get("label", _ck)
+                    if _cdf.empty:
+                        continue
+                    try:
+                        _crd = cached_analyze_v2(_cdf, trigger_col, edge, _steps_json_cmp)
+                    except Exception:
+                        continue
+                    if _crd is None or len(_crd) == 0:
+                        continue
+                    _, _css = build_gantt_v2(_crd, steps_list, takt_target)
+                    _step_means = {s["name"]: s["abs_mean"] for s in _css}
+                    _all_csv_step_means[_clbl] = _step_means
+
+                if _all_csv_step_means:
+                    _snames = [s["name"] for s in step_stats]
+                    _cmp_cols = list(_all_csv_step_means.keys())
+                    _cmp_data = {"ステップ": _snames}
+                    for _clbl, _smeans in _all_csv_step_means.items():
+                        _cmp_data[_clbl] = [round(_smeans.get(sn, float("nan")), 1) for sn in _snames]
+                    # 全CSV平均と基準差分
+                    _cmp_data["全体平均[ms]"] = []
+                    _cmp_data["vs 基準[ms]"] = []
+                    for _si, sn in enumerate(_snames):
+                        _vals = [_all_csv_step_means[c].get(sn) for c in _all_csv_step_means
+                                 if _all_csv_step_means[c].get(sn) is not None]
+                        _avg = round(float(np.mean(_vals)), 1) if _vals else float("nan")
+                        _cmp_data["全体平均[ms]"].append(_avg)
+                        # vs 基準（baseline は {step_name: {ref_dur_ms, ref_start_ms}} 形式）
+                        _bl_step = _bl_base.get(sn, {}) if _bl_base else {}
+                        if _bl_step and not np.isnan(_avg):
+                            _s_mode = step_stats[_si].get("mode", "single") if _si < len(step_stats) else "single"
+                            _bl_ref = (
+                                _bl_step.get("ref_start_ms", 0) + _bl_step.get("ref_dur_ms", 0)
+                                if _s_mode != "single"
+                                else _bl_step.get("ref_ms", 0)
+                            )
+                            _cmp_data["vs 基準[ms]"].append(round(_avg - _bl_ref, 1))
+                        else:
+                            _cmp_data["vs 基準[ms]"].append(None)
+                    st.dataframe(pd.DataFrame(_cmp_data), hide_index=True, width="stretch")
+                    if not _bl_base:
+                        st.caption("💡 基準値を登録すると「vs 基準」列が表示されます")
+
+                    # ── 比較バーチャート ─────────────────────────────
+                    if len(_all_csv_step_means) >= 1 and _snames:
+                        st.markdown("**📊 ステップ別平均時刻 比較チャート**")
+                        _cmp_colors = [
+                            "#3498db", "#e74c3c", "#2ecc71", "#f39c12",
+                            "#9b59b6", "#1abc9c", "#e67e22", "#34495e",
+                        ]
+                        _fig_cmp = go.Figure()
+                        for _ci, (_clbl2, _smeans2) in enumerate(_all_csv_step_means.items()):
+                            _fig_cmp.add_trace(go.Bar(
+                                name=_clbl2,
+                                x=_snames,
+                                y=[_smeans2.get(sn, 0) for sn in _snames],
+                                marker_color=_cmp_colors[_ci % len(_cmp_colors)],
+                                opacity=0.82,
+                            ))
+                        # 基準値をダイヤモンドマーカー付き折れ線で重ねる
+                        if _bl_base:
+                            _bl_refs2 = []
+                            for _si2, sn2 in enumerate(_snames):
+                                _bls2 = _bl_base.get(sn2, {})
+                                if _bls2:
+                                    _sm2 = step_stats[_si2].get("mode", "single") if _si2 < len(step_stats) else "single"
+                                    _blr2 = (
+                                        _bls2.get("ref_start_ms", 0) + _bls2.get("ref_dur_ms", 0)
+                                        if _sm2 != "single"
+                                        else _bls2.get("ref_ms", 0)
+                                    )
+                                    _bl_refs2.append(_blr2)
+                                else:
+                                    _bl_refs2.append(None)
+                            _fig_cmp.add_trace(go.Scatter(
+                                x=_snames,
+                                y=_bl_refs2,
+                                mode="markers+lines",
+                                name="📐 基準値",
+                                line=dict(color="#8e44ad", width=2, dash="dot"),
+                                marker=dict(size=11, symbol="diamond", color="#8e44ad"),
+                            ))
+                        _fig_cmp.update_layout(
+                            barmode="group",
+                            height=320,
+                            margin=dict(t=20, b=40, l=60, r=20),
+                            yaxis_title="時刻 [ms]",
+                            legend=dict(
+                                orientation="h", yanchor="bottom",
+                                y=1.02, xanchor="right", x=1,
+                            ),
                         )
-                        sel_stat = next((s for s in step_stats if s["name"] == sel_name), None)
-                        sel_step = next((s for s in steps_list if s.get("name") == sel_name), None)
-                        if sel_stat and sel_step:
-                            render_step_detail(df, trigger_col, edge,
-                                               sel_stat, sel_step, pname, result_df)
+                        st.plotly_chart(_fig_cmp, width="stretch",
+                                        key=f"cmp_bar_{pname}")
 
             # ── 詳細解析タブ（補助）────────────────────────────────
-            if steps_list and len(result_df) > 0:
+            if steps_list and len(result_df) > 0 and view_mode != "👁️ 監視":
                 with st.expander("📊 詳細解析タブ", expanded=False):
                     delay_cols = [c for c in result_df.columns
                                   if c.endswith("_遅れ[ms]") or c.endswith("_dur[ms]")]
@@ -5275,35 +6538,27 @@ with _page_tabs[1]:
                 f"({_ev_bl_meta.get('created_at','')})"
             )
 
-            ev_page_key = f"_evpage_df_{_ev_pname}"
-            _evh, _evc = st.columns([5, 1])
-            with _evh:
-                ev_page_file = st.file_uploader(
-                    "評価するCSVをここにドロップ", type=["csv"],
-                    key=f"ev_page_up_{_ev_pname}", label_visibility="collapsed",
+            # ── 評価CSV: サイドバーの csv_store から選択 ─────────────
+            _ev_csv_store = st.session_state.get("csv_store", {})
+            _ev_df = None
+            if not _ev_csv_store:
+                st.info("サイドバーの「② 比較CSV」にCSVをアップロードしてください")
+            else:
+                _ev_csv_keys = list(_ev_csv_store.keys())
+                _ev_sel = st.selectbox(
+                    "評価するCSV",
+                    _ev_csv_keys,
+                    format_func=lambda k: (
+                        "📌 " + _ev_csv_store[k].get("label", k)
+                        if _ev_csv_store[k].get("is_ref")
+                        else "📊 " + _ev_csv_store[k].get("label", k)
+                    ),
+                    key=f"ev_page_csv_sel_{_ev_pname}",
                 )
-            with _evc:
-                if ev_page_key in st.session_state:
-                    if st.button("✕ クリア", key=f"ev_page_clr_{_ev_pname}",
-                                 width="stretch"):
-                        del st.session_state[ev_page_key]
-                        st.session_state.pop(f"{ev_page_key}_sig", None)
-                        st.rerun()
+                _ev_df = _ev_csv_store[_ev_sel]["df"]
+                st.caption(f"📄 {_ev_csv_store[_ev_sel].get('label', _ev_sel)}  （{len(_ev_df):,} 行）")
 
-            if ev_page_file:
-                # ファイル名+サイズをシグネチャとして使い、同一ファイルの再読み込みを防ぐ
-                _ev_sig = f"{ev_page_file.name}_{ev_page_file.size}"
-                _ev_sig_key = f"{ev_page_key}_sig"
-                if st.session_state.get(_ev_sig_key) != _ev_sig:
-                    try:
-                        st.session_state[ev_page_key] = load_csv(ev_page_file)
-                        st.session_state[_ev_sig_key] = _ev_sig
-                    except Exception as _e:
-                        st.error(f"読み込みエラー: {_e}")
-
-            if ev_page_key in st.session_state:
-                _ev_df = st.session_state[ev_page_key]
-                st.info(f"評価データ {len(_ev_df):,} 行")
+            if _ev_df is not None and len(_ev_df) > 0:
 
                 _ev_steps_json = json.dumps(_ev_steps, ensure_ascii=False, sort_keys=True)
                 try:
@@ -5510,40 +6765,45 @@ with _page_tabs[2]:
         if not _tr_steps:
             st.info("ステップが設定されていません。「⚙️ 画面設定」タブでステップを追加してください")
         else:
-            # ── ファイル管理 ────────────────────────────────────────
-            st.markdown("#### 📂 時期別CSVの登録")
-            st.caption("時系列順に複数のCSVをアップロードしてください。ファイル名から日付を自動検出します。")
+            # ── 解析対象CSV: サイドバーの csv_store から選択 ─────────
+            _tr_csv_store = st.session_state.get("csv_store", {})
+            if not _tr_csv_store:
+                st.info("サイドバーの「② 比較CSV」にCSVをアップロードしてください")
+            else:
+                _tr_all_keys = list(_tr_csv_store.keys())
+                _tr_sel = st.multiselect(
+                    "解析対象CSV（複数選択可）",
+                    _tr_all_keys,
+                    default=_tr_all_keys,
+                    format_func=lambda k: (
+                        "📌 " + _tr_csv_store[k].get("label", k)
+                        if _tr_csv_store[k].get("is_ref")
+                        else "📊 " + _tr_csv_store[k].get("label", k)
+                    ),
+                    key=f"tr_sel_{_tr_pname}",
+                )
 
-            _tr_uploaded = st.file_uploader(
-                "CSVを選択（複数可）", type=["csv"],
-                accept_multiple_files=True, key=f"tr_files_{_tr_pname}",
-            )
-
-            # ラベル管理（session_stateで保持）
+            # ラベル管理（csv_store の label を初期値に）
             _tr_labels_key = f"_tr_labels_{_tr_pname}"
             if _tr_labels_key not in st.session_state:
                 st.session_state[_tr_labels_key] = {}
 
-            if _tr_uploaded:
-                st.markdown("**ファイルラベル設定**")
-                st.caption("各ファイルの時期ラベルを編集できます（グラフの X 軸に使用）")
-                _n_cols = min(len(_tr_uploaded), 4)
-                _label_cols = st.columns(_n_cols)
-                for _ti, _tf in enumerate(_tr_uploaded):
-                    _lk = _tf.name
-                    if _lk not in st.session_state[_tr_labels_key]:
-                        _dm = _re.search(r"(\d{4}[-_/]?\d{2}[-_/]?\d{2})", _tf.name)
-                        _auto = (
-                            _dm.group(1).replace("_", "-").replace("/", "-")
-                            if _dm else _tf.name.replace(".csv", "")
-                        )
-                        st.session_state[_tr_labels_key][_lk] = _auto
-                    with _label_cols[_ti % _n_cols]:
-                        st.session_state[_tr_labels_key][_lk] = st.text_input(
-                            _tf.name,
-                            value=st.session_state[_tr_labels_key][_lk],
-                            key=f"tr_lbl_{_tr_pname}_{_tf.name}",
-                        )
+            _tr_sel_list = locals().get("_tr_sel", [])
+            if _tr_sel_list:
+                with st.expander("ラベル設定（グラフX軸に使用）", expanded=False):
+                    _n_cols = min(len(_tr_sel_list), 4)
+                    _label_cols = st.columns(_n_cols)
+                    for _ti, _tk in enumerate(_tr_sel_list):
+                        if _tk not in st.session_state[_tr_labels_key]:
+                            st.session_state[_tr_labels_key][_tk] = (
+                                _tr_csv_store[_tk].get("label", _tk)
+                            )
+                        with _label_cols[_ti % _n_cols]:
+                            st.session_state[_tr_labels_key][_tk] = st.text_input(
+                                _tk,
+                                value=st.session_state[_tr_labels_key][_tk],
+                                key=f"tr_lbl_{_tr_pname}_{_tk}",
+                            )
 
                 # ── 解析実行 ────────────────────────────────────────
                 st.divider()
@@ -5554,18 +6814,18 @@ with _page_tabs[2]:
                     _tr_steps_json = json.dumps(_tr_steps)
                     _res_list = []
                     _prog = st.progress(0, text="解析中...")
-                    for _ti, _tf in enumerate(_tr_uploaded):
+                    for _ti, _tk in enumerate(_tr_sel_list):
                         _prog.progress(
-                            (_ti + 1) / len(_tr_uploaded),
-                            text=f"解析中 {_ti + 1}/{len(_tr_uploaded)}: {_tf.name}",
+                            (_ti + 1) / len(_tr_sel_list),
+                            text=f"解析中 {_ti + 1}/{len(_tr_sel_list)}: {_tk}",
                         )
                         try:
-                            _tdf = load_csv(_tf)
+                            _tdf = _tr_csv_store[_tk]["df"]   # ← csv_store から直接取得
                             _tres = cached_analyze_v2(
                                 _tdf, _tr_trigger, _tr_edge, _tr_steps_json
                             )
-                            _lbl = st.session_state[_tr_labels_key].get(_tf.name, _tf.name)
-                            # 波形NG統計を計算（waveform_vars が設定されたステップのみ）
+                            _lbl = st.session_state[_tr_labels_key].get(_tk, _tk)
+                            # 波形NG統計
                             _wv_stats_tr: dict = {}
                             for _step_cfg_tr in _tr_steps:
                                 if _step_cfg_tr.get("waveform_vars"):
@@ -5578,11 +6838,11 @@ with _page_tabs[2]:
                                     except Exception:
                                         pass
                             _res_list.append(
-                                {"label": _lbl, "fname": _tf.name,
+                                {"label": _lbl, "fname": _tk,
                                  "result": _tres, "wv_stats": _wv_stats_tr}
                             )
                         except Exception as _te:
-                            st.warning(f"{_tf.name}: 解析失敗 ({_te})")
+                            st.warning(f"{_tk}: 解析失敗 ({_te})")
                     _prog.empty()
                     st.session_state[f"_tr_results_{_tr_pname}"] = _res_list
                     st.toast(f"✅ {len(_res_list)} ファイルの解析が完了しました")
@@ -5913,13 +7173,45 @@ with _page_tabs[2]:
                             _fig_xbr.update_yaxes(title_text=_sub_label, row=2, col=1)
                             _fig_xbr.update_xaxes(title_text="時期", row=2, col=1)
 
-                            # NG 点サマリー
+                            # NG 点サマリー + ウェスタン・エレクトリック・ルール
                             _xbar_ng_cnt = sum(_xbar_ng)
                             _sub_ng_cnt  = sum(_sub_ng)
-                            if _xbar_ng_cnt > 0 or _sub_ng_cnt > 0:
+                            _we_warns = []
+                            _xv = _sg_xbar
+                            # Rule 1: UCL/LCL 超え（既存 _xbar_ng）
+                            if _xbar_ng_cnt > 0:
+                                _we_warns.append(f"🔴 Rule1: X̄管理外 **{_xbar_ng_cnt}** 点（UCL/LCL超え）")
+                            # Rule 2: 連続9点が中心線の同側
+                            if len(_xv) >= 9:
+                                for _ri in range(len(_xv) - 8):
+                                    _seg = _xv[_ri:_ri + 9]
+                                    if all(v > _xbar_bar for v in _seg) or all(v < _xbar_bar for v in _seg):
+                                        _we_warns.append(f"🟠 Rule2: 連続9点が中心線の同側（{_sg_lbls[_ri]}〜）")
+                                        break
+                            # Rule 3: 連続6点単調増加 or 単調減少
+                            if len(_xv) >= 6:
+                                for _ri in range(len(_xv) - 5):
+                                    _seg = _xv[_ri:_ri + 6]
+                                    if all(_seg[j] < _seg[j+1] for j in range(5)):
+                                        _we_warns.append(f"🟡 Rule3: 連続6点単調増加（{_sg_lbls[_ri]}〜）")
+                                        break
+                                    if all(_seg[j] > _seg[j+1] for j in range(5)):
+                                        _we_warns.append(f"🟡 Rule3: 連続6点単調減少（{_sg_lbls[_ri]}〜）")
+                                        break
+                            # Rule 4: 連続14点交互増減
+                            if len(_xv) >= 14:
+                                for _ri in range(len(_xv) - 13):
+                                    _seg = _xv[_ri:_ri + 14]
+                                    if all((_seg[j] - _seg[j+1]) * (_seg[j+1] - _seg[j+2]) < 0
+                                           for j in range(12)):
+                                        _we_warns.append(f"🟡 Rule4: 連続14点交互増減（{_sg_lbls[_ri]}〜）")
+                                        break
+                            if _we_warns:
+                                for _ww in _we_warns:
+                                    st.warning(f"**{_tsn}**: {_ww}")
+                            elif _sub_ng_cnt > 0:
                                 st.warning(
                                     f"**{_tsn}**: "
-                                    f"X̄ 管理外 {_xbar_ng_cnt} 点　"
                                     f"{'S' if _use_s else 'R'} 管理外 {_sub_ng_cnt} 点"
                                 )
 
@@ -6063,3 +7355,114 @@ with _page_tabs[2]:
 
             else:
                 st.info("CSVファイルをアップロードして「傾向解析を実行」を押してください")
+
+# ═══════════════════════════════════════════════════════════════
+# 🔍 波形検査タブ（ステップ依存なしの独立波形監視）
+# ═══════════════════════════════════════════════════════════════
+
+with _page_tabs[3]:
+    st.subheader("🔍 波形検査")
+    st.caption("工程・ステップ設定に関係なく、アナログ変数の波形を直接確認・検査条件を設定できます")
+
+    if not num_cols:
+        st.info("アナログ（数値）変数が見つかりません。CSVを読み込んでください。")
+    else:
+        # ── トリガー設定（工程があれば自動入力、なければ手動選択）──────
+        _wi_col1, _wi_col2, _wi_col3 = st.columns([4, 2, 2])
+        with _wi_col1:
+            # 工程が登録済みなら工程セレクタを表示（任意）
+            _wi_proc_opts = ["（工程を使わない）"] + list(processes.keys())
+            _wi_proc_sel  = st.selectbox(
+                "工程（任意）", _wi_proc_opts, key="wi_proc_sel",
+                help="工程を選ぶとトリガーが自動設定されます。不要なら「工程を使わない」のままでOK",
+            )
+        with _wi_col2:
+            if _wi_proc_sel != "（工程を使わない）":
+                _wi_trigger_default = st.session_state.get(
+                    pk(_wi_proc_sel, "trigger"), bool_cols[0] if bool_cols else ""
+                )
+            else:
+                _wi_trigger_default = bool_cols[0] if bool_cols else ""
+            _wi_trigger = st.selectbox(
+                "トリガー変数", bool_cols,
+                index=bool_cols.index(_wi_trigger_default) if _wi_trigger_default in bool_cols else 0,
+                key="wi_trigger",
+            )
+        with _wi_col3:
+            _wi_edge = st.radio("エッジ", ["RISE", "FALL"],
+                                horizontal=True, key="wi_edge")
+
+        # 保存用の pname キー（工程なしの場合は "__global" を使用）
+        _wi_pname = _wi_proc_sel if _wi_proc_sel != "（工程を使わない）" else "__global"
+
+        # ── サイクル検出 ────────────────────────────────────────────
+        if not _wi_trigger:
+            st.warning("トリガー変数を選択してください")
+        else:
+            try:
+                _wi_cs = cached_detect_cycles(df, _wi_trigger, _wi_edge)
+                _wi_n  = len(_wi_cs)
+            except Exception:
+                _wi_n = 0
+
+            if _wi_n == 0:
+                st.error("サイクルが検出できません。トリガー変数・エッジを変更してください")
+            else:
+                st.caption(f"📊 {_wi_n} サイクル検出  ／  アナログ変数 {len(num_cols)} 件")
+
+                # ── 変数選択 ────────────────────────────────────────
+                _wi_sel = st.multiselect(
+                    "検査する変数を選択",
+                    num_cols,
+                    default=num_cols[:3],
+                    key=f"wi_sel_{_wi_pname}",
+                )
+
+                if not _wi_sel:
+                    st.info("変数を1件以上選択してください")
+                else:
+                    # サイクル表示範囲（重さ対策）
+                    _wi_cyc_range = st.slider(
+                        "表示サイクル範囲",
+                        1, _wi_n,
+                        (1, min(_wi_n, 10)),
+                        key=f"wi_cyc_range_{_wi_pname}",
+                    )
+
+                    # df をサイクル範囲でスライス
+                    _wi_cs_list = list(_wi_cs)
+                    _wi_s_idx = _wi_cs_list[_wi_cyc_range[0] - 1]
+                    _wi_e_idx = (
+                        _wi_cs_list[_wi_cyc_range[1]]
+                        if _wi_cyc_range[1] < len(_wi_cs_list)
+                        else len(df) - 1
+                    )
+                    _wi_df = df.loc[_wi_s_idx:_wi_e_idx]
+
+                    # ── 基準CSV df を取得（比較データ閲覧時にオーバーレイ）──
+                    _wi_ref_overlay = None
+                    _wi_store2 = st.session_state.get("csv_store", {})
+                    _wi_ref_key2  = st.session_state.get("ref_csv_key", "")
+                    _wi_act_key2  = st.session_state.get("active_csv", "")
+                    if (_wi_ref_key2
+                            and _wi_ref_key2 in _wi_store2
+                            and _wi_act_key2 != _wi_ref_key2):
+                        _wi_ref_overlay = _wi_store2[_wi_ref_key2]["df"]
+                        _wi_ref_lbl = _wi_store2[_wi_ref_key2].get(
+                            "label", _wi_ref_key2)
+                        st.caption(
+                            f"🟠 基準データ（{_wi_ref_lbl}）を橙色で重ねて表示しています"
+                        )
+
+                    # ── スタンドアロンモードで波形オーバーレイを呼び出す ──
+                    _render_waveform_overlay(
+                        _wi_df,
+                        _wi_trigger,
+                        _wi_edge,
+                        step_stat=None,
+                        step=None,
+                        pname=_wi_pname,
+                        result_df=None,
+                        _sa_vars=_wi_sel,
+                        _ref_df=_wi_ref_overlay,
+                    )

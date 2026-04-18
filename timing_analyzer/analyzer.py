@@ -12,6 +12,33 @@ import numpy as np
 from math import log10
 
 
+# ── datetime64 単位正規化ヘルパー ────────────────────────────────────────
+def _ensure_ns(series: pd.Series) -> pd.Series:
+    """タイムスタンプ列を必ず datetime64[ns] に変換する。
+
+    pandas 2.x では read_csv / to_datetime が datetime64[us] を返すことがあり、
+    そのまま .values.astype(np.int64) するとマイクロ秒値が得られ、
+    / 1e6 で割ると ms ではなく秒値になってしまうバグが発生する。
+    常に ns に変換してから int64 変換することで計算を安定させる。
+    """
+    # pandas 2.2+ からは .dt.as_unit('ns') が推奨される
+    try:
+        return series.dt.as_unit('ns')
+    except AttributeError:
+        pass
+    # pandas 2.0 / 2.1 向けフォールバック
+    return series.astype('datetime64[ns]')
+
+
+def _to_ns(series: pd.Series) -> np.ndarray:
+    """タイムスタンプSeries → int64 ナノ秒配列を返す。
+
+    .values.astype(np.int64) だけでは pandas バージョンによって
+    us 単位値を返す可轉性があるため、明示的に to_numpy('datetime64[ns]') を経由する。
+    """
+    return series.to_numpy('datetime64[ns]').astype(np.int64)
+
+
 # ── タイムスタンプ解析 ──────────────────────────────────────────────
 def load_csv(file) -> pd.DataFrame:
     """CSVを読み込み、タイムスタンプを変換して返す。
@@ -29,8 +56,8 @@ def load_csv(file) -> pd.DataFrame:
             date_format="%Y-%m-%d %H:%M:%S.%f",
         )
         df = df.rename(columns={"Date Time": "Timestamp"})
-        # pandas 2.0 以降は datetime64[us] になる場合があるため ns に統一
-        df["Timestamp"] = df["Timestamp"].astype("datetime64[ns]")
+        # pandas 2.x では datetime64[us] になる場合があるため ns に統一
+        df["Timestamp"] = _ensure_ns(df["Timestamp"])
         return df
     except Exception:
         pass
@@ -63,8 +90,8 @@ def load_csv(file) -> pd.DataFrame:
                     "タイムスタンプのフォーマットが認識できません。"
                     "「Date Time」または「Timestamp」列が必要です。"
                 )
-    # pandas 2.0 以降は datetime64[us] になる場合があるため ns に統一
-    df["Timestamp"] = df["Timestamp"].astype("datetime64[ns]")
+    # pandas 2.x では datetime64[us] になる場合があるため ns に統一
+    df["Timestamp"] = _ensure_ns(df["Timestamp"])
     return df
 
 
@@ -186,7 +213,7 @@ def find_edge_time(
     """指定変数・エッジの最初の発生時刻 [ms] を返す（後方互換）。"""
     if var not in cycle_df.columns:
         return None
-    ts_ns = cycle_df["Timestamp"].values.astype(np.int64)
+    ts_ns = _to_ns(cycle_df["Timestamp"])  # 必ず ns 単位で取得
     start_ns = int(pd.Timestamp(start_time).value)
     return _edge_time_ns(cycle_df[var].values, ts_ns, edge, start_ns)
 
@@ -197,7 +224,7 @@ def find_numeric_condition_time(
     """数値条件が最初に True になる時刻 [ms] と継続時間 [ms]（後方互換）。"""
     if var not in cycle_df.columns:
         return None, None
-    ts_ns = cycle_df["Timestamp"].values.astype(np.int64)
+    ts_ns = _to_ns(cycle_df["Timestamp"])  # 必ず ns 単位で取得
     start_ns = int(pd.Timestamp(start_time).value)
     return _numeric_time_ns(cycle_df[var].values, ts_ns, op, value, start_ns)
 
@@ -214,7 +241,7 @@ def calculate_delays_v2(
       - サイクル毎の処理は numpy スライス参照のみ（DataFrame.loc を排除）
     """
     # ── 事前計算（全サイクル共通）────────────────────────────────
-    ts_ns    = df["Timestamp"].values.astype(np.int64)
+    ts_ns    = _to_ns(df["Timestamp"])  # 必ず ns 単位で取得（pandas 2.x 互換）
     non_ts   = [c for c in df.columns if c != "Timestamp"]
     data_arr = df[non_ts].to_numpy(dtype=np.float64)   # shape (N, C)
     col_idx  = {c: i for i, c in enumerate(non_ts)}
@@ -305,7 +332,7 @@ def get_cycle_waveforms(
     df: pd.DataFrame, cycle_starts: pd.Index, target_cols: list
 ) -> list:
     """各サイクルの波形データ（時間ゼロ基準）をリストで返す"""
-    ts_ns     = df["Timestamp"].values.astype(np.int64)   # 事前変換
+    ts_ns     = _to_ns(df["Timestamp"])  # 必ず ns 単位で取得（pandas 2.x 互換）
     cycle_arr = np.asarray(cycle_starts, dtype=np.intp)
     n         = len(cycle_arr)
     N         = len(ts_ns)
