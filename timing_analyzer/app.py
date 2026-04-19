@@ -4725,47 +4725,78 @@ def _render_wizard(pname: str, step: int, bool_cols: list, df: pd.DataFrame):
             st.caption(f"全 {len(_cs2)} サイクルを横断して変数を検索中...")
             _rise_times2 = _collect_rise_times(df, bool_cols, trigger_col, edge, _cs2)
 
-            # RISE 未検出の変数も「サイクル開始時 ON」として候補に追加
+            # RISE 未検出の変数を「サイクル開始時 ON」「FALL 検出」として候補追加
+            # ─ normalize_bool_series を一度だけインポート ─
+            from analyzer import normalize_bool_series as _nbs2
             _on_at_start: dict = {}   # {var: median_on_duration_ms}
+            _fall_times2: dict = {}   # {var: median_fall_time_ms}  ← 新規：FALL 検出
             for _v2 in bool_cols:
                 if _v2 == trigger_col or _v2 in _rise_times2:
                     continue
-                _on_durs = []
+                _on_durs, _fall_ts = [], []
                 for _ci2, _csi2 in enumerate(_cs2):
-                    _cei2 = _cs2[_ci2 + 1] if _ci2 + 1 < len(_cs2) else len(df) - 1
+                    _cei2 = (_cs2[_ci2 + 1] if _ci2 + 1 < len(_cs2)
+                             else df.index[-1])
                     _cdf2 = df.loc[_csi2:_cei2]
+                    if len(_cdf2) == 0 or _v2 not in _cdf2.columns:
+                        continue
                     try:
-                        from analyzer import normalize_bool_series as _nbs
-                        _fv = int(_nbs(_cdf2[_v2]).iloc[0]) if len(_cdf2) > 0 else 0
-                        if _fv == 1:
-                            # ON duration: how long stays ON from start
-                            _bv2 = _nbs(_cdf2[_v2]).values
-                            _off = next((i for i, x in enumerate(_bv2) if x == 0), len(_bv2))
-                            _t0ns = df.loc[_csi2, "Timestamp"].value
-                            if _off < len(_cdf2):
-                                _toff = _cdf2["Timestamp"].iloc[_off].value
-                                _on_durs.append((_toff - _t0ns) / 1e6)
+                        _bv2 = _nbs2(_cdf2[_v2]).values.astype(np.int8)
+                        _t0ns = int(pd.Timestamp(df.loc[_csi2, "Timestamp"]).value)
+                        _ts2  = _cdf2["Timestamp"].to_numpy("datetime64[ns]").astype(np.int64)
+
+                        if _bv2[0] == 1:
+                            # ── サイクル開始時 ON ──────────────────────────
+                            _diff2 = np.empty_like(_bv2); _diff2[0] = 0
+                            _diff2[1:] = _bv2[1:] - _bv2[:-1]
+                            _off_pos = np.nonzero(_diff2 == -1)[0]
+                            if len(_off_pos) > 0:
+                                # 途中で FALL
+                                _toff_ns = int(_ts2[_off_pos[0]])
+                                _on_durs.append((_toff_ns - _t0ns) / 1e6)
+                            else:
+                                # 【バグ修正】サイクル中ずっと ON → 全サイクル長を持続時間として記録
+                                _on_durs.append((_ts2[-1] - _t0ns) / 1e6)
+                        else:
+                            # ── LOW スタート → FALL が発生するか確認 ─────────
+                            _diff2 = np.empty_like(_bv2); _diff2[0] = 0
+                            _diff2[1:] = _bv2[1:] - _bv2[:-1]
+                            _fall_pos = np.nonzero(_diff2 == -1)[0]
+                            if len(_fall_pos) > 0:
+                                _fall_ts.append(
+                                    (int(_ts2[_fall_pos[0]]) - _t0ns) / 1e6)
                     except Exception:
                         pass
+
                 if _on_durs:
                     _on_at_start[_v2] = float(np.median(_on_durs))
+                elif _fall_ts:
+                    # RISE なし・ON開始なし・FALL あり → FALL候補
+                    _fall_times2[_v2] = float(np.median(_fall_ts))
 
-            # 全候補をまとめてリスト化: RISE検出 → ON開始 → 残り
+            # 全候補をまとめてリスト化: RISE → ON開始 → FALL
             _all_cands = (
-                [(v, t, "RISE") for v, t in sorted(_rise_times2.items(), key=lambda x: x[1])]
+                [(v, t, "RISE")  for v, t in sorted(_rise_times2.items(),  key=lambda x: x[1])]
                 + [(v, d, "ON開始") for v, d in sorted(_on_at_start.items(), key=lambda x: x[1])]
+                + [(v, t, "FALL") for v, t in sorted(_fall_times2.items(),  key=lambda x: x[1])]
             )
             _added = {s.get("variable", s.get("start_var", "")) for s in steps_list}
 
             if not _all_cands:
                 st.warning("変数が検出できませんでした。「次へ →」でスキップして設定モードから手動追加できます。")
+                st.caption("💡 ヒント: トリガー変数が正しく設定されているか確認してください。"
+                           "エッジを RISE/FALL で切り替えるとサイクルが検出される場合があります。")
             else:
-                st.caption(f"**{len(_all_cands)} 変数**を検出しました"
-                           f"（RISE: {len(_rise_times2)} 件、サイクル開始時ON: {len(_on_at_start)} 件）")
+                st.caption(
+                    f"**{len(_all_cands)} 変数**を検出しました　"
+                    f"🟢 RISE: {len(_rise_times2)} 件　"
+                    f"🔵 ON開始: {len(_on_at_start)} 件　"
+                    f"🔴 FALL: {len(_fall_times2)} 件"
+                )
 
                 _sel_key2 = f"_wiz_sel_{pname}"
                 if _sel_key2 not in st.session_state:
-                    # RISE検出変数のみデフォルト選択（ON開始は任意）
+                    # RISE のみデフォルト選択（ON開始・FALL は任意）
                     st.session_state[_sel_key2] = {
                         v: (v not in _added and kind == "RISE")
                         for v, _, kind in _all_cands
@@ -4785,7 +4816,9 @@ def _render_wizard(pname: str, step: int, bool_cols: list, df: pd.DataFrame):
                     _cc, _cl  = st.columns([1, 9])
                     with _cc:
                         _checks2[var] = st.checkbox(
-                            " ", value=st.session_state[_sel_key2].get(var, not _already2 and kind == "RISE"),
+                            " ",
+                            value=st.session_state[_sel_key2].get(
+                                var, not _already2 and kind == "RISE"),
                             key=f"_wiz_chk_{pname}_{_wi}", disabled=_already2,
                         )
                     with _cl:
@@ -4793,8 +4826,10 @@ def _render_wizard(pname: str, step: int, bool_cols: list, df: pd.DataFrame):
                             st.markdown(f"`{var}` ✅ 追加済")
                         elif kind == "RISE":
                             st.markdown(f"`{var}` &nbsp; 🟢 RISE &nbsp; **{t_ms:.1f} ms**")
-                        else:
+                        elif kind == "ON開始":
                             st.markdown(f"`{var}` &nbsp; 🔵 ON開始 &nbsp; 持続 **{t_ms:.1f} ms**")
+                        else:  # FALL
+                            st.markdown(f"`{var}` &nbsp; 🔴 FALL &nbsp; **{t_ms:.1f} ms**")
 
                 _wiz_mode2 = st.radio(
                     "追加モード",
@@ -4899,7 +4934,7 @@ def _render_wizard(pname: str, step: int, bool_cols: list, df: pd.DataFrame):
             and isinstance(v, (bool, int, float, str, list, dict, type(None)))
         }
         _exp4 = {
-            "version": "1.1",
+            "version": "1.2",
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "source_csv": st.session_state.get("uploaded_filename", ""),
             "processes": {
@@ -4910,6 +4945,8 @@ def _render_wizard(pname: str, step: int, bool_cols: list, df: pd.DataFrame):
                     "steps":          steps_list,
                     "baseline":       st.session_state.get(pk(pname, "baseline"), {}),
                     "baseline_meta":  st.session_state.get(pk(pname, "baseline_meta"), {}),
+                    "wv_baseline":    st.session_state.get(pk(pname, "wv_baseline"), {}),
+                    "wv_xy_baseline": st.session_state.get(pk(pname, "wv_xy_baseline"), {}),
                     "det_conditions": _det_conds4,
                 }
             }
@@ -5267,10 +5304,12 @@ with st.sidebar:
                 "steps":          st.session_state.get(pk(_ep, "steps_list"), []),
                 "baseline":       st.session_state.get(pk(_ep, "baseline"), {}),
                 "baseline_meta":  st.session_state.get(pk(_ep, "baseline_meta"), {}),
+                "wv_baseline":    st.session_state.get(pk(_ep, "wv_baseline"), {}),
+                "wv_xy_baseline": st.session_state.get(pk(_ep, "wv_xy_baseline"), {}),
                 "det_conditions": _det_conds,
             }
         _exp_json = json.dumps(
-            {"version": "1.1",
+            {"version": "1.2",
              "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
              "source_csv": st.session_state.get("uploaded_filename", ""),
              "processes": _exp_procs},
@@ -5313,6 +5352,11 @@ with st.sidebar:
                         st.session_state[pk(_ip, "baseline")] = _ipd["baseline"]
                     if _ipd.get("baseline_meta"):
                         st.session_state[pk(_ip, "baseline_meta")] = _ipd["baseline_meta"]
+                    # 波形基準（平均波形データ）を復元
+                    if _ipd.get("wv_baseline"):
+                        st.session_state[pk(_ip, "wv_baseline")] = _ipd["wv_baseline"]
+                    if _ipd.get("wv_xy_baseline"):
+                        st.session_state[pk(_ip, "wv_xy_baseline")] = _ipd["wv_xy_baseline"]
                     # 波形検出条件を復元
                     for _dc_k, _dc_v in _ipd.get("det_conditions", {}).items():
                         st.session_state[_dc_k] = _dc_v
