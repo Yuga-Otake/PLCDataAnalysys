@@ -3460,14 +3460,19 @@ def _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_
             except Exception:
                 pass
 
+        # ref データが取得できた場合は範囲を統合してビン幅を揃える
+        if _ref_plot_h is not None:
+            _vmin_h = min(_vmin_h, float(_ref_plot_h.min()))
+            _vmax_h = max(_vmax_h, float(_ref_plot_h.max()))
+            _bsz_h  = (_vmax_h - _vmin_h) / n_bins if n_bins > 0 and _vmax_h > _vmin_h else 1.0
+            _xbins_h = dict(start=_vmin_h, end=_vmax_h + _bsz_h, size=_bsz_h)
+
         fig_h  = go.Figure()
         # 基準CSV 分布を最初のトレースとして追加（背面に描画）
         if _ref_plot_h is not None:
-            _rv_min_h = float(_ref_plot_h.min()); _rv_max_h = float(_ref_plot_h.max())
-            _rb_sz_h  = (_rv_max_h - _rv_min_h) / max(n_bins, 1) if _rv_max_h > _rv_min_h else 1.0
             fig_h.add_trace(go.Histogram(
                 x=_ref_plot_h,
-                xbins=dict(start=_rv_min_h, end=_rv_max_h + _rb_sz_h, size=_rb_sz_h),
+                xbins=_xbins_h,
                 name="基準データ分布",
                 marker_color="rgba(30,120,220,0.55)", opacity=0.85,
             ))
@@ -3654,14 +3659,19 @@ def _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_d
             except Exception:
                 pass
 
+        # ref データが取得できた場合は範囲を統合してビン幅を揃える
+        if _ref_plot_r is not None:
+            _vmin_r = min(_vmin_r, float(_ref_plot_r.min()))
+            _vmax_r = max(_vmax_r, float(_ref_plot_r.max()))
+            _bsz_r  = (_vmax_r - _vmin_r) / n_bins if n_bins > 0 and _vmax_r > _vmin_r else 1.0
+            _xbins_r = dict(start=_vmin_r, end=_vmax_r + _bsz_r, size=_bsz_r)
+
         fig_h  = go.Figure()
         # 基準CSV 分布を最初のトレースとして追加（背面に描画）
         if _ref_plot_r is not None:
-            _rv_min_r2 = float(_ref_plot_r.min()); _rv_max_r2 = float(_ref_plot_r.max())
-            _rb_sz_r2  = (_rv_max_r2 - _rv_min_r2) / max(n_bins, 1) if _rv_max_r2 > _rv_min_r2 else 1.0
             fig_h.add_trace(go.Histogram(
                 x=_ref_plot_r,
-                xbins=dict(start=_rv_min_r2, end=_rv_max_r2 + _rb_sz_r2, size=_rb_sz_r2),
+                xbins=_xbins_r,
                 name="基準データ分布",
                 marker_color="rgba(30,120,220,0.55)", opacity=0.85,
             ))
@@ -3881,14 +3891,19 @@ def _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result
             except Exception:
                 pass
 
+        # ref データが取得できた場合は範囲を統合してビン幅を揃える
+        if _ref_plot_n is not None:
+            _vmin_n = min(_vmin_n, float(_ref_plot_n.min()))
+            _vmax_n = max(_vmax_n, float(_ref_plot_n.max()))
+            _bsz_n  = (_vmax_n - _vmin_n) / n_bins if n_bins > 0 and _vmax_n > _vmin_n else 1.0
+            _xbins_n = dict(start=_vmin_n, end=_vmax_n + _bsz_n, size=_bsz_n)
+
         fig_h   = go.Figure()
         # 基準CSV 分布を最初のトレースとして追加（背面に描画）
         if _ref_plot_n is not None:
-            _rv_min_n2 = float(_ref_plot_n.min()); _rv_max_n2 = float(_ref_plot_n.max())
-            _rb_sz_n2  = (_rv_max_n2 - _rv_min_n2) / max(n_bins, 1) if _rv_max_n2 > _rv_min_n2 else 1.0
             fig_h.add_trace(go.Histogram(
                 x=_ref_plot_n,
-                xbins=dict(start=_rv_min_n2, end=_rv_max_n2 + _rb_sz_n2, size=_rb_sz_n2),
+                xbins=_xbins_n,
                 name="基準データ分布",
                 marker_color="rgba(30,120,220,0.55)", opacity=0.85,
             ))
@@ -6786,11 +6801,14 @@ with _page_tabs[0]:
                             # ── 基準CSV の分布オーバーレイ ─────────────────
                             if _h_has_ref and col in _h_ref_result:
                                 _ref_dl = _h_ref_result[col]
-                                _rv_min = float(_ref_dl.min()); _rv_max = float(_ref_dl.max())
-                                _rb_sz  = (_rv_max - _rv_min) / max(nb, 1) if _rv_max > _rv_min else 1.0
+                                # 範囲を統合してビン幅を揃える
+                                _vmin_t = min(_vmin_t, float(_ref_dl.min()))
+                                _vmax_t = max(_vmax_t, float(_ref_dl.max()))
+                                _bsz_t  = (_vmax_t - _vmin_t) / nb if nb > 0 and _vmax_t > _vmin_t else 1.0
+                                _xbins_t = dict(start=_vmin_t, end=_vmax_t + _bsz_t, size=_bsz_t)
                                 fig.add_trace(go.Histogram(
                                     x=_ref_dl,
-                                    xbins=dict(start=_rv_min, end=_rv_max + _rb_sz, size=_rb_sz),
+                                    xbins=_xbins_t,
                                     name="基準データ分布",
                                     marker_color="rgba(30,120,220,0.55)",
                                     opacity=0.85,
