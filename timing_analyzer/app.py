@@ -3441,7 +3441,37 @@ def _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_
         _vmin_h = float(delays_plot.min()); _vmax_h = float(delays_plot.max())
         _bsz_h  = (_vmax_h - _vmin_h) / n_bins if n_bins > 0 and _vmax_h > _vmin_h else 1.0
         _xbins_h = dict(start=_vmin_h, end=_vmax_h + _bsz_h, size=_bsz_h)
+
+        # 基準CSV オーバーレイ用データを取得
+        _ref_plot_h = None
+        _ref_key_h  = st.session_state.get("ref_csv_key", "")
+        _act_key_h  = st.session_state.get("active_csv", "")
+        _store_h    = st.session_state.get("csv_store", {})
+        if _ref_key_h and _ref_key_h != _act_key_h and _ref_key_h in _store_h:
+            try:
+                _ref_steps_h = st.session_state.get(pk(pname, "steps_list"), [])
+                _ref_res_h   = cached_analyze_v2(
+                    _store_h[_ref_key_h]["df"], trigger_col, edge, json.dumps(_ref_steps_h)
+                )
+                if delay_col in _ref_res_h.columns:
+                    _rv_h = _ref_res_h[delay_col].dropna().values
+                    if len(_rv_h) > 0:
+                        _ref_plot_h = (_rv_h - _bl_ref) if _delta_mode else _rv_h
+            except Exception:
+                pass
+
         fig_h  = go.Figure()
+        # 基準CSV 分布を最初のトレースとして追加（背面に描画）
+        if _ref_plot_h is not None:
+            _rv_min_h = float(_ref_plot_h.min()); _rv_max_h = float(_ref_plot_h.max())
+            _rb_sz_h  = (_rv_max_h - _rv_min_h) / max(n_bins, 1) if _rv_max_h > _rv_min_h else 1.0
+            fig_h.add_trace(go.Histogram(
+                x=_ref_plot_h,
+                xbins=dict(start=_rv_min_h, end=_rv_max_h + _rb_sz_h, size=_rb_sz_h),
+                name="基準データ分布",
+                marker_color="rgba(30,120,220,0.55)", opacity=0.85,
+            ))
+
         if threshold > 0 and not _delta_mode:
             below = delays_plot[delays_plot <= threshold]
             above = delays_plot[delays_plot >  threshold]
@@ -3605,7 +3635,37 @@ def _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_d
         _vmin_r = float(durs_plot.min()); _vmax_r = float(durs_plot.max())
         _bsz_r  = (_vmax_r - _vmin_r) / n_bins if n_bins > 0 and _vmax_r > _vmin_r else 1.0
         _xbins_r = dict(start=_vmin_r, end=_vmax_r + _bsz_r, size=_bsz_r)
+
+        # 基準CSV オーバーレイ用データを取得
+        _ref_plot_r = None
+        _ref_key_r  = st.session_state.get("ref_csv_key", "")
+        _act_key_r  = st.session_state.get("active_csv", "")
+        _store_r    = st.session_state.get("csv_store", {})
+        if _ref_key_r and _ref_key_r != _act_key_r and _ref_key_r in _store_r:
+            try:
+                _ref_steps_r = st.session_state.get(pk(pname, "steps_list"), [])
+                _ref_res_r   = cached_analyze_v2(
+                    _store_r[_ref_key_r]["df"], trigger_col, edge, json.dumps(_ref_steps_r)
+                )
+                if dur_col in _ref_res_r.columns:
+                    _rv_r = _ref_res_r[dur_col].dropna().values
+                    if len(_rv_r) > 0:
+                        _ref_plot_r = (_rv_r - _bl_ref_dur) if _delta_mode else _rv_r
+            except Exception:
+                pass
+
         fig_h  = go.Figure()
+        # 基準CSV 分布を最初のトレースとして追加（背面に描画）
+        if _ref_plot_r is not None:
+            _rv_min_r2 = float(_ref_plot_r.min()); _rv_max_r2 = float(_ref_plot_r.max())
+            _rb_sz_r2  = (_rv_max_r2 - _rv_min_r2) / max(n_bins, 1) if _rv_max_r2 > _rv_min_r2 else 1.0
+            fig_h.add_trace(go.Histogram(
+                x=_ref_plot_r,
+                xbins=dict(start=_rv_min_r2, end=_rv_max_r2 + _rb_sz_r2, size=_rb_sz_r2),
+                name="基準データ分布",
+                marker_color="rgba(30,120,220,0.55)", opacity=0.85,
+            ))
+
         if threshold > 0 and not _delta_mode:
             below = durs_plot[durs_plot <= threshold]
             above = durs_plot[durs_plot >  threshold]
@@ -3802,7 +3862,37 @@ def _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result
         _vmin_n = float(durs.min()); _vmax_n = float(durs.max())
         _bsz_n  = (_vmax_n - _vmin_n) / n_bins if n_bins > 0 and _vmax_n > _vmin_n else 1.0
         _xbins_n = dict(start=_vmin_n, end=_vmax_n + _bsz_n, size=_bsz_n)
+
+        # 基準CSV オーバーレイ用データを取得
+        _ref_plot_n = None
+        _ref_key_n  = st.session_state.get("ref_csv_key", "")
+        _act_key_n  = st.session_state.get("active_csv", "")
+        _store_n    = st.session_state.get("csv_store", {})
+        if _ref_key_n and _ref_key_n != _act_key_n and _ref_key_n in _store_n:
+            try:
+                _ref_steps_n = st.session_state.get(pk(pname, "steps_list"), [])
+                _ref_res_n   = cached_analyze_v2(
+                    _store_n[_ref_key_n]["df"], trigger_col, edge, json.dumps(_ref_steps_n)
+                )
+                if dur_col in _ref_res_n.columns:
+                    _rv_n = _ref_res_n[dur_col].dropna().values
+                    if len(_rv_n) > 0:
+                        _ref_plot_n = _rv_n
+            except Exception:
+                pass
+
         fig_h   = go.Figure()
+        # 基準CSV 分布を最初のトレースとして追加（背面に描画）
+        if _ref_plot_n is not None:
+            _rv_min_n2 = float(_ref_plot_n.min()); _rv_max_n2 = float(_ref_plot_n.max())
+            _rb_sz_n2  = (_rv_max_n2 - _rv_min_n2) / max(n_bins, 1) if _rv_max_n2 > _rv_min_n2 else 1.0
+            fig_h.add_trace(go.Histogram(
+                x=_ref_plot_n,
+                xbins=dict(start=_rv_min_n2, end=_rv_max_n2 + _rb_sz_n2, size=_rb_sz_n2),
+                name="基準データ分布",
+                marker_color="rgba(30,120,220,0.55)", opacity=0.85,
+            ))
+
         if threshold > 0:
             below = durs[durs <= threshold]
             above = durs[durs >  threshold]
@@ -6702,8 +6792,8 @@ with _page_tabs[0]:
                                     x=_ref_dl,
                                     xbins=dict(start=_rv_min, end=_rv_max + _rb_sz, size=_rb_sz),
                                     name="基準データ分布",
-                                    marker_color="rgba(220,60,60,0.25)",
-                                    opacity=0.7,
+                                    marker_color="rgba(30,120,220,0.55)",
+                                    opacity=0.85,
                                 ))
 
                             # ── 現在データの分布 ────────────────────────────
