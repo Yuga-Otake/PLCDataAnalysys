@@ -1443,13 +1443,18 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                 st.session_state[_tdet_cnt_key] = 0
             _tdet_list = st.session_state[_tdet_list_key]
 
-            _DET_TYPES_T = ["傾き変化点", "閾値超え検出", "上下判定比較",
-                            "最大値検査", "最小値検査", "検出点比較", "数式"]
-            _DET_COLORS  = ["darkorange", "deeppink", "limegreen", "dodgerblue", "gold"]
+            # 点取得系: (t,v) を記録してマーカー表示 + OK/NG判定 + 傾向解析に出す
+            # 判定系: NG フラグのみ（サイクル単位の合否）
+            _DET_TYPES_POINT  = ["傾き変化点", "閾値超え検出", "最大値点", "最小値点"]
+            _DET_TYPES_JUDGE  = ["上下判定比較", "最大値判定", "最小値判定", "検出点比較", "数式"]
+            _DET_TYPES_T      = _DET_TYPES_POINT + _DET_TYPES_JUDGE
+            _DET_COLORS       = ["darkorange", "deeppink", "limegreen", "dodgerblue",
+                                 "gold", "orchid", "coral", "steelblue"]
 
             _add_ca, _add_cb = st.columns([2, 4])
             with _add_cb:
-                st.selectbox("検出点タイプ", _DET_TYPES_T, key=f"{_vkey}_t_det_type_sel")
+                st.selectbox("検出点タイプ", _DET_TYPES_T, key=f"{_vkey}_t_det_type_sel",
+                             help="点取得系: 傾き変化点・閾値超え検出・最大値点・最小値点  |  判定系: それ以外")
             with _add_ca:
                 st.markdown("<div style='padding-top:28px'></div>", unsafe_allow_html=True)
                 if st.button("＋ 検出点を追加", key=f"{_vkey}_t_det_add", type="secondary"):
@@ -1475,8 +1480,9 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                 _dkey  = f"{_vkey}_{_did}"
                 _color = _DET_COLORS[_di % len(_DET_COLORS)]
                 _icon  = {"傾き変化点": "📐", "閾値超え検出": "🎯",
-                          "上下判定比較": "📊", "検出点比較": "🔲",
-                          "数式": "🧮"}.get(_dtype, "📏")
+                          "最大値点": "⬆️", "最小値点": "⬇️",
+                          "上下判定比較": "📊", "最大値判定": "🔺", "最小値判定": "🔻",
+                          "検出点比較": "🔲", "数式": "🧮"}.get(_dtype, "📏")
 
                 with st.expander(f"{_icon} #{_di+1} {_dtype}", expanded=True):
                     _hd, _del_btn = st.columns([8, 1])
@@ -1575,6 +1581,35 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                 value=0, step=1, key=f"{_dkey}_nth",
                                 help="サイクルごとにN番目の検出点のみ使用。0=全点。")
 
+                        # ── OK/NG 判定範囲 & 傾向解析 ────────────────
+                        st.markdown("**✅ OK/NG 判定範囲**")
+                        _okng_t1, _okng_t2, _okng_t3 = st.columns([1, 2, 2])
+                        with _okng_t1:
+                            st.checkbox("t 範囲で判定", key=f"{_dkey}_ok_t_on")
+                        _ok_t_on_inf = bool(st.session_state.get(f"{_dkey}_ok_t_on", False))
+                        with _okng_t2:
+                            st.number_input("t OK 下限 [ms]", value=0.0, step=5.0,
+                                            key=f"{_dkey}_ok_t_lo",
+                                            disabled=not _ok_t_on_inf)
+                        with _okng_t3:
+                            st.number_input("t OK 上限 [ms]", value=100.0, step=5.0,
+                                            key=f"{_dkey}_ok_t_hi",
+                                            disabled=not _ok_t_on_inf)
+                        _okng_v1, _okng_v2, _okng_v3 = st.columns([1, 2, 2])
+                        with _okng_v1:
+                            st.checkbox("v 値で判定", key=f"{_dkey}_ok_v_on")
+                        _ok_v_on_inf = bool(st.session_state.get(f"{_dkey}_ok_v_on", False))
+                        with _okng_v2:
+                            st.number_input("v OK 下限", value=0.0, step=0.1,
+                                            key=f"{_dkey}_ok_v_lo",
+                                            disabled=not _ok_v_on_inf)
+                        with _okng_v3:
+                            st.number_input("v OK 上限", value=1.0, step=0.1,
+                                            key=f"{_dkey}_ok_v_hi",
+                                            disabled=not _ok_v_on_inf)
+                        st.checkbox("📈 傾向解析に出す", key=f"{_dkey}_trend_on",
+                                    help="検出点の t・v 値をサイクルごとに 📈 傾向解析タブへ送ります")
+
                         # 全サイクルから検出点収集
                         _det_on  = bool(st.session_state.get(f"{_dkey}_on", False))
                         _det_thr = float(st.session_state.get(f"{_dkey}_thresh", 0.0))
@@ -1602,6 +1637,30 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     "label": f"#{_di+1} 傾き変化点 ({len(_mkt)}点)",
                                     "color": _color,
                                 })
+                            # OK/NG 範囲チェック → peak_ng_flags
+                            _inf_ok_t_lo = float(st.session_state.get(f"{_dkey}_ok_t_lo", 0.0))
+                            _inf_ok_t_hi = float(st.session_state.get(f"{_dkey}_ok_t_hi", 100.0))
+                            _inf_ok_v_lo = float(st.session_state.get(f"{_dkey}_ok_v_lo", 0.0))
+                            _inf_ok_v_hi = float(st.session_state.get(f"{_dkey}_ok_v_hi", 1.0))
+                            if _ok_t_on_inf or _ok_v_on_inf:
+                                for _ji, _pts_ji in enumerate(_cyc_pts_inf):
+                                    if _pts_ji is None:
+                                        peak_ng_flags[_ji] = True; continue
+                                    _ti_c, _vi_c = _pts_ji
+                                    if _ok_t_on_inf and not (_inf_ok_t_lo <= _ti_c <= _inf_ok_t_hi):
+                                        peak_ng_flags[_ji] = True
+                                    if _ok_v_on_inf and not (_inf_ok_v_lo <= _vi_c <= _inf_ok_v_hi):
+                                        peak_ng_flags[_ji] = True
+                            # 傾向解析に出す
+                            if bool(st.session_state.get(f"{_dkey}_trend_on", False)):
+                                if "wi_det_trend" not in st.session_state:
+                                    st.session_state["wi_det_trend"] = {}
+                                st.session_state["wi_det_trend"][f"{_vkey}_{_did}"] = {
+                                    "label":  f"{var} #{_di+1} 傾き変化点",
+                                    "color":  _color,
+                                    "t_vals": [p[0] if p else None for p in _cyc_pts_inf],
+                                    "v_vals": [p[1] if p else None for p in _cyc_pts_inf],
+                                }
 
                     elif _dtype == "上下判定比較":
                         # ── 上下判定比較 ─────────────────────────────
@@ -1801,8 +1860,8 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                             if _bnd_markers_lo["t"]:
                                 all_inf_markers.append(_bnd_markers_lo)
 
-                    elif _dtype in ("最大値検査", "最小値検査"):
-                        _is_max = (_dtype == "最大値検査")
+                    elif _dtype in ("最大値判定", "最小値判定"):
+                        _is_max = (_dtype == "最大値判定")
                         _vlabel = "最大値" if _is_max else "最小値"
                         st.caption(f"検査ウィンドウ内の{_vlabel}を各サイクルで計算し、合格基準と照合します。")
                         _pk_ca, _pk_cb, _pk_cc = st.columns([1, 2, 2])
@@ -1882,6 +1941,35 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                             key=f"{_dkey}_range_e",
                                             disabled=not _use_rng_t)
 
+                        # ── OK/NG 判定範囲 & 傾向解析 ────────────────
+                        st.markdown("**✅ OK/NG 判定範囲**")
+                        _thr_ot1, _thr_ot2, _thr_ot3 = st.columns([1, 2, 2])
+                        with _thr_ot1:
+                            st.checkbox("t 範囲で判定", key=f"{_dkey}_ok_t_on")
+                        _ok_t_on_thr = bool(st.session_state.get(f"{_dkey}_ok_t_on", False))
+                        with _thr_ot2:
+                            st.number_input("t OK 下限 [ms]", value=0.0, step=5.0,
+                                            key=f"{_dkey}_ok_t_lo",
+                                            disabled=not _ok_t_on_thr)
+                        with _thr_ot3:
+                            st.number_input("t OK 上限 [ms]", value=100.0, step=5.0,
+                                            key=f"{_dkey}_ok_t_hi",
+                                            disabled=not _ok_t_on_thr)
+                        _thr_ov1, _thr_ov2, _thr_ov3 = st.columns([1, 2, 2])
+                        with _thr_ov1:
+                            st.checkbox("v 値で判定", key=f"{_dkey}_ok_v_on")
+                        _ok_v_on_thr = bool(st.session_state.get(f"{_dkey}_ok_v_on", False))
+                        with _thr_ov2:
+                            st.number_input("v OK 下限", value=0.0, step=0.1,
+                                            key=f"{_dkey}_ok_v_lo",
+                                            disabled=not _ok_v_on_thr)
+                        with _thr_ov3:
+                            st.number_input("v OK 上限", value=1.0, step=0.1,
+                                            key=f"{_dkey}_ok_v_hi",
+                                            disabled=not _ok_v_on_thr)
+                        st.checkbox("📈 傾向解析に出す", key=f"{_dkey}_trend_on",
+                                    help="検出点の t・v 値をサイクルごとに 📈 傾向解析タブへ送ります")
+
                         _tv_val   = float(st.session_state.get(f"{_dkey}_tv", 1.0))
                         _tdir_raw = st.session_state.get(f"{_dkey}_tdir", "上昇 ↑")
                         _tdir_str = ("rise" if "上昇" in _tdir_raw
@@ -1912,6 +2000,128 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     "label": f"#{_di+1} 閾値超え ({len(_tmkt)}点)",
                                     "color": _color,
                                 })
+                            # OK/NG 範囲チェック → peak_ng_flags
+                            _thr_ok_t_lo = float(st.session_state.get(f"{_dkey}_ok_t_lo", 0.0))
+                            _thr_ok_t_hi = float(st.session_state.get(f"{_dkey}_ok_t_hi", 100.0))
+                            _thr_ok_v_lo = float(st.session_state.get(f"{_dkey}_ok_v_lo", 0.0))
+                            _thr_ok_v_hi = float(st.session_state.get(f"{_dkey}_ok_v_hi", 1.0))
+                            if _ok_t_on_thr or _ok_v_on_thr:
+                                for _jt, _pts_jt in enumerate(_cyc_pts_thr):
+                                    if _pts_jt is None:
+                                        peak_ng_flags[_jt] = True; continue
+                                    _tc_c, _vc_c = _pts_jt
+                                    if _ok_t_on_thr and not (_thr_ok_t_lo <= _tc_c <= _thr_ok_t_hi):
+                                        peak_ng_flags[_jt] = True
+                                    if _ok_v_on_thr and not (_thr_ok_v_lo <= _vc_c <= _thr_ok_v_hi):
+                                        peak_ng_flags[_jt] = True
+                            # 傾向解析に出す
+                            if bool(st.session_state.get(f"{_dkey}_trend_on", False)):
+                                if "wi_det_trend" not in st.session_state:
+                                    st.session_state["wi_det_trend"] = {}
+                                st.session_state["wi_det_trend"][f"{_vkey}_{_did}"] = {
+                                    "label":  f"{var} #{_di+1} 閾値超え検出",
+                                    "color":  _color,
+                                    "t_vals": [p[0] if p else None for p in _cyc_pts_thr],
+                                    "v_vals": [p[1] if p else None for p in _cyc_pts_thr],
+                                }
+
+                    elif _dtype in ("最大値点", "最小値点"):
+                        # ── 最大値点 / 最小値点 取得 ──────────────────
+                        _is_max_pt = (_dtype == "最大値点")
+                        _vlabel_pt = "最大値" if _is_max_pt else "最小値"
+                        st.caption(
+                            f"各サイクルの検査ウィンドウ内の{_vlabel_pt}点 (t, v) を記録し、"
+                            "マーカーとして表示します。OK/NG 範囲判定も設定できます。"
+                        )
+                        _ptp_hd, _ptp_on_col = st.columns([8, 1])
+                        with _ptp_on_col:
+                            st.markdown("**有効**")
+                            st.checkbox("ON", key=f"{_dkey}_on")
+
+                        _eff_insp_wins_pt = _render_item_insp_win_t(
+                            _dkey, step_waves, insp_windows)
+
+                        # OK/NG 判定範囲 & 傾向解析
+                        st.markdown("**✅ OK/NG 判定範囲**")
+                        _pt_ot1, _pt_ot2, _pt_ot3 = st.columns([1, 2, 2])
+                        with _pt_ot1:
+                            st.checkbox("t 範囲で判定", key=f"{_dkey}_ok_t_on")
+                        _ok_t_on_pt = bool(st.session_state.get(f"{_dkey}_ok_t_on", False))
+                        with _pt_ot2:
+                            st.number_input("t OK 下限 [ms]", value=0.0, step=5.0,
+                                            key=f"{_dkey}_ok_t_lo",
+                                            disabled=not _ok_t_on_pt)
+                        with _pt_ot3:
+                            st.number_input("t OK 上限 [ms]", value=100.0, step=5.0,
+                                            key=f"{_dkey}_ok_t_hi",
+                                            disabled=not _ok_t_on_pt)
+                        _pt_ov1, _pt_ov2, _pt_ov3 = st.columns([1, 2, 2])
+                        with _pt_ov1:
+                            st.checkbox("v 値で判定", key=f"{_dkey}_ok_v_on")
+                        _ok_v_on_pt = bool(st.session_state.get(f"{_dkey}_ok_v_on", False))
+                        with _pt_ov2:
+                            st.number_input("v OK 下限", value=0.0, step=0.1,
+                                            key=f"{_dkey}_ok_v_lo",
+                                            disabled=not _ok_v_on_pt)
+                        with _pt_ov3:
+                            st.number_input("v OK 上限", value=1.0, step=0.1,
+                                            key=f"{_dkey}_ok_v_hi",
+                                            disabled=not _ok_v_on_pt)
+                        st.checkbox("📈 傾向解析に出す", key=f"{_dkey}_trend_on",
+                                    help="検出点の t・v 値をサイクルごとに 📈 傾向解析タブへ送ります")
+
+                        _det_on_pt = bool(st.session_state.get(f"{_dkey}_on", False))
+                        if _det_on_pt:
+                            _pt_mkt, _pt_mkv = [], []
+                            _cyc_pts_peak = []
+                            for _jp, (t_sw, v_sw) in enumerate(step_waves):
+                                _win_pt = (_eff_insp_wins_pt[_jp]
+                                           if _jp < len(_eff_insp_wins_pt) else None)
+                                if _win_pt is not None:
+                                    _ws_p, _we_p = _win_pt
+                                    _mp = (t_sw >= _ws_p) & (t_sw <= _we_p)
+                                    _vp_w = v_sw[_mp] if _mp.sum() > 0 else v_sw
+                                    _tp_w = t_sw[_mp] if _mp.sum() > 0 else t_sw
+                                else:
+                                    _vp_w = v_sw; _tp_w = t_sw
+                                if len(_vp_w) == 0:
+                                    _cyc_pts_peak.append(None); continue
+                                _idx_pt = int(np.nanargmax(_vp_w)
+                                              if _is_max_pt else np.nanargmin(_vp_w))
+                                _t_pt_v = float(_tp_w[_idx_pt])
+                                _v_pt_v = float(_vp_w[_idx_pt])
+                                _pt_mkt.append(_t_pt_v); _pt_mkv.append(_v_pt_v)
+                                _cyc_pts_peak.append((_t_pt_v, _v_pt_v))
+                            if _pt_mkt:
+                                all_inf_markers.append({
+                                    "t": _pt_mkt, "v": _pt_mkv,
+                                    "label": f"#{_di+1} {_vlabel_pt}点 ({len(_pt_mkt)}点)",
+                                    "color": _color,
+                                })
+                            # OK/NG 範囲チェック → peak_ng_flags
+                            _pt_ok_t_lo = float(st.session_state.get(f"{_dkey}_ok_t_lo", 0.0))
+                            _pt_ok_t_hi = float(st.session_state.get(f"{_dkey}_ok_t_hi", 100.0))
+                            _pt_ok_v_lo = float(st.session_state.get(f"{_dkey}_ok_v_lo", 0.0))
+                            _pt_ok_v_hi = float(st.session_state.get(f"{_dkey}_ok_v_hi", 1.0))
+                            if _ok_t_on_pt or _ok_v_on_pt:
+                                for _jp2, _pts_jp in enumerate(_cyc_pts_peak):
+                                    if _pts_jp is None:
+                                        peak_ng_flags[_jp2] = True; continue
+                                    _tp_c, _vp_c = _pts_jp
+                                    if _ok_t_on_pt and not (_pt_ok_t_lo <= _tp_c <= _pt_ok_t_hi):
+                                        peak_ng_flags[_jp2] = True
+                                    if _ok_v_on_pt and not (_pt_ok_v_lo <= _vp_c <= _pt_ok_v_hi):
+                                        peak_ng_flags[_jp2] = True
+                            # 傾向解析に出す
+                            if bool(st.session_state.get(f"{_dkey}_trend_on", False)):
+                                if "wi_det_trend" not in st.session_state:
+                                    st.session_state["wi_det_trend"] = {}
+                                st.session_state["wi_det_trend"][f"{_vkey}_{_did}"] = {
+                                    "label":  f"{var} #{_di+1} {_vlabel_pt}点",
+                                    "color":  _color,
+                                    "t_vals": [p[0] if p else None for p in _cyc_pts_peak],
+                                    "v_vals": [p[1] if p else None for p in _cyc_pts_peak],
+                                }
 
                     elif _dtype == "検出点比較":  # 検出点比較
                         # ── 検出点比較 ─────────────────────────────
@@ -5384,6 +5594,11 @@ def _render_wizard(pname: str, step: int, bool_cols: list, df: pd.DataFrame):
             if isinstance(k, str) and k.startswith(f"wvol_{pname}_")
             and isinstance(v, (bool, int, float, str, list, dict, type(None)))
         }
+        _glob_det_conds4 = {
+            k: v for k, v in st.session_state.items()
+            if isinstance(k, str) and k.startswith("wvol___global_")
+            and isinstance(v, (bool, int, float, str, list, dict, type(None)))
+        }
         _exp4 = {
             "version": "1.2",
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -5400,7 +5615,8 @@ def _render_wizard(pname: str, step: int, bool_cols: list, df: pd.DataFrame):
                     "wv_xy_baseline": st.session_state.get(pk(pname, "wv_xy_baseline"), {}),
                     "det_conditions": _det_conds4,
                 }
-            }
+            },
+            "global_det_conditions": _glob_det_conds4,
         }
         st.download_button(
             "📥 設定をJSONで保存",
@@ -5495,8 +5711,16 @@ def _apply_settings_json(loaded: dict) -> str:
             st.session_state[_dc_k] = _dc_v
     st.session_state["processes"]   = _new_procs
     st.session_state["_expand_new"] = next(iter(_new_procs), None)
+    # __global 波形検査条件を復元
+    _n_glob_det = 0
+    for _gc_k, _gc_v in loaded.get("global_det_conditions", {}).items():
+        st.session_state[_gc_k] = _gc_v
+        _n_glob_det += 1
     _n_det = sum(len(v.get("det_conditions", {})) for v in loaded["processes"].values())
-    return f"✅ 設定を読み込みました（工程 {len(_new_procs)} 件・波形検出条件 {_n_det} 件）"
+    _msg = f"✅ 設定を読み込みました（工程 {len(_new_procs)} 件・波形検出条件 {_n_det} 件"
+    if _n_glob_det:
+        _msg += f"・波形検査独立条件 {_n_glob_det} 件"
+    return _msg + "）"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -5907,11 +6131,15 @@ with st.sidebar:
                                 "wv_xy_baseline": st.session_state.get(pk(_sep, "wv_xy_baseline"), {}),
                                 "det_conditions": _sdet,
                             }
+                        _sglob_det = {k: v for k, v in st.session_state.items()
+                                      if isinstance(k, str) and k.startswith("wvol___global_")
+                                      and isinstance(v, (bool, int, float, str, list, dict, type(None)))}
                         _sjson_str = json.dumps(
                             {"version": "1.2",
                              "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
                              "source_csv": st.session_state.get("uploaded_filename", ""),
-                             "processes": _sexp},
+                             "processes": _sexp,
+                             "global_det_conditions": _sglob_det},
                             ensure_ascii=False, indent=2,
                         )
                         _sjfn  = f"apb_settings_{datetime.now().strftime('%Y%m%d_%H%M')}.json"
@@ -6089,11 +6317,17 @@ with st.sidebar:
                 "wv_xy_baseline": st.session_state.get(pk(_ep, "wv_xy_baseline"), {}),
                 "det_conditions": _det_conds,
             }
+        _exp_glob_det = {
+            k: v for k, v in st.session_state.items()
+            if isinstance(k, str) and k.startswith("wvol___global_")
+            and isinstance(v, (bool, int, float, str, list, dict, type(None)))
+        }
         _exp_json = json.dumps(
             {"version": "1.2",
              "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
              "source_csv": st.session_state.get("uploaded_filename", ""),
-             "processes": _exp_procs},
+             "processes": _exp_procs,
+             "global_det_conditions": _exp_glob_det},
             ensure_ascii=False, indent=2,
         )
         st.download_button(
@@ -8307,6 +8541,123 @@ with _page_tabs[2]:
             else:
                 st.info("CSVファイルをアップロードして「傾向解析を実行」を押してください")
 
+    # ══════════════════════════════════════════════════════════
+    # 🔍 波形検査 検出点トレンド（🔍 波形検査タブから受信）
+    # ══════════════════════════════════════════════════════════
+    _wi_trend_data = st.session_state.get("wi_det_trend", {})
+    if _wi_trend_data:
+        st.divider()
+        st.markdown("#### 🔍 波形検査 検出点トレンド（サイクル単位）")
+        st.caption(
+            "🔍 波形検査タブで「📈 傾向解析に出す」を有効にした検出点の、"
+            "サイクルごとの t・v 値の推移です。"
+        )
+        for _wt_key, _wt_data in _wi_trend_data.items():
+            _wt_label  = _wt_data.get("label", _wt_key)
+            _wt_color  = _wt_data.get("color", "#4472C4")
+            _wt_t_vals = [v for v in _wt_data.get("t_vals", []) if v is not None]
+            _wt_v_vals = [v for v in _wt_data.get("v_vals", []) if v is not None]
+            _wt_t_cyc  = [i + 1 for i, v in enumerate(_wt_data.get("t_vals", [])) if v is not None]
+            _wt_v_cyc  = [i + 1 for i, v in enumerate(_wt_data.get("v_vals", [])) if v is not None]
+
+            if len(_wt_t_vals) < 2 and len(_wt_v_vals) < 2:
+                continue
+
+            with st.expander(f"**{_wt_label}**", expanded=True):
+                _wt_rows = 1 + (1 if len(_wt_v_vals) >= 2 else 0)
+                _wt_fig  = make_subplots(
+                    rows=_wt_rows, cols=1,
+                    subplot_titles=(
+                        ("t 座標 [ms]", "v 値") if _wt_rows == 2 else ("t 座標 [ms]",)
+                    ),
+                    vertical_spacing=0.22,
+                    row_heights=[0.5, 0.5] if _wt_rows == 2 else [1.0],
+                )
+
+                if len(_wt_t_vals) >= 2:
+                    _wt_t_mean = float(np.mean(_wt_t_vals))
+                    _wt_t_std  = float(np.std(_wt_t_vals))
+                    _wt_fig.add_trace(go.Scatter(
+                        x=_wt_t_cyc, y=_wt_t_vals,
+                        mode="lines+markers", name="t [ms]",
+                        line=dict(color=_wt_color, width=1.5),
+                        marker=dict(size=6, color=_wt_color),
+                        hovertemplate="サイクル %{x}<br>t = %{y:.3f} ms<extra></extra>",
+                    ), row=1, col=1)
+                    for _wt_lv, _wt_ln, _wt_lc in [
+                        (_wt_t_mean, "平均", "gray"),
+                        (_wt_t_mean + 3 * _wt_t_std, "+3σ", "red"),
+                        (_wt_t_mean - 3 * _wt_t_std, "−3σ", "red"),
+                    ]:
+                        _wt_fig.add_hline(
+                            y=_wt_lv, line_dash="dot", line_color=_wt_lc,
+                            annotation_text=_wt_ln,
+                            annotation_font=dict(color=_wt_lc, size=11),
+                            row=1, col=1,
+                        )
+
+                if _wt_rows == 2 and len(_wt_v_vals) >= 2:
+                    _wt_v_mean = float(np.mean(_wt_v_vals))
+                    _wt_v_std  = float(np.std(_wt_v_vals))
+                    _wt_fig.add_trace(go.Scatter(
+                        x=_wt_v_cyc, y=_wt_v_vals,
+                        mode="lines+markers", name="v 値",
+                        line=dict(color=_wt_color, width=1.5, dash="dash"),
+                        marker=dict(size=6, color=_wt_color, symbol="diamond"),
+                        hovertemplate="サイクル %{x}<br>v = %{y:.4f}<extra></extra>",
+                    ), row=2, col=1)
+                    for _wt_lv2, _wt_ln2, _wt_lc2 in [
+                        (_wt_v_mean, "平均", "gray"),
+                        (_wt_v_mean + 3 * _wt_v_std, "+3σ", "red"),
+                        (_wt_v_mean - 3 * _wt_v_std, "−3σ", "red"),
+                    ]:
+                        _wt_fig.add_hline(
+                            y=_wt_lv2, line_dash="dot", line_color=_wt_lc2,
+                            annotation_text=_wt_ln2,
+                            annotation_font=dict(color=_wt_lc2, size=11),
+                            row=2, col=1,
+                        )
+
+                _wt_fig.update_layout(
+                    title=dict(text=f"<b>{_wt_label}</b>", font=dict(size=13)),
+                    height=300 * _wt_rows + 60,
+                    margin=dict(t=60, b=48, l=80, r=100),
+                    showlegend=True,
+                    legend=dict(orientation="h", y=1.04, x=1, xanchor="right"),
+                    hovermode="x unified",
+                )
+                _wt_fig.update_yaxes(title_text="t [ms]", row=1, col=1)
+                if _wt_rows == 2:
+                    _wt_fig.update_yaxes(title_text="v", row=2, col=1)
+                    _wt_fig.update_xaxes(title_text="サイクル番号", row=2, col=1)
+                else:
+                    _wt_fig.update_xaxes(title_text="サイクル番号", row=1, col=1)
+                st.plotly_chart(_wt_fig, width="stretch", key=f"wi_trend_{_wt_key}")
+
+                # 統計表
+                _wt_stat_rows = []
+                if len(_wt_t_vals) >= 2:
+                    _wt_stat_rows.append({
+                        "項目": "t [ms]",
+                        "件数": len(_wt_t_vals),
+                        "平均": f"{float(np.mean(_wt_t_vals)):.3f}",
+                        "σ":   f"{float(np.std(_wt_t_vals)):.3f}",
+                        "最小": f"{float(min(_wt_t_vals)):.3f}",
+                        "最大": f"{float(max(_wt_t_vals)):.3f}",
+                    })
+                if len(_wt_v_vals) >= 2:
+                    _wt_stat_rows.append({
+                        "項目": "v",
+                        "件数": len(_wt_v_vals),
+                        "平均": f"{float(np.mean(_wt_v_vals)):.4f}",
+                        "σ":   f"{float(np.std(_wt_v_vals)):.4f}",
+                        "最小": f"{float(min(_wt_v_vals)):.4f}",
+                        "最大": f"{float(max(_wt_v_vals)):.4f}",
+                    })
+                if _wt_stat_rows:
+                    st.dataframe(pd.DataFrame(_wt_stat_rows),
+                                 hide_index=True, use_container_width=True)
+
 # ═══════════════════════════════════════════════════════════════
 # 🔍 波形検査タブ（ステップ依存なしの独立波形監視）
 # ═══════════════════════════════════════════════════════════════
@@ -8318,33 +8669,21 @@ with _page_tabs[3]:
     if not num_cols:
         st.info("アナログ（数値）変数が見つかりません。CSVを読み込んでください。")
     else:
-        # ── トリガー設定（工程があれば自動入力、なければ手動選択）──────
-        _wi_col1, _wi_col2, _wi_col3 = st.columns([4, 2, 2])
+        # ── トリガー設定 ──────────────────────────────────────────────
+        _wi_col1, _wi_col2 = st.columns([2, 2])
         with _wi_col1:
-            # 工程が登録済みなら工程セレクタを表示（任意）
-            _wi_proc_opts = ["（工程を使わない）"] + list(processes.keys())
-            _wi_proc_sel  = st.selectbox(
-                "工程（任意）", _wi_proc_opts, key="wi_proc_sel",
-                help="工程を選ぶとトリガーが自動設定されます。不要なら「工程を使わない」のままでOK",
-            )
-        with _wi_col2:
-            if _wi_proc_sel != "（工程を使わない）":
-                _wi_trigger_default = st.session_state.get(
-                    pk(_wi_proc_sel, "trigger"), bool_cols[0] if bool_cols else ""
-                )
-            else:
-                _wi_trigger_default = bool_cols[0] if bool_cols else ""
+            _wi_trigger_default = bool_cols[0] if bool_cols else ""
             _wi_trigger = st.selectbox(
                 "トリガー変数", bool_cols,
                 index=bool_cols.index(_wi_trigger_default) if _wi_trigger_default in bool_cols else 0,
                 key="wi_trigger",
             )
-        with _wi_col3:
+        with _wi_col2:
             _wi_edge = st.radio("エッジ", ["RISE", "FALL"],
                                 horizontal=True, key="wi_edge")
 
-        # 保存用の pname キー（工程なしの場合は "__global" を使用）
-        _wi_pname = _wi_proc_sel if _wi_proc_sel != "（工程を使わない）" else "__global"
+        # 常に __global を使用（工程に依存しない独立モード）
+        _wi_pname = "__global"
 
         # ── サイクル検出 ────────────────────────────────────────────
         if not _wi_trigger:
