@@ -3474,7 +3474,7 @@ def _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_
                 x=_ref_plot_h,
                 xbins=_xbins_h,
                 name="基準データ分布",
-                marker_color="rgba(30,120,220,0.55)", opacity=0.85,
+                marker_color="rgba(245,158,11,0.52)", opacity=0.88,
             ))
 
         if threshold > 0 and not _delta_mode:
@@ -3482,11 +3482,11 @@ def _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_
             above = delays_plot[delays_plot >  threshold]
             if len(below):
                 fig_h.add_trace(go.Histogram(x=below, xbins=_xbins_h, name="閾値以内",
-                                             marker_color="royalblue", opacity=0.75))
+                                             marker_color="rgba(59,130,246,0.72)", opacity=0.88))
             if len(above):
                 fig_h.add_trace(go.Histogram(x=above, xbins=_xbins_h, name="閾値超過",
-                                             marker_color="crimson", opacity=0.75))
-            fig_h.add_vline(x=threshold, line_dash="dash", line_color="orange",
+                                             marker_color="rgba(239,68,68,0.72)", opacity=0.88))
+            fig_h.add_vline(x=threshold, line_dash="dash", line_color="#7c3aed",
                             annotation_text=f"閾値 {threshold}ms")
         elif _delta_mode and _bl_std > 0:
             _t3 = 3 * _bl_std
@@ -3494,22 +3494,24 @@ def _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_
             out_r = delays_plot[np.abs(delays_plot) > _t3]
             if len(in_r) > 0:
                 fig_h.add_trace(go.Histogram(x=in_r, xbins=_xbins_h, name="±3σ以内",
-                                             marker_color="royalblue", opacity=0.75))
+                                             marker_color="rgba(59,130,246,0.72)", opacity=0.88))
             if len(out_r) > 0:
                 fig_h.add_trace(go.Histogram(x=out_r, xbins=_xbins_h, name="±3σ超過",
-                                             marker_color="crimson", opacity=0.75))
-            fig_h.add_vline(x=_t3,  line_dash="dash", line_color="orange",
+                                             marker_color="rgba(239,68,68,0.72)", opacity=0.88))
+            fig_h.add_vline(x=_t3,  line_dash="dash", line_color="#7c3aed",
                             annotation_text=f"+3σ({_t3:.1f}ms)")
-            fig_h.add_vline(x=-_t3, line_dash="dash", line_color="orange",
+            fig_h.add_vline(x=-_t3, line_dash="dash", line_color="#7c3aed",
                             annotation_text=f"-3σ({_t3:.1f}ms)")
         else:
             fig_h.add_trace(go.Histogram(x=delays_plot, xbins=_xbins_h,
-                                         marker_color="steelblue", opacity=0.8))
+                                         name="現在データ", marker_color="rgba(59,130,246,0.72)", opacity=0.88))
         if _delta_mode:
-            fig_h.add_vline(x=0, line_color="green", annotation_text=f"基準 {_bl_ref:.1f}ms")
+            fig_h.add_vline(x=0, line_color="#b45309", line_width=2,
+                            annotation_text=f"基準 {_bl_ref:.1f}ms",
+                            annotation_font_color="#b45309")
             xaxis_title = "基準値からのずれ [ms]"
         else:
-            fig_h.add_vline(x=sig3, line_dash="dot", line_color="gray",
+            fig_h.add_vline(x=sig3, line_dash="dot", line_color="#9ca3af",
                             annotation_text=f"3σ {sig3:.1f}ms")
             xaxis_title = "遅れ時間 [ms]"
         fig_h.update_layout(xaxis_title=xaxis_title, yaxis_title="頻度",
@@ -3673,7 +3675,7 @@ def _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_d
                 x=_ref_plot_r,
                 xbins=_xbins_r,
                 name="基準データ分布",
-                marker_color="rgba(30,120,220,0.55)", opacity=0.85,
+                marker_color="rgba(245,158,11,0.52)", opacity=0.88,
             ))
 
         if threshold > 0 and not _delta_mode:
@@ -3681,11 +3683,11 @@ def _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_d
             above = durs_plot[durs_plot >  threshold]
             if len(below):
                 fig_h.add_trace(go.Histogram(x=below, xbins=_xbins_r, name="閾値以内",
-                                             marker_color="royalblue", opacity=0.75))
+                                             marker_color="rgba(59,130,246,0.72)", opacity=0.88))
             if len(above):
                 fig_h.add_trace(go.Histogram(x=above, xbins=_xbins_r, name="閾値超過",
-                                             marker_color="crimson", opacity=0.75))
-            fig_h.add_vline(x=threshold, line_dash="dash", line_color="orange",
+                                             marker_color="rgba(239,68,68,0.72)", opacity=0.88))
+            fig_h.add_vline(x=threshold, line_dash="dash", line_color="#7c3aed",
                             annotation_text=f"閾値 {threshold}ms")
         elif _delta_mode and _bl_std_dur > 0:
             _t3 = 3 * _bl_std_dur
@@ -3693,22 +3695,24 @@ def _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_d
             out_r = durs_plot[np.abs(durs_plot) > _t3]
             if len(in_r) > 0:
                 fig_h.add_trace(go.Histogram(x=in_r, xbins=_xbins_r, name="±3σ以内",
-                                             marker_color="teal", opacity=0.75))
+                                             marker_color="rgba(59,130,246,0.72)", opacity=0.88))
             if len(out_r) > 0:
                 fig_h.add_trace(go.Histogram(x=out_r, xbins=_xbins_r, name="±3σ超過",
-                                             marker_color="crimson", opacity=0.75))
-            fig_h.add_vline(x=_t3,  line_dash="dash", line_color="orange",
+                                             marker_color="rgba(239,68,68,0.72)", opacity=0.88))
+            fig_h.add_vline(x=_t3,  line_dash="dash", line_color="#7c3aed",
                             annotation_text=f"+3σ({_t3:.1f}ms)")
-            fig_h.add_vline(x=-_t3, line_dash="dash", line_color="orange",
+            fig_h.add_vline(x=-_t3, line_dash="dash", line_color="#7c3aed",
                             annotation_text=f"-3σ({_t3:.1f}ms)")
         else:
             fig_h.add_trace(go.Histogram(x=durs_plot, xbins=_xbins_r,
-                                         marker_color="teal", opacity=0.8))
+                                         name="現在データ", marker_color="rgba(59,130,246,0.72)", opacity=0.88))
         if _delta_mode:
-            fig_h.add_vline(x=0, line_color="green", annotation_text=f"基準 {_bl_ref_dur:.1f}ms")
+            fig_h.add_vline(x=0, line_color="#b45309", line_width=2,
+                            annotation_text=f"基準 {_bl_ref_dur:.1f}ms",
+                            annotation_font_color="#b45309")
             xaxis_title = "基準値からのずれ [ms]"
         else:
-            fig_h.add_vline(x=sig3, line_dash="dot", line_color="gray",
+            fig_h.add_vline(x=sig3, line_dash="dot", line_color="#9ca3af",
                             annotation_text=f"3σ {sig3:.1f}ms")
             xaxis_title = "所要時間 [ms]"
         fig_h.update_layout(xaxis_title=xaxis_title, yaxis_title="頻度",
@@ -3905,7 +3909,7 @@ def _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result
                 x=_ref_plot_n,
                 xbins=_xbins_n,
                 name="基準データ分布",
-                marker_color="rgba(30,120,220,0.55)", opacity=0.85,
+                marker_color="rgba(245,158,11,0.52)", opacity=0.88,
             ))
 
         if threshold > 0:
@@ -3913,20 +3917,20 @@ def _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result
             above = durs[durs >  threshold]
             if len(below):
                 fig_h.add_trace(go.Histogram(x=below, xbins=_xbins_n, name="閾値以内",
-                                             marker_color="royalblue", opacity=0.75))
+                                             marker_color="rgba(59,130,246,0.72)", opacity=0.88))
             if len(above):
                 fig_h.add_trace(go.Histogram(x=above, xbins=_xbins_n, name="閾値超過",
-                                             marker_color="crimson", opacity=0.75))
-            fig_h.add_vline(x=threshold, line_dash="dash", line_color="orange",
+                                             marker_color="rgba(239,68,68,0.72)", opacity=0.88))
+            fig_h.add_vline(x=threshold, line_dash="dash", line_color="#7c3aed",
                             annotation_text=f"閾値 {threshold}ms")
         else:
             fig_h.add_trace(go.Histogram(x=durs, xbins=_xbins_n,
-                                         marker_color="teal", opacity=0.8))
-        fig_h.add_vline(x=sig3, line_dash="dot", line_color="gray",
+                                         name="現在データ", marker_color="rgba(59,130,246,0.72)", opacity=0.88))
+        fig_h.add_vline(x=sig3, line_dash="dot", line_color="#9ca3af",
                         annotation_text=f"3σ {sig3:.1f}ms")
         fig_h.update_layout(xaxis_title="継続時間[ms]", yaxis_title="頻度",
                              barmode="overlay", height=260, margin=dict(t=8, b=32),
-                             showlegend=threshold > 0)
+                             showlegend=True)
         st.plotly_chart(fig_h, width="stretch", key=f"hist_{pname}_{name}")
         st.slider("ビン数", 3, 60, n_bins, key=f"_bins_{_bkey_n}",
                   help="ヒストグラムのビン数を手動調整（Freedman-Diaconis による自動算出が既定値）")
@@ -6820,35 +6824,35 @@ with _page_tabs[0]:
                                 ab = dl[dl >  thr_tab]
                                 if len(bl):
                                     fig.add_trace(go.Histogram(x=bl, xbins=_xbins_t, name="閾値以内",
-                                                               marker_color="royalblue", opacity=0.7))
+                                                               marker_color="rgba(59,130,246,0.72)", opacity=0.88))
                                 if len(ab):
                                     fig.add_trace(go.Histogram(x=ab, xbins=_xbins_t, name="閾値超過",
-                                                               marker_color="crimson", opacity=0.7))
-                                fig.add_vline(x=thr_tab, line_dash="dash", line_color="orange",
+                                                               marker_color="rgba(239,68,68,0.72)", opacity=0.88))
+                                fig.add_vline(x=thr_tab, line_dash="dash", line_color="#7c3aed",
                                               annotation_text=f"閾値 {thr_tab}ms")
                             else:
                                 fig.add_trace(go.Histogram(x=dl, xbins=_xbins_t,
                                                            name="現在データ",
-                                                           marker_color="steelblue", opacity=0.8))
+                                                           marker_color="rgba(59,130,246,0.72)", opacity=0.88))
 
                             # ── 垂直線: 3σ上限 ──────────────────────────────
-                            fig.add_vline(x=sg3, line_dash="dot", line_color="gray",
+                            fig.add_vline(x=sg3, line_dash="dot", line_color="#9ca3af",
                                           annotation_text=f"3σ {sg3:.1f}ms")
 
-                            # ── 垂直線: 基準平均（赤）＋ ±1σ 帯 ────────────
+                            # ── 垂直線: 基準平均（ダークアンバー）＋ ±1σ 帯 ─
                             if _bl_ref_ms is not None:
                                 if _bl_std_ms > 0:
                                     fig.add_vrect(
                                         x0=_bl_ref_ms - _bl_std_ms,
                                         x1=_bl_ref_ms + _bl_std_ms,
-                                        fillcolor="rgba(220,0,0,0.07)",
+                                        fillcolor="rgba(245,158,11,0.12)",
                                         line_width=0,
                                     )
                                 fig.add_vline(
                                     x=_bl_ref_ms,
-                                    line_color="red", line_width=2.5,
+                                    line_color="#b45309", line_width=2.5,
                                     annotation_text=f"基準 {_bl_ref_ms:.1f}ms",
-                                    annotation_font_color="red",
+                                    annotation_font_color="#b45309",
                                     annotation_position="top left",
                                 )
 
