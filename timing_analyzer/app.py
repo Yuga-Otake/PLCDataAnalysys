@@ -3943,15 +3943,14 @@ def cycle_settings_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
 # ── 全サイクル横断で RISE 時刻を収集するヘルパー ──────────────
 def _collect_rise_times(df: pd.DataFrame, bool_cols: list, trigger_col: str,
                         edge: str, cs: list) -> dict:
-    """全サイクルを横断して各 Bool 変数の最初の RISE 時刻（平均）を返す。
-    1サイクルだけで検出漏れが起きにくいよう、全サイクルで1度でも検出されれば採用する。
-    返り値: {var: mean_t_ms}（RISE なし変数は除外）
+    """全サイクルを横断して各 Bool 変数の最初の RISE 時刻（中央値）を返す。
+    返り値: {var: median_t_ms}（RISE なし変数は除外）
     """
-    accum: dict = {}   # {var: [t_ms, ...]}
+    accum: dict = {}
     for ci, csi in enumerate(cs):
-        cei  = cs[ci + 1] if ci + 1 < len(cs) else len(df) - 1
-        cdf  = df.loc[csi:cei]
-        t0   = df.loc[csi, "Timestamp"]
+        cei = cs[ci + 1] if ci + 1 < len(cs) else df.index[-1]
+        cdf = df.loc[csi:cei]
+        t0  = df.loc[csi, "Timestamp"]
         for var in bool_cols:
             if var == trigger_col:
                 continue
@@ -3961,8 +3960,75 @@ def _collect_rise_times(df: pd.DataFrame, bool_cols: list, trigger_col: str,
                     accum.setdefault(var, []).append(t)
             except Exception:
                 pass
-    # 中央値で代表（外れ値に強い）
     return {var: float(np.median(ts)) for var, ts in accum.items()}
+
+
+def _collect_bool_events(
+    df: pd.DataFrame, bool_cols: list, trigger_col: str, cs: list
+) -> "tuple[dict, dict, dict]":
+    """全サイクルを横断して Bool 変数の全イベントを収集する（統合版）。
+
+    Returns:
+        rise_times  : {var: median_t_ms}   RISE 検出変数（LOW→HIGH）
+        on_at_start : {var: median_dur_ms} サイクル開始時に既に HIGH の変数
+        fall_times  : {var: median_t_ms}   FALL 検出変数（HIGH→LOW、LOW スタートのもの）
+    """
+    from analyzer import normalize_bool_series as _nbs_ev
+
+    rise_acc: dict = {}   # {var: [t_ms]}
+    on_acc:   dict = {}   # {var: [dur_ms]}
+    fall_acc: dict = {}   # {var: [t_ms]}
+
+    for ci, csi in enumerate(cs):
+        cei  = cs[ci + 1] if ci + 1 < len(cs) else df.index[-1]
+        cdf  = df.loc[csi:cei]
+        if len(cdf) == 0:
+            continue
+        try:
+            _t0ns = int(pd.Timestamp(df.loc[csi, "Timestamp"]).value)
+            _ts   = cdf["Timestamp"].to_numpy("datetime64[ns]").astype(np.int64)
+        except Exception:
+            continue
+
+        for var in bool_cols:
+            if var == trigger_col or var not in cdf.columns:
+                continue
+            try:
+                _bv = _nbs_ev(cdf[var]).values.astype(np.int8)
+                _diff = np.empty_like(_bv); _diff[0] = 0
+                _diff[1:] = _bv[1:] - _bv[:-1]
+
+                if _bv[0] == 1:
+                    # ── サイクル開始時 HIGH ────────────────────────────
+                    _fall_pos = np.nonzero(_diff == -1)[0]
+                    if len(_fall_pos) > 0:
+                        # 途中で FALL → ON 持続時間 = FALL 時刻 - 開始
+                        on_acc.setdefault(var, []).append(
+                            (int(_ts[_fall_pos[0]]) - _t0ns) / 1e6)
+                    else:
+                        # サイクル末まで HIGH → 全サイクル長を持続時間として記録
+                        on_acc.setdefault(var, []).append(
+                            (_ts[-1] - _t0ns) / 1e6)
+                else:
+                    # ── サイクル開始時 LOW ─────────────────────────────
+                    _rise_pos = np.nonzero(_diff == 1)[0]
+                    if len(_rise_pos) > 0:
+                        # RISE あり
+                        rise_acc.setdefault(var, []).append(
+                            (int(_ts[_rise_pos[0]]) - _t0ns) / 1e6)
+                    else:
+                        # RISE なし → FALL があれば FALL 候補
+                        _fall_pos2 = np.nonzero(_diff == -1)[0]
+                        if len(_fall_pos2) > 0:
+                            fall_acc.setdefault(var, []).append(
+                                (int(_ts[_fall_pos2[0]]) - _t0ns) / 1e6)
+            except Exception:
+                pass
+
+    rise_times  = {v: float(np.median(ts)) for v, ts in rise_acc.items()}
+    on_at_start = {v: float(np.median(ds)) for v, ds in on_acc.items()}
+    fall_times  = {v: float(np.median(ts)) for v, ts in fall_acc.items()}
+    return rise_times, on_at_start, fall_times
 
 
 # ── ① 自動ステップ候補（1サイクルCSV 時）────────────────────
@@ -3975,7 +4041,7 @@ def auto_step_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
     steps       = list(st.session_state.get(pk(pname, "steps_list"), []))
     added_vars  = {s.get("variable", s.get("start_var", "")) for s in steps}
 
-    st.caption("サイクル内で最初に RISE するタイミング順に候補を表示します。"
+    st.caption("サイクル内の Bool 変数の状態変化をタイミング順に表示します。"
                "チェックを入れて「一括追加」してください。")
 
     # サイクル検出
@@ -3988,44 +4054,67 @@ def auto_step_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
         st.error("サイクルが検出できません。トリガー設定を確認してください。")
         return
 
-    # 全サイクル横断で RISE 時刻を収集（漏れにくい）
-    _rise_times = _collect_rise_times(df, bool_cols, trigger_col, edge, cs)
+    # 全サイクル横断で全イベント収集（RISE / ON開始 / FALL）
+    _rise_times, _on_at_st, _fall_times = _collect_bool_events(
+        df, bool_cols, trigger_col, cs)
 
-    if not _rise_times:
-        st.warning("全サイクルを検索しましたが、RISE イベントが検出された変数がありません。"
-                   "トリガー設定かCSVデータを確認してください。")
+    # 全候補リスト: RISE → ON開始 → FALL の順
+    _all_ev = (
+        [(v, t, "RISE")  for v, t in sorted(_rise_times.items(), key=lambda x: x[1])]
+        + [(v, d, "ON開始") for v, d in sorted(_on_at_st.items(),  key=lambda x: x[1])]
+        + [(v, t, "FALL") for v, t in sorted(_fall_times.items(), key=lambda x: x[1])]
+    )
+
+    if not _all_ev:
+        st.warning("変数が検出できませんでした。トリガー設定を確認してください。")
+        st.caption("💡 エッジを RISE/FALL で切り替えるとサイクルが検出される場合があります。")
         return
 
-    _sorted_vars = sorted(_rise_times.items(), key=lambda x: x[1])
-    st.markdown(f"**{len(_sorted_vars)} 変数**が検出されました（RISE 順）:")
+    st.caption(
+        f"**{len(_all_ev)} 変数**を検出しました　"
+        f"🟢 RISE: {len(_rise_times)} 件　"
+        f"🔵 ON開始: {len(_on_at_st)} 件　"
+        f"🔴 FALL: {len(_fall_times)} 件"
+    )
 
     # チェックボックス一覧
     _sel_key = f"_auto_sel_{pname}"
     if _sel_key not in st.session_state:
-        st.session_state[_sel_key] = {v: (v not in added_vars) for v, _ in _sorted_vars}
+        # RISE のみデフォルト選択
+        st.session_state[_sel_key] = {
+            v: (v not in added_vars and kind == "RISE")
+            for v, _, kind in _all_ev
+        }
 
     _sel_all, _clr_all = st.columns(2)
     with _sel_all:
         if st.button("全選択", key=f"_asel_all_{pname}", width="stretch"):
-            st.session_state[_sel_key] = {v: (v not in added_vars) for v, _ in _sorted_vars}
+            st.session_state[_sel_key] = {v: (v not in added_vars) for v, _, _ in _all_ev}
     with _clr_all:
         if st.button("全解除", key=f"_asel_none_{pname}", width="stretch"):
-            st.session_state[_sel_key] = {v: False for v, _ in _sorted_vars}
+            st.session_state[_sel_key] = {v: False for v, _, _ in _all_ev}
 
     st.divider()
     _checks: dict = {}
-    for _vi, (var, t_ms) in enumerate(_sorted_vars):
+    for _vi, (var, t_ms, kind) in enumerate(_all_ev):
         _already = var in added_vars
         _col_chk, _col_lbl = st.columns([1, 9])
         with _col_chk:
-            _default = st.session_state[_sel_key].get(var, not _already)
+            _default = st.session_state[_sel_key].get(
+                var, not _already and kind == "RISE")
             _checks[var] = st.checkbox(
                 " ", value=_default, key=f"_asel_{pname}_{_vi}",
                 disabled=_already,
             )
         with _col_lbl:
-            _badge = " ✅ 追加済" if _already else f"  {t_ms:.1f} ms"
-            st.markdown(f"`{var}`{_badge}")
+            if _already:
+                st.markdown(f"`{var}` ✅ 追加済")
+            elif kind == "RISE":
+                st.markdown(f"`{var}` &nbsp; 🟢 RISE &nbsp; **{t_ms:.1f} ms**")
+            elif kind == "ON開始":
+                st.markdown(f"`{var}` &nbsp; 🔵 ON開始 &nbsp; 持続 **{t_ms:.1f} ms**")
+            else:
+                st.markdown(f"`{var}` &nbsp; 🔴 FALL &nbsp; **{t_ms:.1f} ms**")
 
     st.divider()
     _add_mode = st.radio(
@@ -4037,6 +4126,8 @@ def auto_step_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
     )
     _mode_val = "single" if "RISE" in _add_mode else "on_period"
 
+    # sort key: RISE→ rise_times, ON開始→ on_at_st, FALL→ fall_times
+    _ev_t_map = {v: t for v, t, _ in _all_ev}
     _to_add = [v for v, chk in _checks.items() if chk and v not in added_vars]
     if st.button(
         f"＋ {len(_to_add)} 件を一括追加" if _to_add else "＋ 追加（未選択）",
@@ -4045,8 +4136,7 @@ def auto_step_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
         width="stretch",
         key=f"_auto_add_{pname}",
     ):
-        # RISE 時刻順を維持して追加
-        _sorted_to_add = sorted(_to_add, key=lambda v: _rise_times.get(v, float("inf")))
+        _sorted_to_add = sorted(_to_add, key=lambda v: _ev_t_map.get(v, float("inf")))
         for v in _sorted_to_add:
             steps.append({
                 "name":     v,
@@ -4711,7 +4801,7 @@ def _render_wizard(pname: str, step: int, bool_cols: list, df: pd.DataFrame):
     # ─────────────────────────────────────────────────────────────
     elif step == 2:
         st.markdown("### ② ステップ候補を選択")
-        st.caption("サイクル内で最初にRISEするタイミング順に一覧します。"
+        st.caption("サイクル内の Bool 変数の状態変化を一覧します。"
                    "チェックを入れて一括追加してください。")
 
         try:
@@ -4723,56 +4813,9 @@ def _render_wizard(pname: str, step: int, bool_cols: list, df: pd.DataFrame):
             st.error("サイクルが検出できません。前ステップでトリガーを確認してください。")
         else:
             st.caption(f"全 {len(_cs2)} サイクルを横断して変数を検索中...")
-            _rise_times2 = _collect_rise_times(df, bool_cols, trigger_col, edge, _cs2)
-
-            # RISE 未検出の変数を「サイクル開始時 ON」「FALL 検出」として候補追加
-            # ─ normalize_bool_series を一度だけインポート ─
-            from analyzer import normalize_bool_series as _nbs2
-            _on_at_start: dict = {}   # {var: median_on_duration_ms}
-            _fall_times2: dict = {}   # {var: median_fall_time_ms}  ← 新規：FALL 検出
-            for _v2 in bool_cols:
-                if _v2 == trigger_col or _v2 in _rise_times2:
-                    continue
-                _on_durs, _fall_ts = [], []
-                for _ci2, _csi2 in enumerate(_cs2):
-                    _cei2 = (_cs2[_ci2 + 1] if _ci2 + 1 < len(_cs2)
-                             else df.index[-1])
-                    _cdf2 = df.loc[_csi2:_cei2]
-                    if len(_cdf2) == 0 or _v2 not in _cdf2.columns:
-                        continue
-                    try:
-                        _bv2 = _nbs2(_cdf2[_v2]).values.astype(np.int8)
-                        _t0ns = int(pd.Timestamp(df.loc[_csi2, "Timestamp"]).value)
-                        _ts2  = _cdf2["Timestamp"].to_numpy("datetime64[ns]").astype(np.int64)
-
-                        if _bv2[0] == 1:
-                            # ── サイクル開始時 ON ──────────────────────────
-                            _diff2 = np.empty_like(_bv2); _diff2[0] = 0
-                            _diff2[1:] = _bv2[1:] - _bv2[:-1]
-                            _off_pos = np.nonzero(_diff2 == -1)[0]
-                            if len(_off_pos) > 0:
-                                # 途中で FALL
-                                _toff_ns = int(_ts2[_off_pos[0]])
-                                _on_durs.append((_toff_ns - _t0ns) / 1e6)
-                            else:
-                                # 【バグ修正】サイクル中ずっと ON → 全サイクル長を持続時間として記録
-                                _on_durs.append((_ts2[-1] - _t0ns) / 1e6)
-                        else:
-                            # ── LOW スタート → FALL が発生するか確認 ─────────
-                            _diff2 = np.empty_like(_bv2); _diff2[0] = 0
-                            _diff2[1:] = _bv2[1:] - _bv2[:-1]
-                            _fall_pos = np.nonzero(_diff2 == -1)[0]
-                            if len(_fall_pos) > 0:
-                                _fall_ts.append(
-                                    (int(_ts2[_fall_pos[0]]) - _t0ns) / 1e6)
-                    except Exception:
-                        pass
-
-                if _on_durs:
-                    _on_at_start[_v2] = float(np.median(_on_durs))
-                elif _fall_ts:
-                    # RISE なし・ON開始なし・FALL あり → FALL候補
-                    _fall_times2[_v2] = float(np.median(_fall_ts))
+            # 全サイクル横断でイベント収集（共有関数）
+            _rise_times2, _on_at_start, _fall_times2 = _collect_bool_events(
+                df, bool_cols, trigger_col, _cs2)
 
             # 全候補をまとめてリスト化: RISE → ON開始 → FALL
             _all_cands = (
