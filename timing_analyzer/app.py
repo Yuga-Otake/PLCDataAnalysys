@@ -6615,9 +6615,11 @@ with _page_tabs[0]:
                         st.plotly_chart(_fig_cmp, width="stretch",
                                         key=f"cmp_bar_{pname}")
 
-            # ── 詳細解析タブ（補助）────────────────────────────────
-            if steps_list and len(result_df) > 0 and view_mode != "👁️ 監視":
-                with st.expander("📊 詳細解析タブ", expanded=False):
+            # ── 詳細解析タブ（補助）─── 全モードで表示、監視モードは最初から開く ──
+            if steps_list and len(result_df) > 0:
+                _dtab_expanded = (view_mode == "👁️ 監視")
+                _dtab_label = "📊 ヒストグラム" if view_mode == "👁️ 監視" else "📊 詳細解析タブ"
+                with st.expander(_dtab_label, expanded=_dtab_expanded):
                     delay_cols = [c for c in result_df.columns
                                   if c.endswith("_遅れ[ms]") or c.endswith("_dur[ms]")]
                     thr_tab = st.number_input(
@@ -6629,28 +6631,82 @@ with _page_tabs[0]:
                     except Exception:
                         cycle_starts = []
 
-                    tabs = st.tabs(["サイクル一覧", "ヒストグラム", "時系列波形", "📈 トレンド"])
+                    # 監視モードではヒストグラムを先頭タブに
+                    if view_mode == "👁️ 監視":
+                        tabs = st.tabs(["ヒストグラム", "サイクル一覧", "時系列波形", "📈 トレンド"])
+                        _tab_hist, _tab_cyc, _tab_ts, _tab_trend = tabs
+                    else:
+                        tabs = st.tabs(["サイクル一覧", "ヒストグラム", "時系列波形", "📈 トレンド"])
+                        _tab_cyc, _tab_hist, _tab_ts, _tab_trend = tabs
 
-                    with tabs[0]:
+                    with _tab_cyc:
                         st.dataframe(result_df, width="stretch")
                         st.download_button("CSVダウンロード",
                                            result_df.to_csv(index=False, encoding="utf-8-sig"),
                                            f"{pname}_cycles.csv", key=f"dl_csv_{pname}")
 
-                    with tabs[1]:
+                    with _tab_hist:
+                        # 基準データ（ref CSV）を取得 ─ 比較時のオーバーレイ用
+                        _h_ref_key   = st.session_state.get("ref_csv_key", "")
+                        _h_act_key   = st.session_state.get("active_csv", "")
+                        _h_csv_store = st.session_state.get("csv_store", {})
+                        _h_has_ref   = (
+                            bool(_h_ref_key)
+                            and _h_ref_key != _h_act_key
+                            and _h_ref_key in _h_csv_store
+                        )
+                        _h_ref_result: dict = {}      # {col: ndarray}
+                        if _h_has_ref:
+                            try:
+                                _h_ref_df = _h_csv_store[_h_ref_key]["df"]
+                                _h_ref_res = cached_analyze_v2(
+                                    _h_ref_df, trigger_col, edge, json.dumps(steps_list)
+                                )
+                                for _hc in delay_cols:
+                                    if _hc in _h_ref_res.columns:
+                                        _hv = _h_ref_res[_hc].dropna().values
+                                        if len(_hv) > 0:
+                                            _h_ref_result[_hc] = _hv
+                            except Exception:
+                                _h_has_ref = False
+
+                        _h_baseline = st.session_state.get(pk(pname, "baseline"), {})
+
                         for col in delay_cols:
                             vn    = col.replace("_遅れ[ms]", "").replace("_dur[ms]", " (所要時間)")
                             dl    = result_df[col].dropna().values
                             if len(dl) == 0:
                                 continue
                             _bkey_t = f"{pname}_{col}_t"
-                            nb  = calc_nice_bins(dl, _bkey_t)   # Freedman-Diaconis 自動算出
+                            nb  = calc_nice_bins(dl, _bkey_t)
                             _vmin_t = float(dl.min()); _vmax_t = float(dl.max())
                             _bsz_t  = (_vmax_t - _vmin_t) / nb if nb > 0 and _vmax_t > _vmin_t else 1.0
                             _xbins_t = dict(start=_vmin_t, end=_vmax_t + _bsz_t, size=_bsz_t)
                             st_ = calc_statistics(dl)
                             sg3 = st_.get("3σ上限[ms]", 0)
+
+                            # 基準値（登録済み mean / std）
+                            _bl_step_h = col.replace("_遅れ[ms]", "").replace("_dur[ms]", "")
+                            _bl_entry_h = _h_baseline.get(_bl_step_h, {})
+                            _bl_ref_ms  = _bl_entry_h.get("ref_ms")
+                            _bl_std_ms  = _bl_entry_h.get("std_ms", 0.0)
+
                             fig = go.Figure()
+
+                            # ── 基準CSV の分布オーバーレイ ─────────────────
+                            if _h_has_ref and col in _h_ref_result:
+                                _ref_dl = _h_ref_result[col]
+                                _rv_min = float(_ref_dl.min()); _rv_max = float(_ref_dl.max())
+                                _rb_sz  = (_rv_max - _rv_min) / max(nb, 1) if _rv_max > _rv_min else 1.0
+                                fig.add_trace(go.Histogram(
+                                    x=_ref_dl,
+                                    xbins=dict(start=_rv_min, end=_rv_max + _rb_sz, size=_rb_sz),
+                                    name="基準データ分布",
+                                    marker_color="rgba(220,60,60,0.25)",
+                                    opacity=0.7,
+                                ))
+
+                            # ── 現在データの分布 ────────────────────────────
                             if thr_tab > 0:
                                 bl = dl[dl <= thr_tab]
                                 ab = dl[dl >  thr_tab]
@@ -6664,11 +6720,32 @@ with _page_tabs[0]:
                                               annotation_text=f"閾値 {thr_tab}ms")
                             else:
                                 fig.add_trace(go.Histogram(x=dl, xbins=_xbins_t,
+                                                           name="現在データ",
                                                            marker_color="steelblue", opacity=0.8))
+
+                            # ── 垂直線: 3σ上限 ──────────────────────────────
                             fig.add_vline(x=sg3, line_dash="dot", line_color="gray",
                                           annotation_text=f"3σ {sg3:.1f}ms")
+
+                            # ── 垂直線: 基準平均（赤）＋ ±1σ 帯 ────────────
+                            if _bl_ref_ms is not None:
+                                if _bl_std_ms > 0:
+                                    fig.add_vrect(
+                                        x0=_bl_ref_ms - _bl_std_ms,
+                                        x1=_bl_ref_ms + _bl_std_ms,
+                                        fillcolor="rgba(220,0,0,0.07)",
+                                        line_width=0,
+                                    )
+                                fig.add_vline(
+                                    x=_bl_ref_ms,
+                                    line_color="red", line_width=2.5,
+                                    annotation_text=f"基準 {_bl_ref_ms:.1f}ms",
+                                    annotation_font_color="red",
+                                    annotation_position="top left",
+                                )
+
                             fig.update_layout(title=vn, xaxis_title="時間[ms]",
-                                              barmode="overlay", height=250, margin=dict(t=28))
+                                              barmode="overlay", height=260, margin=dict(t=32))
                             st.plotly_chart(fig, width="stretch", key=f"t2_{pname}_{vn}")
                             st.slider("ビン数", 3, 60, nb, key=f"_bins_{_bkey_t}",
                                       help="ヒストグラムのビン数を手動調整（Freedman-Diaconis による自動算出が既定値）")
@@ -6678,7 +6755,7 @@ with _page_tabs[0]:
                                     sc[i].metric(k, v)
                             st.markdown("---")
 
-                    with tabs[2]:
+                    with _tab_ts:
                         all_vars_disp = steps_all_vars(steps_list, bool_cols)
                         ts_b = st.multiselect("Bool変数", bool_cols,
                                               default=all_vars_disp[:3],
@@ -6706,7 +6783,7 @@ with _page_tabs[0]:
                             fig.update_layout(xaxis_title="時刻", height=420)
                             st.plotly_chart(fig, width="stretch", key=f"t3_{pname}")
 
-                    with tabs[3]:
+                    with _tab_trend:
                         # B-1: トレンドチャート
                         _trend_step_stats = []
                         try:
