@@ -7131,7 +7131,8 @@ with _page_tabs[2]:
             if _tr_labels_key not in st.session_state:
                 st.session_state[_tr_labels_key] = {}
 
-            _tr_sel_list = locals().get("_tr_sel", [])
+            # 重複を除去（multiselect の session_state がズレたとき対策）
+            _tr_sel_list = list(dict.fromkeys(locals().get("_tr_sel", [])))
             if _tr_sel_list:
                 with st.expander("ラベル設定（グラフX軸に使用）", expanded=False):
                     _n_cols = min(len(_tr_sel_list), 4)
@@ -7139,13 +7140,15 @@ with _page_tabs[2]:
                     for _ti, _tk in enumerate(_tr_sel_list):
                         if _tk not in st.session_state[_tr_labels_key]:
                             st.session_state[_tr_labels_key][_tk] = (
-                                _tr_csv_store[_tk].get("label", _tk)
+                                _tr_csv_store.get(_tk, {}).get("label", _tk)
                             )
+                        # キーに特殊文字・長パスが含まれても衝突しないようハッシュ化
+                        _tk_wkey = hashlib.md5(_tk.encode()).hexdigest()[:12]
                         with _label_cols[_ti % _n_cols]:
                             st.session_state[_tr_labels_key][_tk] = st.text_input(
-                                _tk,
+                                os.path.basename(_tk) if os.sep in _tk else _tk,
                                 value=st.session_state[_tr_labels_key][_tk],
-                                key=f"tr_lbl_{_tr_pname}_{_tk}",
+                                key=f"tr_lbl_{_tr_pname}_{_tk_wkey}",
                             )
 
                 # ── 解析実行 ────────────────────────────────────────
