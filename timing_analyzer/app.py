@@ -5437,6 +5437,90 @@ with st.sidebar:
                 st.session_state.pop("folder_jsons_found", None)
                 st.rerun()
 
+        # ── 一括保存 ────────────────────────────────────────────
+        st.divider()
+        st.markdown("**💾 現在のデータを保存**")
+        _fl_save_root = _fl_root or st.session_state.get("folder_last_root", "")
+        if not _fl_save_root:
+            st.caption("⬆️ 上記のフォルダパスを入力してから保存できます")
+        else:
+            _fl_sub_ref_s = st.session_state.get("folder_sub_ref", "baseline")
+            _fl_sub_cmp_s = st.session_state.get("folder_sub_cmp", "data")
+            _fl_sub_cfg_s = st.session_state.get("folder_sub_cfg", "config")
+            _fl_store_all = st.session_state["csv_store"]
+            _fl_n_ref = sum(1 for v in _fl_store_all.values() if v.get("is_ref"))
+            _fl_n_cmp = len(_fl_store_all) - _fl_n_ref
+            st.caption(
+                f"保存先: `{os.path.normpath(_fl_save_root)}`\n\n"
+                f"基準CSV {_fl_n_ref}件 → `{_fl_sub_ref_s}/`　"
+                f"比較CSV {_fl_n_cmp}件 → `{_fl_sub_cmp_s}/`　"
+                f"設定JSON → `{_fl_sub_cfg_s}/`"
+            )
+            if st.button("💾 フォルダに一括保存", key="_fl_save_btn", width="stretch"):
+                try:
+                    _fl_sroot = os.path.normpath(_fl_save_root)
+                    for _sd in [_fl_sub_ref_s, _fl_sub_cmp_s, _fl_sub_cfg_s]:
+                        os.makedirs(os.path.join(_fl_sroot, _sd), exist_ok=True)
+
+                    # CSV保存
+                    _fl_n_saved = 0
+                    for _sk, _sv in _fl_store_all.items():
+                        _ssub = _fl_sub_ref_s if _sv.get("is_ref") else _fl_sub_cmp_s
+                        # ファイル名を決定（フルパスキーはbasename、それ以外はそのまま）
+                        if _sv.get("source_path"):
+                            _sfn = os.path.basename(_sv["source_path"])
+                        elif os.sep in _sk or "/" in _sk:
+                            _sfn = os.path.basename(_sk)
+                        else:
+                            _sfn = _sk
+                        if not _sfn.lower().endswith(".csv"):
+                            _sfn += ".csv"
+                        _sv["df"].to_csv(
+                            os.path.join(_fl_sroot, _ssub, _sfn), index=False
+                        )
+                        _fl_n_saved += 1
+
+                    # 設定JSON保存
+                    _fl_json_saved = False
+                    if st.session_state.get("processes"):
+                        _sexp = {}
+                        for _sep in st.session_state["processes"]:
+                            _sdet = {k: v for k, v in st.session_state.items()
+                                     if isinstance(k, str) and k.startswith(f"wvol_{_sep}_")
+                                     and isinstance(v, (bool, int, float, str, list, dict, type(None)))}
+                            _sexp[_sep] = {
+                                "trigger":        st.session_state.get(pk(_sep, "trigger"), ""),
+                                "edge":           st.session_state.get(pk(_sep, "edge"), "RISE"),
+                                "takt_target_ms": st.session_state.get(pk(_sep, "takt"), 0),
+                                "steps":          st.session_state.get(pk(_sep, "steps_list"), []),
+                                "baseline":       st.session_state.get(pk(_sep, "baseline"), {}),
+                                "baseline_meta":  st.session_state.get(pk(_sep, "baseline_meta"), {}),
+                                "wv_baseline":    st.session_state.get(pk(_sep, "wv_baseline"), {}),
+                                "wv_xy_baseline": st.session_state.get(pk(_sep, "wv_xy_baseline"), {}),
+                                "det_conditions": _sdet,
+                            }
+                        _sjson_str = json.dumps(
+                            {"version": "1.2",
+                             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                             "source_csv": st.session_state.get("uploaded_filename", ""),
+                             "processes": _sexp},
+                            ensure_ascii=False, indent=2,
+                        )
+                        _sjfn  = f"apb_settings_{datetime.now().strftime('%Y%m%d_%H%M')}.json"
+                        _sjpath = os.path.join(_fl_sroot, _fl_sub_cfg_s, _sjfn)
+                        with open(_sjpath, "w", encoding="utf-8") as _sjf:
+                            _sjf.write(_sjson_str)
+                        _fl_json_saved = True
+
+                    _msg = f"💾 CSV {_fl_n_saved}件"
+                    if _fl_json_saved:
+                        _msg += " + 設定JSON"
+                    st.toast(_msg + f" を保存しました → {_fl_sroot}")
+                    # 保存先をfolder_last_rootにセット（次回スキャンで即読み込める）
+                    st.session_state["folder_last_root"] = _fl_save_root
+                except Exception as _se:
+                    st.error(f"保存エラー: {_se}")
+
     # 全CSV一覧（基準 + 比較）からアクティブを選択
     _all_keys = list(st.session_state["csv_store"].keys())
     if len(_all_keys) > 1:
