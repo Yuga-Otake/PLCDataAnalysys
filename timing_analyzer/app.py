@@ -1539,7 +1539,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
 
                         _rng_ca, _rng_cb, _rng_cc = st.columns([1, 2, 2])
                         with _rng_ca:
-                            st.markdown("**🔍 検出範囲 [ms]**")
+                            st.markdown("**🔍 t 検索範囲 [ms]**")
                             st.checkbox("指定する", key=f"{_dkey}_use_range")
                         _use_rng = bool(st.session_state.get(f"{_dkey}_use_range", False))
                         with _rng_cb:
@@ -1550,6 +1550,19 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                             st.number_input("終了", value=200.0, step=5.0,
                                             key=f"{_dkey}_range_e",
                                             disabled=not _use_rng)
+                        _rng_va, _rng_vb, _rng_vc = st.columns([1, 2, 2])
+                        with _rng_va:
+                            st.markdown("**🔍 v 検索範囲**")
+                            st.checkbox("指定する", key=f"{_dkey}_use_vrange")
+                        _use_vrng = bool(st.session_state.get(f"{_dkey}_use_vrange", False))
+                        with _rng_vb:
+                            st.number_input("v 下限", value=0.0, step=0.1,
+                                            key=f"{_dkey}_vrange_lo",
+                                            disabled=not _use_vrng)
+                        with _rng_vc:
+                            st.number_input("v 上限", value=1.0, step=0.1,
+                                            key=f"{_dkey}_vrange_hi",
+                                            disabled=not _use_vrng)
 
                         _sm_d  = int(st.session_state.get(f"{_dkey}_smooth", 5))
                         _nl_d  = int(st.session_state.get(f"{_dkey}_nleft",  3))
@@ -1559,6 +1572,10 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                  if _use_rng else None
                         _re_d  = float(st.session_state.get(f"{_dkey}_range_e", 200.0)) \
                                  if _use_rng else None
+                        _rvlo_d = float(st.session_state.get(f"{_dkey}_vrange_lo", 0.0)) \
+                                  if _use_vrng else None
+                        _rvhi_d = float(st.session_state.get(f"{_dkey}_vrange_hi", 1.0)) \
+                                  if _use_vrng else None
                         _dinc  = bool(st.session_state.get(f"{_dkey}_dir_inc", True))
                         _ddec  = bool(st.session_state.get(f"{_dkey}_dir_dec", True))
                         st.markdown("---")
@@ -1626,6 +1643,10 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     detect_increase=_dinc, detect_decrease=_ddec)
                                 _pts = [(float(ti), float(np.interp(ti, t_sw, v_sw)))
                                         for ti in _ts]
+                                # v 検索範囲フィルター
+                                if _rvlo_d is not None and _rvhi_d is not None:
+                                    _pts = [(ti, vi) for ti, vi in _pts
+                                            if _rvlo_d <= vi <= _rvhi_d]
                                 _sel = _select_nth_pts(_pts, _det_nth)
                                 for ti, vi in _sel:
                                     _mkt.append(ti); _mkv.append(vi)
@@ -1928,7 +1949,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
 
                         _rng_tc1, _rng_tc2, _rng_tc3 = st.columns([1, 2, 2])
                         with _rng_tc1:
-                            st.markdown("**🔍 検出範囲 [ms]**")
+                            st.markdown("**🔍 t 検索範囲 [ms]**")
                             st.checkbox("指定する", key=f"{_dkey}_use_range")
                         _use_rng_t = bool(st.session_state.get(
                             f"{_dkey}_use_range", False))
@@ -1940,6 +1961,19 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                             st.number_input("終了", value=200.0, step=5.0,
                                             key=f"{_dkey}_range_e",
                                             disabled=not _use_rng_t)
+                        _rng_tvc1, _rng_tvc2, _rng_tvc3 = st.columns([1, 2, 2])
+                        with _rng_tvc1:
+                            st.markdown("**🔍 v 検索範囲**")
+                            st.checkbox("指定する", key=f"{_dkey}_use_vrange")
+                        _use_vrng_t = bool(st.session_state.get(f"{_dkey}_use_vrange", False))
+                        with _rng_tvc2:
+                            st.number_input("v 下限", value=0.0, step=0.1,
+                                            key=f"{_dkey}_vrange_lo",
+                                            disabled=not _use_vrng_t)
+                        with _rng_tvc3:
+                            st.number_input("v 上限", value=1.0, step=0.1,
+                                            key=f"{_dkey}_vrange_hi",
+                                            disabled=not _use_vrng_t)
 
                         # ── OK/NG 判定範囲 & 傾向解析 ────────────────
                         st.markdown("**✅ OK/NG 判定範囲**")
@@ -1980,6 +2014,10 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                             f"{_dkey}_range_s", 0.0)) if _use_rng_t else None
                         _t_re     = float(st.session_state.get(
                             f"{_dkey}_range_e", 200.0)) if _use_rng_t else None
+                        _t_rvlo   = float(st.session_state.get(
+                            f"{_dkey}_vrange_lo", 0.0)) if _use_vrng_t else None
+                        _t_rvhi   = float(st.session_state.get(
+                            f"{_dkey}_vrange_hi", 1.0)) if _use_vrng_t else None
 
                         if _t_det_on:
                             _tmkt, _tmkv = [], []
@@ -1989,6 +2027,10 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     t_sw, v_sw, _tv_val,
                                     direction=_tdir_str,
                                     range_s=_t_rs, range_e=_t_re)
+                                # v 検索範囲フィルター
+                                if _t_rvlo is not None and _t_rvhi is not None:
+                                    _crs = [(tc, vc) for tc, vc in _crs
+                                            if _t_rvlo <= vc <= _t_rvhi]
                                 _sel = _select_nth_pts(_crs, _t_nth)
                                 for tc, vc in _sel:
                                     _tmkt.append(tc); _tmkv.append(vc)
@@ -2030,7 +2072,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                         _is_max_pt = (_dtype == "最大値点")
                         _vlabel_pt = "最大値" if _is_max_pt else "最小値"
                         st.caption(
-                            f"各サイクルの検査ウィンドウ内の{_vlabel_pt}点 (t, v) を記録し、"
+                            f"各サイクルの**検索範囲内**の{_vlabel_pt}点 (t, v) を記録し、"
                             "マーカーとして表示します。OK/NG 範囲判定も設定できます。"
                         )
                         _ptp_hd, _ptp_on_col = st.columns([8, 1])
@@ -2038,8 +2080,43 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                             st.markdown("**有効**")
                             st.checkbox("ON", key=f"{_dkey}_on")
 
-                        _eff_insp_wins_pt = _render_item_insp_win_t(
-                            _dkey, step_waves, insp_windows)
+                        # ── 検索範囲 (t / v) ─────────────────────────
+                        st.markdown("**🔍 検索範囲**")
+                        _srng_t1, _srng_t2, _srng_t3 = st.columns([1, 2, 2])
+                        with _srng_t1:
+                            st.markdown("**t [ms]**")
+                            st.checkbox("指定する", key=f"{_dkey}_use_range")
+                        _use_srng_t = bool(st.session_state.get(f"{_dkey}_use_range", False))
+                        with _srng_t2:
+                            st.number_input("t 開始", value=0.0, step=5.0,
+                                            key=f"{_dkey}_range_s",
+                                            disabled=not _use_srng_t)
+                        with _srng_t3:
+                            st.number_input("t 終了", value=200.0, step=5.0,
+                                            key=f"{_dkey}_range_e",
+                                            disabled=not _use_srng_t)
+                        _srng_v1, _srng_v2, _srng_v3 = st.columns([1, 2, 2])
+                        with _srng_v1:
+                            st.markdown("**v 値**")
+                            st.checkbox("指定する", key=f"{_dkey}_use_vrange")
+                        _use_srng_v = bool(st.session_state.get(f"{_dkey}_use_vrange", False))
+                        with _srng_v2:
+                            st.number_input("v 下限", value=0.0, step=0.1,
+                                            key=f"{_dkey}_vrange_lo",
+                                            disabled=not _use_srng_v)
+                        with _srng_v3:
+                            st.number_input("v 上限", value=1.0, step=0.1,
+                                            key=f"{_dkey}_vrange_hi",
+                                            disabled=not _use_srng_v)
+                        # 検索範囲パラメータ読み込み
+                        _pt_srng_s = float(st.session_state.get(f"{_dkey}_range_s", 0.0)) \
+                                     if _use_srng_t else None
+                        _pt_srng_e = float(st.session_state.get(f"{_dkey}_range_e", 200.0)) \
+                                     if _use_srng_t else None
+                        _pt_srng_vlo = float(st.session_state.get(f"{_dkey}_vrange_lo", 0.0)) \
+                                       if _use_srng_v else None
+                        _pt_srng_vhi = float(st.session_state.get(f"{_dkey}_vrange_hi", 1.0)) \
+                                       if _use_srng_v else None
 
                         # OK/NG 判定範囲 & 傾向解析
                         st.markdown("**✅ OK/NG 判定範囲**")
@@ -2075,15 +2152,18 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                             _pt_mkt, _pt_mkv = [], []
                             _cyc_pts_peak = []
                             for _jp, (t_sw, v_sw) in enumerate(step_waves):
-                                _win_pt = (_eff_insp_wins_pt[_jp]
-                                           if _jp < len(_eff_insp_wins_pt) else None)
-                                if _win_pt is not None:
-                                    _ws_p, _we_p = _win_pt
-                                    _mp = (t_sw >= _ws_p) & (t_sw <= _we_p)
-                                    _vp_w = v_sw[_mp] if _mp.sum() > 0 else v_sw
-                                    _tp_w = t_sw[_mp] if _mp.sum() > 0 else t_sw
+                                # t 検索範囲でマスク
+                                if _pt_srng_s is not None and _pt_srng_e is not None:
+                                    _mp_t = (t_sw >= _pt_srng_s) & (t_sw <= _pt_srng_e)
+                                    _tp_w = t_sw[_mp_t] if _mp_t.sum() > 0 else t_sw
+                                    _vp_w = v_sw[_mp_t] if _mp_t.sum() > 0 else v_sw
                                 else:
-                                    _vp_w = v_sw; _tp_w = t_sw
+                                    _tp_w = t_sw; _vp_w = v_sw
+                                # v 検索範囲でマスク
+                                if _pt_srng_vlo is not None and _pt_srng_vhi is not None:
+                                    _mp_v = (_vp_w >= _pt_srng_vlo) & (_vp_w <= _pt_srng_vhi)
+                                    if _mp_v.sum() > 0:
+                                        _tp_w = _tp_w[_mp_v]; _vp_w = _vp_w[_mp_v]
                                 if len(_vp_w) == 0:
                                     _cyc_pts_peak.append(None); continue
                                 _idx_pt = int(np.nanargmax(_vp_w)
