@@ -5,7 +5,7 @@ app.py - APB タイミング解析ツール v6
 ・ガントクリックでステップ詳細連動
 ・工程ごと異常比較インライン
 """
-import os, json, hashlib, urllib.parse
+import os, glob, json, hashlib, urllib.parse
 from datetime import datetime
 import streamlit as st
 import pandas as pd
@@ -5056,6 +5056,42 @@ def _parse_csv_label(filename: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
+# 設定JSONヘルパー
+# ═══════════════════════════════════════════════════════════════
+
+def _apply_settings_json(loaded: dict) -> str:
+    """設定JSONをsession_stateに適用する。成功時はトースト用メッセージを返す。"""
+    if "processes" not in loaded:
+        raise ValueError("有効な設定JSONではありません（'processes'キーが見つかりません）")
+    _new_procs: dict = {}
+    for _ip, _ipd in loaded["processes"].items():
+        _new_procs[_ip] = {
+            "trigger_col":    _ipd.get("trigger", ""),
+            "edge":           _ipd.get("edge", "RISE"),
+            "takt_target_ms": _ipd.get("takt_target_ms", 0),
+            "steps":          _ipd.get("steps", []),
+        }
+        st.session_state[pk(_ip, "trigger")]    = _ipd.get("trigger", "")
+        st.session_state[pk(_ip, "edge")]       = _ipd.get("edge", "RISE")
+        st.session_state[pk(_ip, "takt")]       = int(_ipd.get("takt_target_ms", 0))
+        st.session_state[pk(_ip, "steps_list")] = _ipd.get("steps", [])
+        if _ipd.get("baseline"):
+            st.session_state[pk(_ip, "baseline")]      = _ipd["baseline"]
+        if _ipd.get("baseline_meta"):
+            st.session_state[pk(_ip, "baseline_meta")] = _ipd["baseline_meta"]
+        if _ipd.get("wv_baseline"):
+            st.session_state[pk(_ip, "wv_baseline")]   = _ipd["wv_baseline"]
+        if _ipd.get("wv_xy_baseline"):
+            st.session_state[pk(_ip, "wv_xy_baseline")] = _ipd["wv_xy_baseline"]
+        for _dc_k, _dc_v in _ipd.get("det_conditions", {}).items():
+            st.session_state[_dc_k] = _dc_v
+    st.session_state["processes"]   = _new_procs
+    st.session_state["_expand_new"] = next(iter(_new_procs), None)
+    _n_det = sum(len(v.get("det_conditions", {})) for v in loaded["processes"].values())
+    return f"✅ 設定を読み込みました（工程 {len(_new_procs)} 件・波形検出条件 {_n_det} 件）"
+
+
+# ═══════════════════════════════════════════════════════════════
 # サイドバー: データ読み込み
 # ═══════════════════════════════════════════════════════════════
 
@@ -5229,11 +5265,177 @@ with st.sidebar:
                     st.toast(f"✅ {uf.name}")
                 except Exception as _ce:
                     st.error(f"{uf.name}: {_ce}")
-        # アップローダーから消えたファイルは削除（基準CSVは残す）
+        # アップローダーから消えたファイルは削除（基準CSV・フォルダ読み込み分は残す）
         for _ck in [k for k in list(st.session_state["csv_store"].keys())
                     if k not in _cmp_names
-                    and not st.session_state["csv_store"][k].get("is_ref", False)]:
+                    and not st.session_state["csv_store"][k].get("is_ref", False)
+                    and st.session_state["csv_store"][k].get("source") != "folder"]:
             del st.session_state["csv_store"][_ck]
+
+    # ════════════════════════════════════════════════════════════
+    # 📁 フォルダ一括読み込み（ローカル）
+    # ════════════════════════════════════════════════════════════
+    with st.expander("📁 フォルダ一括読み込み（ローカル）", expanded=False):
+        _fl_root = st.text_input(
+            "ルートフォルダパス",
+            key="folder_root",
+            placeholder=r"C:\APB\logs",
+            help="基準/比較/設定ファイルをサブフォルダに整理したルートフォルダのパス",
+        )
+        _fl_auto = st.toggle(
+            "パス変更時に自動スキャン",
+            key="folder_auto_scan",
+        )
+        _fl_show_adv = st.checkbox("⚙️ サブフォルダ名・件数の設定", key="_fl_show_adv")
+        if _fl_show_adv:
+            _fca, _fcb, _fcc = st.columns(3)
+            with _fca:
+                st.text_input("基準", value="baseline", key="folder_sub_ref",
+                              help="基準CSV用サブフォルダ名")
+            with _fcb:
+                st.text_input("比較", value="data",     key="folder_sub_cmp",
+                              help="比較CSV用サブフォルダ名")
+            with _fcc:
+                st.text_input("設定", value="config",   key="folder_sub_cfg",
+                              help="設定JSON用サブフォルダ名")
+            st.number_input(
+                "比較CSV 最大件数（新しい順）", min_value=1, max_value=500,
+                value=20, step=10, key="folder_max_cmp",
+            )
+
+        _fl_do_scan = st.button("🔄 フォルダをスキャン", key="_fl_scan_btn",
+                                width="stretch")
+
+        # 自動スキャン: パスが変わったとき
+        _fl_last_root = st.session_state.get("folder_last_root", "")
+        if _fl_auto and _fl_root and _fl_root != _fl_last_root:
+            _fl_do_scan = True
+
+        if _fl_do_scan and _fl_root:
+            _fl_root_n  = os.path.normpath(_fl_root)
+            _fl_sub_ref = st.session_state.get("folder_sub_ref", "baseline")
+            _fl_sub_cmp = st.session_state.get("folder_sub_cmp", "data")
+            _fl_sub_cfg = st.session_state.get("folder_sub_cfg", "config")
+            _fl_max_cmp = int(st.session_state.get("folder_max_cmp", 20))
+
+            if not os.path.isdir(_fl_root_n):
+                st.error(f"フォルダが見つかりません: {_fl_root_n}")
+            else:
+                # ── 基準CSV ────────────────────────────────────────
+                _fl_ref_dir = os.path.join(_fl_root_n, _fl_sub_ref)
+                if os.path.isdir(_fl_ref_dir):
+                    _fl_ref_csvs = sorted(
+                        glob.glob(os.path.join(_fl_ref_dir, "*.csv")),
+                        key=os.path.getmtime, reverse=True,
+                    )
+                    if _fl_ref_csvs:
+                        _fl_rp  = _fl_ref_csvs[0]   # 最新1件
+                        _fl_rk  = _fl_rp             # フルパスをキーに
+                        if _fl_rk not in st.session_state["csv_store"]:
+                            try:
+                                _fl_rdf, _fl_rct = cached_load_sample(_fl_rp)
+                                _fl_is_ref = not use_sample
+                                st.session_state["csv_store"][_fl_rk] = {
+                                    "df": _fl_rdf, "col_types": _fl_rct,
+                                    "label": f"📌基準({os.path.basename(_fl_rp)})",
+                                    "is_ref": _fl_is_ref, "source": "folder",
+                                }
+                                if _fl_is_ref:
+                                    st.session_state["ref_csv_key"] = _fl_rk
+                                    st.session_state["active_csv"]  = _fl_rk
+                                st.toast(f"📌 基準CSV読み込み: {os.path.basename(_fl_rp)}")
+                            except Exception as _fe:
+                                st.warning(f"基準CSV読み込みエラー: {_fe}")
+                    else:
+                        st.toast(f"⚠️ {_fl_sub_ref}/ にCSVが見つかりません")
+
+                # ── 比較CSV ────────────────────────────────────────
+                _fl_cmp_dir = os.path.join(_fl_root_n, _fl_sub_cmp)
+                if os.path.isdir(_fl_cmp_dir):
+                    _fl_cmp_csvs = sorted(
+                        glob.glob(os.path.join(_fl_cmp_dir, "*.csv")),
+                        key=os.path.getmtime, reverse=True,
+                    )[:_fl_max_cmp]
+                    _fl_n_new = 0
+                    for _fl_cp in _fl_cmp_csvs:
+                        if _fl_cp not in st.session_state["csv_store"]:
+                            try:
+                                _fl_cdf, _fl_cct = cached_load_sample(_fl_cp)
+                                st.session_state["csv_store"][_fl_cp] = {
+                                    "df": _fl_cdf, "col_types": _fl_cct,
+                                    "label": _parse_csv_label(os.path.basename(_fl_cp)),
+                                    "is_ref": False, "source": "folder",
+                                }
+                                _fl_n_new += 1
+                            except Exception:
+                                pass
+                    if _fl_n_new > 0:
+                        st.toast(f"📊 比較CSV {_fl_n_new}件 読み込み")
+                    elif _fl_cmp_csvs:
+                        st.toast("📊 比較CSV: すでに読み込み済み")
+                    else:
+                        st.toast(f"⚠️ {_fl_sub_cmp}/ にCSVが見つかりません")
+
+                # ── 設定JSON ───────────────────────────────────────
+                _fl_cfg_dir = os.path.join(_fl_root_n, _fl_sub_cfg)
+                _fl_jsons_new: list = []
+                if os.path.isdir(_fl_cfg_dir):
+                    _fl_jsons_new = sorted(
+                        glob.glob(os.path.join(_fl_cfg_dir, "*.json")),
+                        key=os.path.getmtime, reverse=True,
+                    )
+                    st.session_state["folder_jsons_found"] = _fl_jsons_new
+                    if len(_fl_jsons_new) == 1:
+                        # 1件のみ → 自動適用
+                        try:
+                            with open(_fl_jsons_new[0], encoding="utf-8") as _jf:
+                                _jd = json.load(_jf)
+                            _jmsg = _apply_settings_json(_jd)
+                            st.toast(f"⚙️ 設定JSON自動適用: {os.path.basename(_fl_jsons_new[0])}")
+                        except Exception as _je:
+                            st.warning(f"設定JSON読み込みエラー: {_je}")
+                    elif len(_fl_jsons_new) > 1:
+                        st.toast(f"⚙️ 設定JSON {len(_fl_jsons_new)}件 → 下記で選択してください")
+
+                st.session_state["folder_last_root"] = _fl_root
+                st.rerun()
+
+        # 設定JSON選択（複数ある場合）
+        _fl_jsons_st = st.session_state.get("folder_jsons_found", [])
+        if len(_fl_jsons_st) > 1:
+            _fl_sel = st.selectbox(
+                "設定JSONを選択",
+                _fl_jsons_st,
+                format_func=os.path.basename,
+                key="_fl_json_sel",
+            )
+            if st.button("⚙️ この設定を適用", key="_fl_json_apply", width="stretch"):
+                try:
+                    with open(_fl_sel, encoding="utf-8") as _jf:
+                        _jd = json.load(_jf)
+                    _jmsg = _apply_settings_json(_jd)
+                    st.toast(_jmsg)
+                    st.rerun()
+                except Exception as _je:
+                    st.error(f"設定JSONエラー: {_je}")
+        elif len(_fl_jsons_st) == 1:
+            st.caption(f"⚙️ 設定JSON自動適用済み: {os.path.basename(_fl_jsons_st[0])}")
+
+        # フォルダ読み込み済み統計
+        _fl_folder_cnt = sum(
+            1 for v in st.session_state["csv_store"].values()
+            if v.get("source") == "folder"
+        )
+        if _fl_folder_cnt > 0:
+            st.caption(f"📁 フォルダから {_fl_folder_cnt}件 読み込み中")
+        if st.session_state.get("folder_last_root"):
+            if st.button("🗑️ フォルダ読み込みをリセット", key="_fl_reset_btn"):
+                for _fl_del in [k for k, v in st.session_state["csv_store"].items()
+                                if v.get("source") == "folder"]:
+                    del st.session_state["csv_store"][_fl_del]
+                st.session_state.pop("folder_last_root", None)
+                st.session_state.pop("folder_jsons_found", None)
+                st.rerun()
 
     # 全CSV一覧（基準 + 比較）からアクティブを選択
     _all_keys = list(st.session_state["csv_store"].keys())
@@ -5375,39 +5577,9 @@ with st.sidebar:
     if _imp_file is not None:
         try:
             _imp = json.load(_imp_file)
-            if "processes" not in _imp:
-                st.error("有効な設定JSONではありません（'processes'キーが見つかりません）")
-            else:
-                _new_procs: dict = {}
-                for _ip, _ipd in _imp["processes"].items():
-                    _new_procs[_ip] = {
-                        "trigger_col":   _ipd.get("trigger", ""),
-                        "edge":          _ipd.get("edge", "RISE"),
-                        "takt_target_ms": _ipd.get("takt_target_ms", 0),
-                        "steps":         _ipd.get("steps", []),
-                    }
-                    # session_state を直接セット（rerun後に init_proc_widgets が上書きしないよう先行設定）
-                    st.session_state[pk(_ip, "trigger")]    = _ipd.get("trigger", "")
-                    st.session_state[pk(_ip, "edge")]       = _ipd.get("edge", "RISE")
-                    st.session_state[pk(_ip, "takt")]       = int(_ipd.get("takt_target_ms", 0))
-                    st.session_state[pk(_ip, "steps_list")] = _ipd.get("steps", [])
-                    if _ipd.get("baseline"):
-                        st.session_state[pk(_ip, "baseline")] = _ipd["baseline"]
-                    if _ipd.get("baseline_meta"):
-                        st.session_state[pk(_ip, "baseline_meta")] = _ipd["baseline_meta"]
-                    # 波形基準（平均波形データ）を復元
-                    if _ipd.get("wv_baseline"):
-                        st.session_state[pk(_ip, "wv_baseline")] = _ipd["wv_baseline"]
-                    if _ipd.get("wv_xy_baseline"):
-                        st.session_state[pk(_ip, "wv_xy_baseline")] = _ipd["wv_xy_baseline"]
-                    # 波形検出条件を復元
-                    for _dc_k, _dc_v in _ipd.get("det_conditions", {}).items():
-                        st.session_state[_dc_k] = _dc_v
-                st.session_state["processes"]   = _new_procs
-                st.session_state["_expand_new"] = next(iter(_new_procs), None)
-                _n_det = sum(len(v.get("det_conditions", {})) for v in _imp["processes"].values())
-                st.toast(f"✅ 設定を読み込みました（波形検出条件 {_n_det} 件）")
-                st.rerun()
+            _msg = _apply_settings_json(_imp)
+            st.toast(_msg)
+            st.rerun()
         except Exception as _imp_e:
             st.error(f"読み込みエラー: {_imp_e}")
 
