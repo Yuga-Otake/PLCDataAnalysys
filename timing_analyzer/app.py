@@ -75,6 +75,18 @@ STEP_COLORS = [
     "#C00000", "#375623", "#833C00", "#1F3864",
 ]
 
+# 比較モード用カラーパレット（CSV ごとに異なる色）
+_CMP_PALETTE = [
+    "#3b82f6",  # blue
+    "#f59e0b",  # amber
+    "#10b981",  # emerald
+    "#ef4444",  # red
+    "#8b5cf6",  # violet
+    "#ec4899",  # pink
+    "#06b6d4",  # cyan
+    "#84cc16",  # lime
+]
+
 
 # ═══════════════════════════════════════════════════════════════
 # ヘルパー関数
@@ -1189,7 +1201,8 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                               step_stat: dict, step: dict, pname: str,
                               result_df: pd.DataFrame,
                               _sa_vars: list = None,
-                              _ref_df: pd.DataFrame = None):
+                              _ref_df: pd.DataFrame = None,
+                              _compare_entries: list = None):
     """アナログ波形重ね合わせ表示（ステップ開始基準 or スタンドアロン）
 
     _sa_vars が指定された場合はスタンドアロンモード:
@@ -2125,28 +2138,106 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
 
             # ── グラフ描画 ─────────────────────────────────────────
             fig = go.Figure()
+            _in_cmp_wv = _compare_entries is not None and len(_compare_entries) > 0
 
             _MAX_WAVE = 80
-            for j, (t_sw, v_sw) in enumerate(step_waves):
-                if j >= _MAX_WAVE:
-                    break
-                _env_ng  = ng_flags[j]      if j < len(ng_flags)      else False
-                _peak_ng = peak_ng_flags[j] if j < len(peak_ng_flags) else False
-                if _env_ng or _peak_ng:
-                    color_cyc = "rgba(220,50,50,0.25)"
-                else:
-                    color_cyc = "rgba(100,120,200,0.12)"
+            if not _in_cmp_wv:
+                # 通常モード: 個別サイクル波形（グレー / 赤）
+                for j, (t_sw, v_sw) in enumerate(step_waves):
+                    if j >= _MAX_WAVE:
+                        break
+                    _env_ng  = ng_flags[j]      if j < len(ng_flags)      else False
+                    _peak_ng = peak_ng_flags[j] if j < len(peak_ng_flags) else False
+                    if _env_ng or _peak_ng:
+                        color_cyc = "rgba(220,50,50,0.25)"
+                    else:
+                        color_cyc = "rgba(100,120,200,0.12)"
+                    fig.add_trace(go.Scatter(
+                        x=t_sw, y=v_sw, mode="lines",
+                        line=dict(color=color_cyc, width=1),
+                        showlegend=False,
+                    ))
                 fig.add_trace(go.Scatter(
-                    x=t_sw, y=v_sw, mode="lines",
-                    line=dict(color=color_cyc, width=1),
-                    showlegend=False,
+                    x=t_common, y=mean_v, mode="lines",
+                    line=dict(color="royalblue", width=2.5),
+                    name="平均波形（比較）" if _ref_df is not None else "平均波形",
                 ))
-
-            fig.add_trace(go.Scatter(
-                x=t_common, y=mean_v, mode="lines",
-                line=dict(color="royalblue", width=2.5),
-                name="平均波形（比較）" if _ref_df is not None else "平均波形",
-            ))
+            else:
+                # 比較モード: 各CSV の平均波形を色分けして重ねる
+                # まず現在CSVの平均波形を先頭に（デフォルト: ロイヤルブルー）
+                fig.add_trace(go.Scatter(
+                    x=t_common, y=mean_v, mode="lines",
+                    line=dict(color="royalblue", width=2.5),
+                    name="現在CSV（平均）",
+                ))
+                for _ce_wv in _compare_entries:
+                    try:
+                        _ce_wavs_cmp = cached_waveforms(
+                            _ce_wv["df"], trigger_col, edge, tuple(waveform_vars)
+                        )
+                        if _standalone:
+                            _ce_soff_arr = np.zeros(len(_ce_wavs_cmp))
+                        else:
+                            _ce_rd_wv = _ce_wv.get("result_df")
+                            if _ce_rd_wv is None:
+                                continue
+                            _ce_scol = start_col if "start_col" in dir() else (
+                                f"{name}_遅れ[ms]" if mode == "single"
+                                else f"{name}_start[ms]"
+                            )
+                            if _ce_scol not in _ce_rd_wv.columns:
+                                continue
+                            _ce_soff_arr = _ce_rd_wv[_ce_scol].values
+                        _ce_sw_cmp = []
+                        _n_ce = min(len(_ce_wavs_cmp), len(_ce_soff_arr))
+                        for _ri in range(_n_ce):
+                            _rcyc = _ce_wavs_cmp[_ri]
+                            if var not in _rcyc.columns:
+                                continue
+                            _rt = _rcyc["time_offset_ms"].values
+                            _rv = _rcyc[var].values.astype(np.float64)
+                            _ce_soff = float(_ce_soff_arr[_ri])
+                            if np.isnan(_ce_soff):
+                                continue
+                            _rt_rel = _rt - _ce_soff
+                            _rm = (_rt_rel >= -win_pre) & (_rt_rel <= win_post)
+                            if _rm.sum() >= 2:
+                                _ce_sw_cmp.append((_rt_rel[_rm], _rv[_rm]))
+                        if not _ce_sw_cmp:
+                            continue
+                        _ce_mat = np.full((len(_ce_sw_cmp), len(t_common)), np.nan)
+                        for _rj, (_rts, _rvs) in enumerate(_ce_sw_cmp):
+                            _ridx = np.searchsorted(_rts, t_common).clip(0, len(_rts) - 1)
+                            _rin  = (t_common >= _rts[0]) & (t_common <= _rts[-1])
+                            _ce_mat[_rj, _rin] = _rvs[_ridx[_rin]]
+                        _ce_mean_wv = np.nanmean(_ce_mat, axis=0)
+                        _ce_std_wv  = np.nanstd(_ce_mat,  axis=0)
+                        _ce_col_wv  = _ce_wv["color"]
+                        _ce_hex_wv  = _ce_col_wv.lstrip("#")
+                        _ce_r_wv = int(_ce_hex_wv[0:2], 16)
+                        _ce_g_wv = int(_ce_hex_wv[2:4], 16)
+                        _ce_b_wv = int(_ce_hex_wv[4:6], 16)
+                        # ±σ 帯
+                        fig.add_trace(go.Scatter(
+                            x=np.concatenate([t_common, t_common[::-1]]),
+                            y=np.concatenate([
+                                _ce_mean_wv + _ce_std_wv,
+                                (_ce_mean_wv - _ce_std_wv)[::-1]
+                            ]),
+                            fill="toself",
+                            fillcolor=f"rgba({_ce_r_wv},{_ce_g_wv},{_ce_b_wv},0.10)",
+                            line=dict(color="rgba(0,0,0,0)"),
+                            name=f"{_ce_wv['label']} ±σ",
+                            showlegend=True,
+                        ))
+                        # 平均波形
+                        fig.add_trace(go.Scatter(
+                            x=t_common, y=_ce_mean_wv, mode="lines",
+                            line=dict(color=_ce_col_wv, width=2.5),
+                            name=_ce_wv["label"],
+                        ))
+                    except Exception:
+                        continue
 
             # ── 基準CSV オーバーレイ（参照データ）──────────────────────
             if _ref_mean_v is not None:
@@ -3432,104 +3523,179 @@ def _render_single_detail(df, trigger_col, edge, step_stat, step, pname, result_
     h_col, w_col = st.columns(2)
 
     with h_col:
-        if _delta_mode:
-            st.markdown("**差分ヒストグラム（基準値=0）**")
-        else:
-            st.markdown("**ヒストグラム**")
         _bkey  = f"{pname}_{name}_h"
         n_bins = calc_nice_bins(delays_plot, _bkey)
         _vmin_h = float(delays_plot.min()); _vmax_h = float(delays_plot.max())
         _bsz_h  = (_vmax_h - _vmin_h) / n_bins if n_bins > 0 and _vmax_h > _vmin_h else 1.0
         _xbins_h = dict(start=_vmin_h, end=_vmax_h + _bsz_h, size=_bsz_h)
 
-        # 基準CSV オーバーレイ用データを取得
-        _ref_plot_h = None
-        _ref_key_h  = st.session_state.get("ref_csv_key", "")
-        _act_key_h  = st.session_state.get("active_csv", "")
-        _store_h    = st.session_state.get("csv_store", {})
-        if _ref_key_h and _ref_key_h != _act_key_h and _ref_key_h in _store_h:
-            try:
-                _ref_steps_h = st.session_state.get(pk(pname, "steps_list"), [])
-                _ref_res_h   = cached_analyze_v2(
-                    _store_h[_ref_key_h]["df"], trigger_col, edge, json.dumps(_ref_steps_h)
-                )
-                if delay_col in _ref_res_h.columns:
-                    _rv_h = _ref_res_h[delay_col].dropna().values
-                    if len(_rv_h) > 0:
-                        _ref_plot_h = (_rv_h - _bl_ref) if _delta_mode else _rv_h
-            except Exception:
-                pass
-
-        # ref データが取得できた場合は範囲を統合してビン幅を揃える
-        if _ref_plot_h is not None:
-            _vmin_h = min(_vmin_h, float(_ref_plot_h.min()))
-            _vmax_h = max(_vmax_h, float(_ref_plot_h.max()))
-            _bsz_h  = (_vmax_h - _vmin_h) / n_bins if n_bins > 0 and _vmax_h > _vmin_h else 1.0
+        # ── 比較モード: 各CSV の分布を重ね合わせ ──────────────────
+        _cmp_entries_h = st.session_state.get(f"_cmp_entries_{pname}", [])
+        _in_compare_h  = (
+            st.session_state.get("compare_mode", False)
+            and len(_cmp_entries_h) >= 1
+        )
+        if _in_compare_h:
+            st.markdown("**ヒストグラム（比較モード: CSV別重ね合わせ）**")
+            fig_h = go.Figure()
+            _stat_rows = []
+            for _ci_h, _ce_h in enumerate(_cmp_entries_h):
+                try:
+                    _ce_res_h = cached_analyze_v2(
+                        _ce_h["df"], trigger_col, edge,
+                        json.dumps(st.session_state.get(pk(pname, "steps_list"), []))
+                    )
+                    if delay_col not in _ce_res_h.columns:
+                        continue
+                    _ce_dl_h = _ce_res_h[delay_col].dropna().values
+                    if len(_ce_dl_h) == 0:
+                        continue
+                    # 共通レンジを拡張してビン幅を揃える
+                    _vmin_h = min(_vmin_h, float(_ce_dl_h.min()))
+                    _vmax_h = max(_vmax_h, float(_ce_dl_h.max()))
+                    _ce_plot_h = (_ce_dl_h - _bl_ref) if _delta_mode else _ce_dl_h
+                    _stat_rows.append({
+                        "CSV":   _ce_h["label"],
+                        "N":     len(_ce_dl_h),
+                        "平均[ms]": round(float(np.mean(_ce_dl_h)), 2),
+                        "σ[ms]": round(float(np.std(_ce_dl_h)),  2),
+                    })
+                except Exception:
+                    continue
+                _bsz_h   = (_vmax_h - _vmin_h) / n_bins if n_bins > 0 and _vmax_h > _vmin_h else 1.0
+                _xbins_h = dict(start=_vmin_h, end=_vmax_h + _bsz_h, size=_bsz_h)
+                # 16進カラーから rgba に変換して透明度を付与
+                _hex = _ce_h["color"].lstrip("#")
+                _r, _g, _b = int(_hex[0:2], 16), int(_hex[2:4], 16), int(_hex[4:6], 16)
+                fig_h.add_trace(go.Histogram(
+                    x=_ce_plot_h, xbins=_xbins_h,
+                    name=_ce_h["label"],
+                    marker_color=f"rgba({_r},{_g},{_b},0.72)", opacity=0.85,
+                ))
+            # 共通ビン幅に更新（全トレースに適用）
+            _bsz_h   = (_vmax_h - _vmin_h) / n_bins if n_bins > 0 and _vmax_h > _vmin_h else 1.0
             _xbins_h = dict(start=_vmin_h, end=_vmax_h + _bsz_h, size=_bsz_h)
-
-        fig_h  = go.Figure()
-        # 基準CSV 分布を最初のトレースとして追加（背面に描画）
-        if _ref_plot_h is not None:
-            fig_h.add_trace(go.Histogram(
-                x=_ref_plot_h,
-                xbins=_xbins_h,
-                name="基準データ分布",
-                marker_color="rgba(245,158,11,0.52)", opacity=0.88,
-            ))
-
-        if threshold > 0 and not _delta_mode:
-            below = delays_plot[delays_plot <= threshold]
-            above = delays_plot[delays_plot >  threshold]
-            if len(below):
-                fig_h.add_trace(go.Histogram(x=below, xbins=_xbins_h, name="閾値以内",
-                                             marker_color="rgba(59,130,246,0.72)", opacity=0.88))
-            if len(above):
-                fig_h.add_trace(go.Histogram(x=above, xbins=_xbins_h, name="閾値超過",
-                                             marker_color="rgba(239,68,68,0.72)", opacity=0.88))
-            fig_h.add_vline(x=threshold, line_dash="dash", line_color="#7c3aed",
-                            annotation_text=f"閾値 {threshold}ms")
-        elif _delta_mode and _bl_std > 0:
-            _t3 = 3 * _bl_std
-            in_r  = delays_plot[np.abs(delays_plot) <= _t3]
-            out_r = delays_plot[np.abs(delays_plot) > _t3]
-            if len(in_r) > 0:
-                fig_h.add_trace(go.Histogram(x=in_r, xbins=_xbins_h, name="±3σ以内",
-                                             marker_color="rgba(59,130,246,0.72)", opacity=0.88))
-            if len(out_r) > 0:
-                fig_h.add_trace(go.Histogram(x=out_r, xbins=_xbins_h, name="±3σ超過",
-                                             marker_color="rgba(239,68,68,0.72)", opacity=0.88))
-            fig_h.add_vline(x=_t3,  line_dash="dash", line_color="#7c3aed",
-                            annotation_text=f"+3σ({_t3:.1f}ms)")
-            fig_h.add_vline(x=-_t3, line_dash="dash", line_color="#7c3aed",
-                            annotation_text=f"-3σ({_t3:.1f}ms)")
+            for _tr in fig_h.data:
+                _tr.xbins = _xbins_h
+            if _delta_mode:
+                fig_h.add_vline(x=0, line_color="#b45309", line_width=2,
+                                annotation_text=f"基準 {_bl_ref:.1f}ms",
+                                annotation_font_color="#b45309")
+                xaxis_title = "基準値からのずれ [ms]"
+            else:
+                fig_h.add_vline(x=sig3, line_dash="dot", line_color="#9ca3af",
+                                annotation_text=f"3σ {sig3:.1f}ms")
+                if _bl_ref is not None:
+                    fig_h.add_vline(x=_bl_ref, line_color="#b45309", line_width=2,
+                                    annotation_text=f"基準 {_bl_ref:.1f}ms",
+                                    annotation_font_color="#b45309")
+                xaxis_title = "遅れ時間 [ms]"
+            fig_h.update_layout(xaxis_title=xaxis_title, yaxis_title="頻度",
+                                 barmode="overlay", height=280, margin=dict(t=8, b=32),
+                                 showlegend=True)
+            st.plotly_chart(fig_h, width="stretch", key=f"hist_{pname}_{name}")
+            if _stat_rows:
+                st.dataframe(pd.DataFrame(_stat_rows), hide_index=True, width="stretch")
+            st.slider("ビン数", 3, 60, n_bins, key=f"_bins_{_bkey}",
+                      help="ヒストグラムのビン数を手動調整")
         else:
-            fig_h.add_trace(go.Histogram(x=delays_plot, xbins=_xbins_h,
-                                         name="現在データ", marker_color="rgba(59,130,246,0.72)", opacity=0.88))
-        if _delta_mode:
-            fig_h.add_vline(x=0, line_color="#b45309", line_width=2,
-                            annotation_text=f"基準 {_bl_ref:.1f}ms",
-                            annotation_font_color="#b45309")
-            xaxis_title = "基準値からのずれ [ms]"
-        else:
-            fig_h.add_vline(x=sig3, line_dash="dot", line_color="#9ca3af",
-                            annotation_text=f"3σ {sig3:.1f}ms")
-            xaxis_title = "遅れ時間 [ms]"
-        fig_h.update_layout(xaxis_title=xaxis_title, yaxis_title="頻度",
-                             barmode="overlay", height=260, margin=dict(t=8, b=32),
-                             showlegend=True)
-        st.plotly_chart(fig_h, width="stretch", key=f"hist_{pname}_{name}")
-        sc = st.columns(4)
-        mean_plot = float(np.mean(delays_plot))
-        std_plot  = float(np.std(delays_plot))
-        sc[0].metric("N",      len(delays_plot))
-        sc[1].metric("平均" if not _delta_mode else "差分平均", f"{mean_plot:.1f}ms")
-        sc[2].metric("σ",     f"{std_plot:.1f}ms")
-        sc[3].metric("3σ" if not _delta_mode else "基準σ", f"{(_bl_std if _delta_mode else sig3):.1f}ms")
-        if threshold > 0 and not _delta_mode:
-            rate = np.mean(delays <= threshold) * 100
-            st.caption(f"閾値達成率: **{rate:.1f}%**")
-        st.slider("ビン数", 3, 60, n_bins, key=f"_bins_{_bkey}",
-                  help="ヒストグラムのビン数を手動調整")
+            # ── 通常モード ────────────────────────────────────────
+            if _delta_mode:
+                st.markdown("**差分ヒストグラム（基準値=0）**")
+            else:
+                st.markdown("**ヒストグラム**")
+
+            # 基準CSV オーバーレイ用データを取得
+            _ref_plot_h = None
+            _ref_key_h  = st.session_state.get("ref_csv_key", "")
+            _act_key_h  = st.session_state.get("active_csv", "")
+            _store_h    = st.session_state.get("csv_store", {})
+            if _ref_key_h and _ref_key_h != _act_key_h and _ref_key_h in _store_h:
+                try:
+                    _ref_steps_h = st.session_state.get(pk(pname, "steps_list"), [])
+                    _ref_res_h   = cached_analyze_v2(
+                        _store_h[_ref_key_h]["df"], trigger_col, edge,
+                        json.dumps(_ref_steps_h)
+                    )
+                    if delay_col in _ref_res_h.columns:
+                        _rv_h = _ref_res_h[delay_col].dropna().values
+                        if len(_rv_h) > 0:
+                            _ref_plot_h = (_rv_h - _bl_ref) if _delta_mode else _rv_h
+                except Exception:
+                    pass
+
+            # ref データが取得できた場合は範囲を統合してビン幅を揃える
+            if _ref_plot_h is not None:
+                _vmin_h = min(_vmin_h, float(_ref_plot_h.min()))
+                _vmax_h = max(_vmax_h, float(_ref_plot_h.max()))
+                _bsz_h  = (_vmax_h - _vmin_h) / n_bins if n_bins > 0 and _vmax_h > _vmin_h else 1.0
+                _xbins_h = dict(start=_vmin_h, end=_vmax_h + _bsz_h, size=_bsz_h)
+
+            fig_h  = go.Figure()
+            # 基準CSV 分布を最初のトレースとして追加（背面に描画）
+            if _ref_plot_h is not None:
+                fig_h.add_trace(go.Histogram(
+                    x=_ref_plot_h,
+                    xbins=_xbins_h,
+                    name="基準データ分布",
+                    marker_color="rgba(245,158,11,0.52)", opacity=0.88,
+                ))
+
+            if threshold > 0 and not _delta_mode:
+                below = delays_plot[delays_plot <= threshold]
+                above = delays_plot[delays_plot >  threshold]
+                if len(below):
+                    fig_h.add_trace(go.Histogram(x=below, xbins=_xbins_h, name="閾値以内",
+                                                 marker_color="rgba(59,130,246,0.72)", opacity=0.88))
+                if len(above):
+                    fig_h.add_trace(go.Histogram(x=above, xbins=_xbins_h, name="閾値超過",
+                                                 marker_color="rgba(239,68,68,0.72)", opacity=0.88))
+                fig_h.add_vline(x=threshold, line_dash="dash", line_color="#7c3aed",
+                                annotation_text=f"閾値 {threshold}ms")
+            elif _delta_mode and _bl_std > 0:
+                _t3 = 3 * _bl_std
+                in_r  = delays_plot[np.abs(delays_plot) <= _t3]
+                out_r = delays_plot[np.abs(delays_plot) > _t3]
+                if len(in_r) > 0:
+                    fig_h.add_trace(go.Histogram(x=in_r, xbins=_xbins_h, name="±3σ以内",
+                                                 marker_color="rgba(59,130,246,0.72)", opacity=0.88))
+                if len(out_r) > 0:
+                    fig_h.add_trace(go.Histogram(x=out_r, xbins=_xbins_h, name="±3σ超過",
+                                                 marker_color="rgba(239,68,68,0.72)", opacity=0.88))
+                fig_h.add_vline(x=_t3,  line_dash="dash", line_color="#7c3aed",
+                                annotation_text=f"+3σ({_t3:.1f}ms)")
+                fig_h.add_vline(x=-_t3, line_dash="dash", line_color="#7c3aed",
+                                annotation_text=f"-3σ({_t3:.1f}ms)")
+            else:
+                fig_h.add_trace(go.Histogram(x=delays_plot, xbins=_xbins_h,
+                                             name="現在データ",
+                                             marker_color="rgba(59,130,246,0.72)", opacity=0.88))
+            if _delta_mode:
+                fig_h.add_vline(x=0, line_color="#b45309", line_width=2,
+                                annotation_text=f"基準 {_bl_ref:.1f}ms",
+                                annotation_font_color="#b45309")
+                xaxis_title = "基準値からのずれ [ms]"
+            else:
+                fig_h.add_vline(x=sig3, line_dash="dot", line_color="#9ca3af",
+                                annotation_text=f"3σ {sig3:.1f}ms")
+                xaxis_title = "遅れ時間 [ms]"
+            fig_h.update_layout(xaxis_title=xaxis_title, yaxis_title="頻度",
+                                 barmode="overlay", height=260, margin=dict(t=8, b=32),
+                                 showlegend=True)
+            st.plotly_chart(fig_h, width="stretch", key=f"hist_{pname}_{name}")
+            sc = st.columns(4)
+            mean_plot = float(np.mean(delays_plot))
+            std_plot  = float(np.std(delays_plot))
+            sc[0].metric("N",      len(delays_plot))
+            sc[1].metric("平均" if not _delta_mode else "差分平均", f"{mean_plot:.1f}ms")
+            sc[2].metric("σ",     f"{std_plot:.1f}ms")
+            sc[3].metric("3σ" if not _delta_mode else "基準σ",
+                         f"{(_bl_std if _delta_mode else sig3):.1f}ms")
+            if threshold > 0 and not _delta_mode:
+                rate = np.mean(delays <= threshold) * 100
+                st.caption(f"閾値達成率: **{rate:.1f}%**")
+            st.slider("ビン数", 3, 60, n_bins, key=f"_bins_{_bkey}",
+                      help="ヒストグラムのビン数を手動調整")
 
     with w_col:
         st.markdown("**波形重ね（全サイクル＋平均）**")
@@ -3633,106 +3799,179 @@ def _render_range_detail(df, trigger_col, edge, step_stat, step, pname, result_d
     h_col, w_col = st.columns(2)
 
     with h_col:
-        if _delta_mode:
-            st.markdown("**差分ヒストグラム（基準値=0）**")
-        else:
-            st.markdown("**所要時間ヒストグラム**")
         _bkey  = f"{pname}_{name}_r"
         n_bins = calc_nice_bins(durs_plot, _bkey)
         _vmin_r = float(durs_plot.min()); _vmax_r = float(durs_plot.max())
         _bsz_r  = (_vmax_r - _vmin_r) / n_bins if n_bins > 0 and _vmax_r > _vmin_r else 1.0
         _xbins_r = dict(start=_vmin_r, end=_vmax_r + _bsz_r, size=_bsz_r)
 
-        # 基準CSV オーバーレイ用データを取得
-        _ref_plot_r = None
-        _ref_key_r  = st.session_state.get("ref_csv_key", "")
-        _act_key_r  = st.session_state.get("active_csv", "")
-        _store_r    = st.session_state.get("csv_store", {})
-        if _ref_key_r and _ref_key_r != _act_key_r and _ref_key_r in _store_r:
-            try:
-                _ref_steps_r = st.session_state.get(pk(pname, "steps_list"), [])
-                _ref_res_r   = cached_analyze_v2(
-                    _store_r[_ref_key_r]["df"], trigger_col, edge, json.dumps(_ref_steps_r)
-                )
-                if dur_col in _ref_res_r.columns:
-                    _rv_r = _ref_res_r[dur_col].dropna().values
-                    if len(_rv_r) > 0:
-                        _ref_plot_r = (_rv_r - _bl_ref_dur) if _delta_mode else _rv_r
-            except Exception:
-                pass
-
-        # ref データが取得できた場合は範囲を統合してビン幅を揃える
-        if _ref_plot_r is not None:
-            _vmin_r = min(_vmin_r, float(_ref_plot_r.min()))
-            _vmax_r = max(_vmax_r, float(_ref_plot_r.max()))
-            _bsz_r  = (_vmax_r - _vmin_r) / n_bins if n_bins > 0 and _vmax_r > _vmin_r else 1.0
+        # ── 比較モード: 各CSV の分布を重ね合わせ ──────────────────
+        _cmp_entries_r = st.session_state.get(f"_cmp_entries_{pname}", [])
+        _in_compare_r  = (
+            st.session_state.get("compare_mode", False)
+            and len(_cmp_entries_r) >= 1
+        )
+        if _in_compare_r:
+            st.markdown("**所要時間ヒストグラム（比較モード: CSV別重ね合わせ）**")
+            fig_h = go.Figure()
+            _stat_rows_r = []
+            for _ci_r, _ce_r in enumerate(_cmp_entries_r):
+                try:
+                    _ce_res_r = cached_analyze_v2(
+                        _ce_r["df"], trigger_col, edge,
+                        json.dumps(st.session_state.get(pk(pname, "steps_list"), []))
+                    )
+                    if dur_col not in _ce_res_r.columns:
+                        continue
+                    _ce_durs_r = _ce_res_r[dur_col].dropna().values
+                    if len(_ce_durs_r) == 0:
+                        continue
+                    _vmin_r = min(_vmin_r, float(_ce_durs_r.min()))
+                    _vmax_r = max(_vmax_r, float(_ce_durs_r.max()))
+                    _ce_plot_r = (_ce_durs_r - _bl_ref_dur) if _delta_mode else _ce_durs_r
+                    _stat_rows_r.append({
+                        "CSV":       _ce_r["label"],
+                        "N":         len(_ce_durs_r),
+                        "平均[ms]":  round(float(np.mean(_ce_durs_r)), 2),
+                        "σ[ms]":    round(float(np.std(_ce_durs_r)),  2),
+                    })
+                except Exception:
+                    continue
+                _bsz_r   = (_vmax_r - _vmin_r) / n_bins if n_bins > 0 and _vmax_r > _vmin_r else 1.0
+                _xbins_r = dict(start=_vmin_r, end=_vmax_r + _bsz_r, size=_bsz_r)
+                _hex_r = _ce_r["color"].lstrip("#")
+                _rr, _gr, _br = (int(_hex_r[0:2], 16),
+                                  int(_hex_r[2:4], 16),
+                                  int(_hex_r[4:6], 16))
+                fig_h.add_trace(go.Histogram(
+                    x=_ce_plot_r, xbins=_xbins_r,
+                    name=_ce_r["label"],
+                    marker_color=f"rgba({_rr},{_gr},{_br},0.72)", opacity=0.85,
+                ))
+            _bsz_r   = (_vmax_r - _vmin_r) / n_bins if n_bins > 0 and _vmax_r > _vmin_r else 1.0
             _xbins_r = dict(start=_vmin_r, end=_vmax_r + _bsz_r, size=_bsz_r)
-
-        fig_h  = go.Figure()
-        # 基準CSV 分布を最初のトレースとして追加（背面に描画）
-        if _ref_plot_r is not None:
-            fig_h.add_trace(go.Histogram(
-                x=_ref_plot_r,
-                xbins=_xbins_r,
-                name="基準データ分布",
-                marker_color="rgba(245,158,11,0.52)", opacity=0.88,
-            ))
-
-        if threshold > 0 and not _delta_mode:
-            below = durs_plot[durs_plot <= threshold]
-            above = durs_plot[durs_plot >  threshold]
-            if len(below):
-                fig_h.add_trace(go.Histogram(x=below, xbins=_xbins_r, name="閾値以内",
-                                             marker_color="rgba(59,130,246,0.72)", opacity=0.88))
-            if len(above):
-                fig_h.add_trace(go.Histogram(x=above, xbins=_xbins_r, name="閾値超過",
-                                             marker_color="rgba(239,68,68,0.72)", opacity=0.88))
-            fig_h.add_vline(x=threshold, line_dash="dash", line_color="#7c3aed",
-                            annotation_text=f"閾値 {threshold}ms")
-        elif _delta_mode and _bl_std_dur > 0:
-            _t3 = 3 * _bl_std_dur
-            in_r  = durs_plot[np.abs(durs_plot) <= _t3]
-            out_r = durs_plot[np.abs(durs_plot) > _t3]
-            if len(in_r) > 0:
-                fig_h.add_trace(go.Histogram(x=in_r, xbins=_xbins_r, name="±3σ以内",
-                                             marker_color="rgba(59,130,246,0.72)", opacity=0.88))
-            if len(out_r) > 0:
-                fig_h.add_trace(go.Histogram(x=out_r, xbins=_xbins_r, name="±3σ超過",
-                                             marker_color="rgba(239,68,68,0.72)", opacity=0.88))
-            fig_h.add_vline(x=_t3,  line_dash="dash", line_color="#7c3aed",
-                            annotation_text=f"+3σ({_t3:.1f}ms)")
-            fig_h.add_vline(x=-_t3, line_dash="dash", line_color="#7c3aed",
-                            annotation_text=f"-3σ({_t3:.1f}ms)")
+            for _tr_r in fig_h.data:
+                _tr_r.xbins = _xbins_r
+            if _delta_mode:
+                fig_h.add_vline(x=0, line_color="#b45309", line_width=2,
+                                annotation_text=f"基準 {_bl_ref_dur:.1f}ms",
+                                annotation_font_color="#b45309")
+                xaxis_title = "基準値からのずれ [ms]"
+            else:
+                fig_h.add_vline(x=sig3, line_dash="dot", line_color="#9ca3af",
+                                annotation_text=f"3σ {sig3:.1f}ms")
+                if _bl_ref_dur is not None:
+                    fig_h.add_vline(x=_bl_ref_dur, line_color="#b45309", line_width=2,
+                                    annotation_text=f"基準 {_bl_ref_dur:.1f}ms",
+                                    annotation_font_color="#b45309")
+                xaxis_title = "所要時間 [ms]"
+            fig_h.update_layout(xaxis_title=xaxis_title, yaxis_title="頻度",
+                                 barmode="overlay", height=280, margin=dict(t=8, b=32),
+                                 showlegend=True)
+            st.plotly_chart(fig_h, width="stretch", key=f"hist_{pname}_{name}")
+            if _stat_rows_r:
+                st.dataframe(pd.DataFrame(_stat_rows_r), hide_index=True, width="stretch")
+            st.slider("ビン数", 3, 60, n_bins, key=f"_bins_{_bkey}",
+                      help="ヒストグラムのビン数を手動調整")
         else:
-            fig_h.add_trace(go.Histogram(x=durs_plot, xbins=_xbins_r,
-                                         name="現在データ", marker_color="rgba(59,130,246,0.72)", opacity=0.88))
-        if _delta_mode:
-            fig_h.add_vline(x=0, line_color="#b45309", line_width=2,
-                            annotation_text=f"基準 {_bl_ref_dur:.1f}ms",
-                            annotation_font_color="#b45309")
-            xaxis_title = "基準値からのずれ [ms]"
-        else:
-            fig_h.add_vline(x=sig3, line_dash="dot", line_color="#9ca3af",
-                            annotation_text=f"3σ {sig3:.1f}ms")
-            xaxis_title = "所要時間 [ms]"
-        fig_h.update_layout(xaxis_title=xaxis_title, yaxis_title="頻度",
-                             barmode="overlay", height=260, margin=dict(t=8, b=32),
-                             showlegend=True)
-        st.plotly_chart(fig_h, width="stretch", key=f"hist_{pname}_{name}")
-        sc = st.columns(4)
-        mean_plot = float(np.mean(durs_plot))
-        sc[0].metric("N",        len(durs_plot))
-        sc[1].metric("平均所要" if not _delta_mode else "差分平均", f"{mean_plot:.1f}ms")
-        sc[2].metric("σ",       f"{std_d:.1f}ms")
-        sc[3].metric("3σ上限" if not _delta_mode else "基準σ",
-                     f"{(_bl_std_dur if _delta_mode else sig3):.1f}ms")
-        if not _delta_mode:
-            st.caption(f"開始タイミング平均: **{mean_s:.1f} ms**")
-        if threshold > 0 and not _delta_mode:
-            rate = np.mean(durs <= threshold) * 100
-            st.caption(f"閾値達成率: **{rate:.1f}%**")
-        st.slider("ビン数", 3, 60, n_bins, key=f"_bins_{_bkey}",
-                  help="ヒストグラムのビン数を手動調整")
+            # ── 通常モード ────────────────────────────────────────
+            if _delta_mode:
+                st.markdown("**差分ヒストグラム（基準値=0）**")
+            else:
+                st.markdown("**所要時間ヒストグラム**")
+
+            # 基準CSV オーバーレイ用データを取得
+            _ref_plot_r = None
+            _ref_key_r  = st.session_state.get("ref_csv_key", "")
+            _act_key_r  = st.session_state.get("active_csv", "")
+            _store_r    = st.session_state.get("csv_store", {})
+            if _ref_key_r and _ref_key_r != _act_key_r and _ref_key_r in _store_r:
+                try:
+                    _ref_steps_r = st.session_state.get(pk(pname, "steps_list"), [])
+                    _ref_res_r   = cached_analyze_v2(
+                        _store_r[_ref_key_r]["df"], trigger_col, edge,
+                        json.dumps(_ref_steps_r)
+                    )
+                    if dur_col in _ref_res_r.columns:
+                        _rv_r = _ref_res_r[dur_col].dropna().values
+                        if len(_rv_r) > 0:
+                            _ref_plot_r = (_rv_r - _bl_ref_dur) if _delta_mode else _rv_r
+                except Exception:
+                    pass
+
+            # ref データが取得できた場合は範囲を統合してビン幅を揃える
+            if _ref_plot_r is not None:
+                _vmin_r = min(_vmin_r, float(_ref_plot_r.min()))
+                _vmax_r = max(_vmax_r, float(_ref_plot_r.max()))
+                _bsz_r  = (_vmax_r - _vmin_r) / n_bins if n_bins > 0 and _vmax_r > _vmin_r else 1.0
+                _xbins_r = dict(start=_vmin_r, end=_vmax_r + _bsz_r, size=_bsz_r)
+
+            fig_h  = go.Figure()
+            # 基準CSV 分布を最初のトレースとして追加（背面に描画）
+            if _ref_plot_r is not None:
+                fig_h.add_trace(go.Histogram(
+                    x=_ref_plot_r,
+                    xbins=_xbins_r,
+                    name="基準データ分布",
+                    marker_color="rgba(245,158,11,0.52)", opacity=0.88,
+                ))
+
+            if threshold > 0 and not _delta_mode:
+                below = durs_plot[durs_plot <= threshold]
+                above = durs_plot[durs_plot >  threshold]
+                if len(below):
+                    fig_h.add_trace(go.Histogram(x=below, xbins=_xbins_r, name="閾値以内",
+                                                 marker_color="rgba(59,130,246,0.72)", opacity=0.88))
+                if len(above):
+                    fig_h.add_trace(go.Histogram(x=above, xbins=_xbins_r, name="閾値超過",
+                                                 marker_color="rgba(239,68,68,0.72)", opacity=0.88))
+                fig_h.add_vline(x=threshold, line_dash="dash", line_color="#7c3aed",
+                                annotation_text=f"閾値 {threshold}ms")
+            elif _delta_mode and _bl_std_dur > 0:
+                _t3 = 3 * _bl_std_dur
+                in_r  = durs_plot[np.abs(durs_plot) <= _t3]
+                out_r = durs_plot[np.abs(durs_plot) > _t3]
+                if len(in_r) > 0:
+                    fig_h.add_trace(go.Histogram(x=in_r, xbins=_xbins_r, name="±3σ以内",
+                                                 marker_color="rgba(59,130,246,0.72)", opacity=0.88))
+                if len(out_r) > 0:
+                    fig_h.add_trace(go.Histogram(x=out_r, xbins=_xbins_r, name="±3σ超過",
+                                                 marker_color="rgba(239,68,68,0.72)", opacity=0.88))
+                fig_h.add_vline(x=_t3,  line_dash="dash", line_color="#7c3aed",
+                                annotation_text=f"+3σ({_t3:.1f}ms)")
+                fig_h.add_vline(x=-_t3, line_dash="dash", line_color="#7c3aed",
+                                annotation_text=f"-3σ({_t3:.1f}ms)")
+            else:
+                fig_h.add_trace(go.Histogram(x=durs_plot, xbins=_xbins_r,
+                                             name="現在データ",
+                                             marker_color="rgba(59,130,246,0.72)", opacity=0.88))
+            if _delta_mode:
+                fig_h.add_vline(x=0, line_color="#b45309", line_width=2,
+                                annotation_text=f"基準 {_bl_ref_dur:.1f}ms",
+                                annotation_font_color="#b45309")
+                xaxis_title = "基準値からのずれ [ms]"
+            else:
+                fig_h.add_vline(x=sig3, line_dash="dot", line_color="#9ca3af",
+                                annotation_text=f"3σ {sig3:.1f}ms")
+                xaxis_title = "所要時間 [ms]"
+            fig_h.update_layout(xaxis_title=xaxis_title, yaxis_title="頻度",
+                                 barmode="overlay", height=260, margin=dict(t=8, b=32),
+                                 showlegend=True)
+            st.plotly_chart(fig_h, width="stretch", key=f"hist_{pname}_{name}")
+            sc = st.columns(4)
+            mean_plot = float(np.mean(durs_plot))
+            sc[0].metric("N",        len(durs_plot))
+            sc[1].metric("平均所要" if not _delta_mode else "差分平均", f"{mean_plot:.1f}ms")
+            sc[2].metric("σ",       f"{std_d:.1f}ms")
+            sc[3].metric("3σ上限" if not _delta_mode else "基準σ",
+                         f"{(_bl_std_dur if _delta_mode else sig3):.1f}ms")
+            if not _delta_mode:
+                st.caption(f"開始タイミング平均: **{mean_s:.1f} ms**")
+            if threshold > 0 and not _delta_mode:
+                rate = np.mean(durs <= threshold) * 100
+                st.caption(f"閾値達成率: **{rate:.1f}%**")
+            st.slider("ビン数", 3, 60, n_bins, key=f"_bins_{_bkey}",
+                      help="ヒストグラムのビン数を手動調整")
 
     with w_col:
         st.markdown("**開始/終了波形重ね**")
@@ -3870,78 +4109,138 @@ def _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result
     h_col, w_col = st.columns(2)
 
     with h_col:
-        st.markdown("**継続時間ヒストグラム**")
         _bkey_n = f"{pname}_{name}_n"
-        n_bins  = calc_nice_bins(durs, _bkey_n)   # Freedman-Diaconis で自動算出
+        n_bins  = calc_nice_bins(durs, _bkey_n)
         _vmin_n = float(durs.min()); _vmax_n = float(durs.max())
         _bsz_n  = (_vmax_n - _vmin_n) / n_bins if n_bins > 0 and _vmax_n > _vmin_n else 1.0
         _xbins_n = dict(start=_vmin_n, end=_vmax_n + _bsz_n, size=_bsz_n)
 
-        # 基準CSV オーバーレイ用データを取得
-        _ref_plot_n = None
-        _ref_key_n  = st.session_state.get("ref_csv_key", "")
-        _act_key_n  = st.session_state.get("active_csv", "")
-        _store_n    = st.session_state.get("csv_store", {})
-        if _ref_key_n and _ref_key_n != _act_key_n and _ref_key_n in _store_n:
-            try:
-                _ref_steps_n = st.session_state.get(pk(pname, "steps_list"), [])
-                _ref_res_n   = cached_analyze_v2(
-                    _store_n[_ref_key_n]["df"], trigger_col, edge, json.dumps(_ref_steps_n)
-                )
-                if dur_col in _ref_res_n.columns:
-                    _rv_n = _ref_res_n[dur_col].dropna().values
-                    if len(_rv_n) > 0:
-                        _ref_plot_n = _rv_n
-            except Exception:
-                pass
-
-        # ref データが取得できた場合は範囲を統合してビン幅を揃える
-        if _ref_plot_n is not None:
-            _vmin_n = min(_vmin_n, float(_ref_plot_n.min()))
-            _vmax_n = max(_vmax_n, float(_ref_plot_n.max()))
-            _bsz_n  = (_vmax_n - _vmin_n) / n_bins if n_bins > 0 and _vmax_n > _vmin_n else 1.0
+        # ── 比較モード: 各CSV の分布を重ね合わせ ──────────────────
+        _cmp_entries_n = st.session_state.get(f"_cmp_entries_{pname}", [])
+        _in_compare_n  = (
+            st.session_state.get("compare_mode", False)
+            and len(_cmp_entries_n) >= 1
+        )
+        if _in_compare_n:
+            st.markdown("**継続時間ヒストグラム（比較モード: CSV別重ね合わせ）**")
+            fig_h = go.Figure()
+            _stat_rows_n = []
+            for _ci_n, _ce_n in enumerate(_cmp_entries_n):
+                try:
+                    _ce_res_n = cached_analyze_v2(
+                        _ce_n["df"], trigger_col, edge,
+                        json.dumps(st.session_state.get(pk(pname, "steps_list"), []))
+                    )
+                    if dur_col not in _ce_res_n.columns:
+                        continue
+                    _ce_durs_n = _ce_res_n[dur_col].dropna().values
+                    if len(_ce_durs_n) == 0:
+                        continue
+                    _vmin_n = min(_vmin_n, float(_ce_durs_n.min()))
+                    _vmax_n = max(_vmax_n, float(_ce_durs_n.max()))
+                    _stat_rows_n.append({
+                        "CSV":       _ce_n["label"],
+                        "N":         len(_ce_durs_n),
+                        "平均[ms]":  round(float(np.mean(_ce_durs_n)), 2),
+                        "σ[ms]":    round(float(np.std(_ce_durs_n)),  2),
+                    })
+                except Exception:
+                    continue
+                _bsz_n   = (_vmax_n - _vmin_n) / n_bins if n_bins > 0 and _vmax_n > _vmin_n else 1.0
+                _xbins_n = dict(start=_vmin_n, end=_vmax_n + _bsz_n, size=_bsz_n)
+                _hex_n = _ce_n["color"].lstrip("#")
+                _rn, _gn, _bn = (int(_hex_n[0:2], 16),
+                                  int(_hex_n[2:4], 16),
+                                  int(_hex_n[4:6], 16))
+                fig_h.add_trace(go.Histogram(
+                    x=_ce_durs_n, xbins=_xbins_n,
+                    name=_ce_n["label"],
+                    marker_color=f"rgba({_rn},{_gn},{_bn},0.72)", opacity=0.85,
+                ))
+            _bsz_n   = (_vmax_n - _vmin_n) / n_bins if n_bins > 0 and _vmax_n > _vmin_n else 1.0
             _xbins_n = dict(start=_vmin_n, end=_vmax_n + _bsz_n, size=_bsz_n)
-
-        fig_h   = go.Figure()
-        # 基準CSV 分布を最初のトレースとして追加（背面に描画）
-        if _ref_plot_n is not None:
-            fig_h.add_trace(go.Histogram(
-                x=_ref_plot_n,
-                xbins=_xbins_n,
-                name="基準データ分布",
-                marker_color="rgba(245,158,11,0.52)", opacity=0.88,
-            ))
-
-        if threshold > 0:
-            below = durs[durs <= threshold]
-            above = durs[durs >  threshold]
-            if len(below):
-                fig_h.add_trace(go.Histogram(x=below, xbins=_xbins_n, name="閾値以内",
-                                             marker_color="rgba(59,130,246,0.72)", opacity=0.88))
-            if len(above):
-                fig_h.add_trace(go.Histogram(x=above, xbins=_xbins_n, name="閾値超過",
-                                             marker_color="rgba(239,68,68,0.72)", opacity=0.88))
-            fig_h.add_vline(x=threshold, line_dash="dash", line_color="#7c3aed",
-                            annotation_text=f"閾値 {threshold}ms")
+            for _tr_n in fig_h.data:
+                _tr_n.xbins = _xbins_n
+            fig_h.add_vline(x=sig3, line_dash="dot", line_color="#9ca3af",
+                            annotation_text=f"3σ {sig3:.1f}ms")
+            fig_h.update_layout(xaxis_title="継続時間[ms]", yaxis_title="頻度",
+                                 barmode="overlay", height=280, margin=dict(t=8, b=32),
+                                 showlegend=True)
+            st.plotly_chart(fig_h, width="stretch", key=f"hist_{pname}_{name}")
+            if _stat_rows_n:
+                st.dataframe(pd.DataFrame(_stat_rows_n), hide_index=True, width="stretch")
+            st.slider("ビン数", 3, 60, n_bins, key=f"_bins_{_bkey_n}",
+                      help="ヒストグラムのビン数を手動調整")
         else:
-            fig_h.add_trace(go.Histogram(x=durs, xbins=_xbins_n,
-                                         name="現在データ", marker_color="rgba(59,130,246,0.72)", opacity=0.88))
-        fig_h.add_vline(x=sig3, line_dash="dot", line_color="#9ca3af",
-                        annotation_text=f"3σ {sig3:.1f}ms")
-        fig_h.update_layout(xaxis_title="継続時間[ms]", yaxis_title="頻度",
-                             barmode="overlay", height=260, margin=dict(t=8, b=32),
-                             showlegend=True)
-        st.plotly_chart(fig_h, width="stretch", key=f"hist_{pname}_{name}")
-        st.slider("ビン数", 3, 60, n_bins, key=f"_bins_{_bkey_n}",
-                  help="ヒストグラムのビン数を手動調整（Freedman-Diaconis による自動算出が既定値）")
-        sc = st.columns(4)
-        sc[0].metric("N",        len(durs))
-        sc[1].metric("平均継続",  f"{mean_d:.1f}ms")
-        sc[2].metric("σ",       f"{std_d:.1f}ms")
-        sc[3].metric("3σ上限",   f"{sig3:.1f}ms")
-        if threshold > 0:
-            rate = np.mean(durs <= threshold) * 100
-            st.caption(f"閾値達成率: **{rate:.1f}%**")
+            # ── 通常モード ────────────────────────────────────────
+            st.markdown("**継続時間ヒストグラム**")
+
+            # 基準CSV オーバーレイ用データを取得
+            _ref_plot_n = None
+            _ref_key_n  = st.session_state.get("ref_csv_key", "")
+            _act_key_n  = st.session_state.get("active_csv", "")
+            _store_n    = st.session_state.get("csv_store", {})
+            if _ref_key_n and _ref_key_n != _act_key_n and _ref_key_n in _store_n:
+                try:
+                    _ref_steps_n = st.session_state.get(pk(pname, "steps_list"), [])
+                    _ref_res_n   = cached_analyze_v2(
+                        _store_n[_ref_key_n]["df"], trigger_col, edge,
+                        json.dumps(_ref_steps_n)
+                    )
+                    if dur_col in _ref_res_n.columns:
+                        _rv_n = _ref_res_n[dur_col].dropna().values
+                        if len(_rv_n) > 0:
+                            _ref_plot_n = _rv_n
+                except Exception:
+                    pass
+
+            # ref データが取得できた場合は範囲を統合してビン幅を揃える
+            if _ref_plot_n is not None:
+                _vmin_n = min(_vmin_n, float(_ref_plot_n.min()))
+                _vmax_n = max(_vmax_n, float(_ref_plot_n.max()))
+                _bsz_n  = (_vmax_n - _vmin_n) / n_bins if n_bins > 0 and _vmax_n > _vmin_n else 1.0
+                _xbins_n = dict(start=_vmin_n, end=_vmax_n + _bsz_n, size=_bsz_n)
+
+            fig_h   = go.Figure()
+            if _ref_plot_n is not None:
+                fig_h.add_trace(go.Histogram(
+                    x=_ref_plot_n,
+                    xbins=_xbins_n,
+                    name="基準データ分布",
+                    marker_color="rgba(245,158,11,0.52)", opacity=0.88,
+                ))
+
+            if threshold > 0:
+                below = durs[durs <= threshold]
+                above = durs[durs >  threshold]
+                if len(below):
+                    fig_h.add_trace(go.Histogram(x=below, xbins=_xbins_n, name="閾値以内",
+                                                 marker_color="rgba(59,130,246,0.72)", opacity=0.88))
+                if len(above):
+                    fig_h.add_trace(go.Histogram(x=above, xbins=_xbins_n, name="閾値超過",
+                                                 marker_color="rgba(239,68,68,0.72)", opacity=0.88))
+                fig_h.add_vline(x=threshold, line_dash="dash", line_color="#7c3aed",
+                                annotation_text=f"閾値 {threshold}ms")
+            else:
+                fig_h.add_trace(go.Histogram(x=durs, xbins=_xbins_n,
+                                             name="現在データ",
+                                             marker_color="rgba(59,130,246,0.72)", opacity=0.88))
+            fig_h.add_vline(x=sig3, line_dash="dot", line_color="#9ca3af",
+                            annotation_text=f"3σ {sig3:.1f}ms")
+            fig_h.update_layout(xaxis_title="継続時間[ms]", yaxis_title="頻度",
+                                 barmode="overlay", height=260, margin=dict(t=8, b=32),
+                                 showlegend=True)
+            st.plotly_chart(fig_h, width="stretch", key=f"hist_{pname}_{name}")
+            st.slider("ビン数", 3, 60, n_bins, key=f"_bins_{_bkey_n}",
+                      help="ヒストグラムのビン数を手動調整（Freedman-Diaconis による自動算出が既定値）")
+            sc = st.columns(4)
+            sc[0].metric("N",        len(durs))
+            sc[1].metric("平均継続",  f"{mean_d:.1f}ms")
+            sc[2].metric("σ",       f"{std_d:.1f}ms")
+            sc[3].metric("3σ上限",   f"{sig3:.1f}ms")
+            if threshold > 0:
+                rate = np.mean(durs <= threshold) * 100
+                st.caption(f"閾値達成率: **{rate:.1f}%**")
 
     with w_col:
         st.markdown(f"**波形重ね（{var}）**")
@@ -5633,28 +5932,72 @@ with st.sidebar:
     # 全CSV一覧（基準 + 比較）からアクティブを選択
     _all_keys = list(st.session_state["csv_store"].keys())
     if len(_all_keys) > 1:
-        _active_now = st.session_state.get("active_csv", _all_keys[0])
-        if _active_now not in _all_keys:
-            _active_now = _all_keys[0]
-        _active_idx = _all_keys.index(_active_now)
-        st.radio(
-            "表示中CSV",
-            _all_keys,
-            index=_active_idx,
-            key="active_csv",
-            format_func=lambda k: (
-                "📌 " + st.session_state["csv_store"][k].get("label", k)
-                if st.session_state["csv_store"][k].get("is_ref")
-                else "📊 " + st.session_state["csv_store"][k].get("label", k)
-            ),
+        _csv_store_sb = st.session_state["csv_store"]
+
+        def _fmt_csv(k):
+            _e = _csv_store_sb.get(k, {})
+            _lbl = _e.get("label", k)
+            return ("📌 " + _lbl) if _e.get("is_ref") else ("📊 " + _lbl)
+
+        _non_ref_cnt = sum(
+            1 for k in _all_keys if not _csv_store_sb.get(k, {}).get("is_ref")
         )
-        _chosen = st.session_state["active_csv"]
-        _entry    = st.session_state["csv_store"][_chosen]
-        df        = _entry["df"]
-        col_types = _entry["col_types"]
-        st.session_state["df"] = df
-        st.session_state["col_types"] = col_types
-        st.session_state["uploaded_filename"] = _chosen
+        if _non_ref_cnt >= 1:
+            _compare_mode_sb = st.toggle(
+                "🔀 比較モード",
+                key="compare_mode",
+                help="複数CSVを同時に重ねて比較表示します",
+            )
+        else:
+            st.session_state.setdefault("compare_mode", False)
+            _compare_mode_sb = False
+
+        if _compare_mode_sb:
+            # 比較モード: multiselect で複数CSV を選択
+            _cmp_default = [k for k in st.session_state.get("compare_csv_keys", [])
+                            if k in _all_keys]
+            if not _cmp_default:
+                _cmp_default = _all_keys   # デフォルトで全選択
+            st.multiselect(
+                "比較するCSV（複数選択）",
+                _all_keys,
+                default=_cmp_default,
+                key="compare_csv_keys",
+                format_func=_fmt_csv,
+            )
+            # スキーマ操作は基準CSVのデータを使用
+            _ref_k_sb = st.session_state.get("ref_csv_key", _all_keys[0])
+            if _ref_k_sb not in _all_keys:
+                _ref_k_sb = _all_keys[0]
+            _ref_entry_sb     = _csv_store_sb[_ref_k_sb]
+            df                = _ref_entry_sb["df"]
+            col_types         = _ref_entry_sb["col_types"]
+            st.session_state["df"]         = df
+            st.session_state["col_types"]  = col_types
+            st.session_state["active_csv"] = _ref_k_sb
+            st.caption(
+                f"🔀 {len(st.session_state.get('compare_csv_keys', []))}件 のCSVを比較中"
+            )
+        else:
+            # 通常モード: ラジオでアクティブCSVを選択
+            _active_now = st.session_state.get("active_csv", _all_keys[0])
+            if _active_now not in _all_keys:
+                _active_now = _all_keys[0]
+            _active_idx = _all_keys.index(_active_now)
+            st.radio(
+                "表示中CSV",
+                _all_keys,
+                index=_active_idx,
+                key="active_csv",
+                format_func=_fmt_csv,
+            )
+            _chosen   = st.session_state["active_csv"]
+            _entry    = _csv_store_sb[_chosen]
+            df        = _entry["df"]
+            col_types = _entry["col_types"]
+            st.session_state["df"]        = df
+            st.session_state["col_types"] = col_types
+            st.session_state["uploaded_filename"] = _chosen
 
     bool_cols = [c for c, t in col_types.items() if t == "bool"]
     num_cols  = [c for c, t in col_types.items() if t == "numeric"]
@@ -6255,12 +6598,58 @@ with _page_tabs[0]:
                 else:
                     fig_gantt, step_stats = build_gantt_v2(result_df, steps_list, takt_target)
 
-                    # ── 基準値オーバーレイ（比較CSV閲覧時）──────────────────
+                    # ── 比較モード: 複数CSV を結合した Gantt を再構築 ──────────
+                    _is_compare = (
+                        st.session_state.get("compare_mode", False)
+                        and len(st.session_state.get("compare_csv_keys", [])) >= 1
+                    )
+                    _cmp_entries: list = []
+                    if _is_compare:
+                        _cmp_keys_g  = st.session_state.get("compare_csv_keys", [])
+                        _cmp_store_g = st.session_state.get("csv_store", {})
+                        for _ci_g, _ck_g in enumerate(_cmp_keys_g):
+                            if _ck_g not in _cmp_store_g:
+                                continue
+                            _ce_g       = _cmp_store_g[_ck_g]
+                            _ce_color_g = _CMP_PALETTE[_ci_g % len(_CMP_PALETTE)]
+                            try:
+                                _ce_rd_g = cached_analyze_v2(
+                                    _ce_g["df"], trigger_col, edge, steps_json
+                                )
+                            except Exception:
+                                continue
+                            if _ce_rd_g is None or len(_ce_rd_g) == 0:
+                                continue
+                            _cmp_entries.append({
+                                "key":       _ck_g,
+                                "label":     _ce_g.get("label", _ck_g),
+                                "df":        _ce_g["df"],
+                                "result_df": _ce_rd_g,
+                                "color":     _ce_color_g,
+                            })
+                        if _cmp_entries:
+                            _combined_rd = pd.concat(
+                                [e["result_df"] for e in _cmp_entries],
+                                ignore_index=True,
+                            )
+                            fig_gantt, step_stats = build_gantt_v2(
+                                _combined_rd, steps_list, takt_target
+                            )
+                            _n_total_cmp = sum(len(e["result_df"]) for e in _cmp_entries)
+                            st.caption(
+                                f"🔀 比較モード: **{len(_cmp_entries)}件** のCSV / "
+                                f"計 **{_n_total_cmp}** サイクル"
+                            )
+                    # step detail 等で参照できるようセッションに保存
+                    st.session_state[f"_cmp_entries_{pname}"] = _cmp_entries
+
+                    # ── 基準値オーバーレイ（比較CSV閲覧時・単CSV時のみ）────────
                     _csv_store_g = st.session_state.get("csv_store", {})
                     _ref_key_g   = st.session_state.get("ref_csv_key", "")
                     _act_key_g   = st.session_state.get("active_csv", "")
                     _is_cmp_g    = bool(
-                        fig_gantt and step_stats
+                        not _is_compare
+                        and fig_gantt and step_stats
                         and _ref_key_g and _act_key_g
                         and _act_key_g != _ref_key_g
                     )
@@ -6398,15 +6787,42 @@ with _page_tabs[0]:
 
                     # ── NG サマリー（監視 / 品質分析モード）────────────
                     if view_mode in ("👁️ 監視", "📊 品質分析") and step_stats:
-                        _outliers_sum = detect_outliers_iqr(result_df, step_stats)
-                        if _outliers_sum:
-                            _ng_msg = "  |  ".join(
-                                f"**{o['name']}** {len(o['cycles'])}サイクルNG"
-                                for o in _outliers_sum
-                            )
-                            st.error(f"🚨 NG検出: {_ng_msg}")
+                        if _is_compare and _cmp_entries:
+                            # 比較モード: CSV ごとに 1 行ずつ表示
+                            for _ce_ng in _cmp_entries:
+                                try:
+                                    _, _ce_ss_ng = build_gantt_v2(
+                                        _ce_ng["result_df"], steps_list, takt_target
+                                    )
+                                    _ce_out = detect_outliers_iqr(
+                                        _ce_ng["result_df"], _ce_ss_ng
+                                    )
+                                except Exception:
+                                    _ce_out = []
+                                _ce_lbl = _ce_ng["label"]
+                                _ce_n   = len(_ce_ng["result_df"])
+                                if _ce_out:
+                                    _ng_msg_ce = "  |  ".join(
+                                        f"**{o['name']}** {len(o['cycles'])}サイクルNG"
+                                        for o in _ce_out
+                                    )
+                                    st.error(f"🚨 **{_ce_lbl}**: {_ng_msg_ce}")
+                                else:
+                                    st.success(
+                                        f"✅ **{_ce_lbl}**: 全{_ce_n}サイクル正常"
+                                    )
                         else:
-                            st.success(f"✅ {pname}: 全{len(result_df)}サイクル正常")
+                            _outliers_sum = detect_outliers_iqr(result_df, step_stats)
+                            if _outliers_sum:
+                                _ng_msg = "  |  ".join(
+                                    f"**{o['name']}** {len(o['cycles'])}サイクルNG"
+                                    for o in _outliers_sum
+                                )
+                                st.error(f"🚨 NG検出: {_ng_msg}")
+                            else:
+                                st.success(
+                                    f"✅ {pname}: 全{len(result_df)}サイクル正常"
+                                )
 
                     if fig_gantt and view_mode != "📊 品質分析":
                         # ── ヒストグラム詳細ページ用コンテキストを保存 ─────
@@ -7979,7 +8395,27 @@ with _page_tabs[3]:
                     _wi_store2 = st.session_state.get("csv_store", {})
                     _wi_ref_key2  = st.session_state.get("ref_csv_key", "")
                     _wi_act_key2  = st.session_state.get("active_csv", "")
-                    if (_wi_ref_key2
+                    _wi_is_cmp_mode = st.session_state.get("compare_mode", False)
+                    _wi_cmp_entries: list = []
+                    if _wi_is_cmp_mode:
+                        # 比較モード: compare_csv_keys の各CSV を compare_entries に
+                        _wi_cmp_keys = st.session_state.get("compare_csv_keys", [])
+                        for _wi_ci, _wi_ck in enumerate(_wi_cmp_keys):
+                            if _wi_ck not in _wi_store2:
+                                continue
+                            _wi_ce = _wi_store2[_wi_ck]
+                            _wi_cmp_entries.append({
+                                "key":       _wi_ck,
+                                "label":     _wi_ce.get("label", _wi_ck),
+                                "df":        _wi_ce["df"],
+                                "result_df": None,   # standalone モード: start_offsets は0
+                                "color":     _CMP_PALETTE[_wi_ci % len(_CMP_PALETTE)],
+                            })
+                        if _wi_cmp_entries:
+                            st.caption(
+                                f"🔀 比較モード: {len(_wi_cmp_entries)}件のCSV を重ねて表示"
+                            )
+                    elif (_wi_ref_key2
                             and _wi_ref_key2 in _wi_store2
                             and _wi_act_key2 != _wi_ref_key2):
                         _wi_ref_overlay = _wi_store2[_wi_ref_key2]["df"]
@@ -8000,4 +8436,5 @@ with _page_tabs[3]:
                         result_df=None,
                         _sa_vars=_wi_sel,
                         _ref_df=_wi_ref_overlay,
+                        _compare_entries=_wi_cmp_entries if _wi_cmp_entries else None,
                     )
