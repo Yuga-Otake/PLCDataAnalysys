@@ -958,8 +958,7 @@ def _detect_point_for_trend(step_waves, dtype, dkey, ss):
     result = []
 
     if dtype == "傾き変化点":
-        if not bool(ss.get(f"{dkey}_on", False)):
-            return [None] * len(step_waves)
+        # ※ trend_on=True で呼ばれる前提なので _on チェックは行わない
         _sm    = int(ss.get(f"{dkey}_smooth", 5))
         _nl    = int(ss.get(f"{dkey}_nleft",  3))
         _nr    = int(ss.get(f"{dkey}_nright", 3))
@@ -991,8 +990,7 @@ def _detect_point_for_trend(step_waves, dtype, dkey, ss):
         return result
 
     elif dtype == "閾値超え検出":
-        if not bool(ss.get(f"{dkey}_on", False)):
-            return [None] * len(step_waves)
+        # ※ trend_on=True で呼ばれる前提なので _on チェックは行わない
         _tv       = float(ss.get(f"{dkey}_tv", 1.0))
         _tdir_raw = str(ss.get(f"{dkey}_tdir", "上昇 ↑"))
         _tdir     = ("rise" if "上昇" in _tdir_raw
@@ -1017,8 +1015,7 @@ def _detect_point_for_trend(step_waves, dtype, dkey, ss):
         return result
 
     elif dtype in ("最大値点", "最小値点"):
-        if not bool(ss.get(f"{dkey}_on", False)):
-            return [None] * len(step_waves)
+        # ※ trend_on=True で呼ばれる前提なので _on チェックは行わない
         _is_max   = (dtype == "最大値点")
         _use_st   = bool(ss.get(f"{dkey}_use_range", False))
         _srng_s   = float(ss.get(f"{dkey}_range_s",   0.0)) if _use_st else None
@@ -8544,23 +8541,26 @@ with _page_tabs[2]:
                                     except Exception:
                                         pass
                             _wi_det_stats_tr: dict = {}
+                            _wi_err_msg: str = ""
                             try:
+                                _wi_trig = st.session_state.get(
+                                    "wi_trigger",
+                                    bool_cols[0] if bool_cols else "",
+                                )
                                 _wi_det_stats_tr = _compute_wi_det_stats_for_csv(
                                     _tdf,
-                                    st.session_state.get(
-                                        "wi_trigger",
-                                        bool_cols[0] if bool_cols else "",
-                                    ),
+                                    _wi_trig,
                                     st.session_state.get("wi_edge", "RISE"),
-                                    num_cols,
+                                    [c for c in num_cols if c in _tdf.columns],
                                     st.session_state,
                                 )
-                            except Exception:
-                                pass
+                            except Exception as _wi_exc:
+                                _wi_err_msg = str(_wi_exc)
                             _res_list.append(
                                 {"label": _lbl, "fname": _tk,
                                  "result": _tres, "wv_stats": _wv_stats_tr,
-                                 "wi_det_stats": _wi_det_stats_tr}
+                                 "wi_det_stats": _wi_det_stats_tr,
+                                 "wi_err": _wi_err_msg}
                             )
                         except Exception as _te:
                             st.warning(f"{_tk}: 解析失敗 ({_te})")
@@ -8573,6 +8573,14 @@ with _page_tabs[2]:
                 _tr_res_list = st.session_state.get(f"_tr_results_{_tr_pname}", [])
                 if _tr_res_list:
                     st.divider()
+
+                    # ── 波形検査エラー表示 ────────────────────────────
+                    _wi_errs = [(r["label"], r["wi_err"])
+                                for r in _tr_res_list if r.get("wi_err")]
+                    if _wi_errs:
+                        with st.expander("⚠️ 波形検査解析エラー", expanded=True):
+                            for _el, _em in _wi_errs:
+                                st.error(f"**{_el}**: {_em}")
 
                     # ── チャートタイプ切り替え ────────────────────────
                     _chart_mode = st.radio(
@@ -9075,6 +9083,8 @@ with _page_tabs[2]:
                                 )
 
                     # ── 波形検査 検出点トレンド ─────────────────────────────
+                    st.divider()
+                    st.markdown("#### 🔍 波形検査 検出点トレンド")
                     _wi_det_keys: dict = {}
                     for _r in _tr_res_list:
                         for _dk, _dv in _r.get("wi_det_stats", {}).items():
@@ -9083,9 +9093,35 @@ with _page_tabs[2]:
                                     "label": _dv["label"],
                                     "color": _dv["color"],
                                 }
+                    if not _wi_det_keys:
+                        # 設定状況を診断して案内
+                        _wi_trig_cur = st.session_state.get("wi_trigger", "")
+                        _wi_trend_configured = False
+                        for _nc in num_cols:
+                            _vk = f"wvol___global_{_nc}"
+                            for _det in st.session_state.get(f"{_vk}_t_det_list", []):
+                                if st.session_state.get(
+                                        f"{_vk}_{_det['id']}_trend_on", False):
+                                    _wi_trend_configured = True
+                                    break
+                            if _wi_trend_configured:
+                                break
+                        if not _wi_trend_configured:
+                            st.info(
+                                "🔍 波形検査タブで検出点を追加し、"
+                                "**📈 傾向解析に出す** をオンにしてから再実行してください。"
+                            )
+                        else:
+                            st.warning(
+                                f"⚠️ 波形検査 検出点は設定済みですが、いずれのCSVでも検出点が見つかりませんでした。"
+                                f"（波形検査トリガー: **{_wi_trig_cur}**）\n\n"
+                                "考えられる原因:\n"
+                                "- トリガー変数が比較CSVに存在しない\n"
+                                "- 傾き変化点の「閾値」が 0\n"
+                                "- 閾値超え検出の「閾値」が波形に合っていない\n"
+                                "- 検索範囲が狭すぎてどのサイクルでも検出できない"
+                            )
                     if _wi_det_keys:
-                        st.divider()
-                        st.markdown("#### 🔍 波形検査 検出点トレンド")
                         st.caption(
                             "「波形検査」タブで **📈 傾向解析に出す** を有効にした検出点の、"
                             "CSVファイルごとの t・v 値（平均 ± σ）の傾向です。"
@@ -9227,6 +9263,160 @@ with _page_tabs[3]:
     if not num_cols:
         st.info("アナログ（数値）変数が見つかりません。CSVを読み込んでください。")
     else:
+        # ══════════════════════════════════════════════════════════════
+        # 📋 登録サマリー & 保存・読込
+        # ══════════════════════════════════════════════════════════════
+        # 現在設定されている検出点を全変数から収集
+        _wi_sum_items: list = []
+        for _sv in num_cols:
+            _svkey = f"wvol___global_{_sv}"
+            for _si, _sdet in enumerate(
+                    st.session_state.get(f"{_svkey}_t_det_list", [])):
+                _did = _sdet.get("id", "")
+                _wi_sum_items.append({
+                    "変数":     _sv,
+                    "グラフ":   "時間軸",
+                    "No":       _si + 1,
+                    "タイプ":   _sdet.get("type", ""),
+                    "有効":     "✅" if st.session_state.get(
+                                    f"{_svkey}_{_did}_on", False) else "−",
+                    "傾向解析": "📈" if st.session_state.get(
+                                    f"{_svkey}_{_did}_trend_on", False) else "−",
+                })
+            for _si, _sdet in enumerate(
+                    st.session_state.get(f"{_svkey}_xy_det_list", [])):
+                _did = _sdet.get("id", "")
+                _wi_sum_items.append({
+                    "変数":     _sv,
+                    "グラフ":   "XY",
+                    "No":       _si + 1,
+                    "タイプ":   _sdet.get("type", ""),
+                    "有効":     "✅" if st.session_state.get(
+                                    f"{_svkey}_{_did}_on", False) else "−",
+                    "傾向解析": "📈" if st.session_state.get(
+                                    f"{_svkey}_{_did}_trend_on", False) else "−",
+                })
+
+        _wi_trig_now = st.session_state.get("wi_trigger",
+                                            bool_cols[0] if bool_cols else "")
+        _wi_edge_now = st.session_state.get("wi_edge", "RISE")
+        _wi_n_dets   = len(_wi_sum_items)
+        _wi_n_trend  = sum(1 for r in _wi_sum_items if r["傾向解析"] == "📈")
+
+        with st.expander(
+            f"📋 登録サマリー　トリガー: **{_wi_trig_now}** / {_wi_edge_now}"
+            f"　検出点: **{_wi_n_dets}** 件　傾向解析送出: **{_wi_n_trend}** 件",
+            expanded=True,
+        ):
+            if _wi_sum_items:
+                st.dataframe(
+                    pd.DataFrame(_wi_sum_items),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+            else:
+                st.info(
+                    "検出点はまだ設定されていません。"
+                    "下のトリガー設定から変数を選んで検出点を追加してください。"
+                )
+
+            st.divider()
+            st.markdown("##### 💾 設定の保存・読込")
+            if "wi_saved_setups" not in st.session_state:
+                st.session_state["wi_saved_setups"] = []
+
+            # ── 保存 ──────────────────────────────────────
+            _wsave_c1, _wsave_c2 = st.columns([3, 1])
+            with _wsave_c1:
+                _wi_save_name = st.text_input(
+                    "設定名", placeholder="例: 工程A検査セット",
+                    key="wi_save_name_input",
+                )
+            with _wsave_c2:
+                st.markdown(
+                    "<div style='padding-top:28px'></div>",
+                    unsafe_allow_html=True,
+                )
+                if st.button("💾 この設定を保存", key="wi_save_btn",
+                             type="secondary", use_container_width=True):
+                    if not _wi_save_name.strip():
+                        st.warning("設定名を入力してください")
+                    else:
+                        # 現在の全 wave inspection 関連キーをスナップショット
+                        _snap: dict = {
+                            "wi_trigger": st.session_state.get("wi_trigger", ""),
+                            "wi_edge":    st.session_state.get("wi_edge", "RISE"),
+                        }
+                        for _sv2 in num_cols:
+                            _svk2 = f"wvol___global_{_sv2}"
+                            for _ss_k, _ss_v in st.session_state.items():
+                                if isinstance(_ss_k, str) and (
+                                    _ss_k.startswith(_svk2)
+                                    or _ss_k == f"wi_sel_{_wi_pname if '_wi_pname' in dir() else '__global'}"
+                                ):
+                                    _snap[_ss_k] = _ss_v
+                        _wi_saved_new = {
+                            "name":       _wi_save_name.strip(),
+                            "created_at": __import__("datetime").datetime.now()
+                                          .strftime("%Y-%m-%d %H:%M"),
+                            "trigger":    st.session_state.get("wi_trigger", ""),
+                            "edge":       st.session_state.get("wi_edge", "RISE"),
+                            "n_dets":     _wi_n_dets,
+                            "n_trend":    _wi_n_trend,
+                            "snapshot":   _snap,
+                        }
+                        st.session_state["wi_saved_setups"].append(_wi_saved_new)
+                        st.toast(
+                            f"✅ 「{_wi_save_name.strip()}」を保存しました"
+                            f"（検出点 {_wi_n_dets} 件）"
+                        )
+                        st.rerun()
+
+            # ── 保存済み一覧 ───────────────────────────────
+            if st.session_state["wi_saved_setups"]:
+                st.markdown("**📁 保存済み設定一覧**")
+                _wi_load_idx: int | None = None
+                _wi_del_idx:  int | None = None
+                for _wsi, _wse in enumerate(
+                        st.session_state["wi_saved_setups"]):
+                    _wsc1, _wsc2, _wsc3, _wsc4 = st.columns([3, 4, 1, 1])
+                    with _wsc1:
+                        st.markdown(f"**{_wse['name']}**")
+                    with _wsc2:
+                        st.caption(
+                            f"📅 {_wse.get('created_at', '')}　"
+                            f"トリガー: {_wse.get('trigger', '')} / "
+                            f"{_wse.get('edge', '')}　"
+                            f"検出点: {_wse.get('n_dets', 0)} 件　"
+                            f"傾向: {_wse.get('n_trend', 0)} 件"
+                        )
+                    with _wsc3:
+                        if st.button("📂 読込", key=f"wi_load_{_wsi}",
+                                     help="この設定を現在の設定として読み込む"):
+                            _wi_load_idx = _wsi
+                    with _wsc4:
+                        if st.button("🗑", key=f"wi_del_{_wsi}",
+                                     help="この保存済み設定を削除"):
+                            _wi_del_idx = _wsi
+
+                if _wi_load_idx is not None:
+                    _snap_ld = st.session_state[
+                        "wi_saved_setups"][_wi_load_idx]["snapshot"]
+                    for _lk, _lv in _snap_ld.items():
+                        st.session_state[_lk] = _lv
+                    _ld_name = st.session_state[
+                        "wi_saved_setups"][_wi_load_idx]["name"]
+                    st.toast(f"✅ 「{_ld_name}」を読み込みました")
+                    st.rerun()
+
+                if _wi_del_idx is not None:
+                    _del_name = st.session_state[
+                        "wi_saved_setups"][_wi_del_idx]["name"]
+                    st.session_state["wi_saved_setups"].pop(_wi_del_idx)
+                    st.toast(f"🗑 「{_del_name}」を削除しました")
+                    st.rerun()
+
+        st.divider()
         # ── トリガー設定 ──────────────────────────────────────────────
         _wi_col1, _wi_col2 = st.columns([2, 2])
         with _wi_col1:
