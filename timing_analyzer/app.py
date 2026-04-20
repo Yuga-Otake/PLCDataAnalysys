@@ -3022,9 +3022,11 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                         st.session_state[_xydet_cnt_key] = 0
                     _xydet_list = st.session_state[_xydet_list_key]
 
-                    _DET_TYPES_XY = ["傾き変化点", "閾値超え検出", "上下判定比較",
-                                     "Y最大値検査", "Y最小値検査", "検出点比較", "数式"]
-                    _DET_COLORS_XY = ["darkorange", "deeppink", "limegreen", "dodgerblue", "gold"]
+                    _DET_TYPES_XY_POINT = ["傾き変化点", "閾値超え検出", "Y最大値点", "Y最小値点"]
+                    _DET_TYPES_XY_JUDGE = ["上下判定比較", "Y最大値判定", "Y最小値判定", "検出点比較", "数式"]
+                    _DET_TYPES_XY  = _DET_TYPES_XY_POINT + _DET_TYPES_XY_JUDGE
+                    _DET_COLORS_XY = ["darkorange", "deeppink", "limegreen", "dodgerblue",
+                                      "gold", "orchid", "coral", "steelblue"]
 
                     _xy_add_ca, _xy_add_cb = st.columns([2, 4])
                     with _xy_add_cb:
@@ -3058,8 +3060,9 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                         _xdkey  = f"{_vkey}_{_xdid}"
                         _xcolor = _DET_COLORS_XY[_xdi % len(_DET_COLORS_XY)]
                         _xicon  = {"傾き変化点": "📐", "閾値超え検出": "🎯",
-                                   "上下判定比較": "📊", "検出点比較": "🔲",
-                                   "数式": "🧮"}.get(_xdtype, "📏")
+                                   "Y最大値点": "⬆️", "Y最小値点": "⬇️",
+                                   "上下判定比較": "📊", "Y最大値判定": "🔺", "Y最小値判定": "🔻",
+                                   "検出点比較": "🔲", "数式": "🧮"}.get(_xdtype, "📏")
 
                         with st.expander(f"{_xicon} #{_xdi+1} {_xdtype}", expanded=True):
                             _xhd, _xdel_btn = st.columns([8, 1])
@@ -3148,6 +3151,24 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     f"{_xdkey}_dir_inc", True))
                                 _xddec  = bool(st.session_state.get(
                                     f"{_xdkey}_dir_dec", True))
+
+                                # Y 検索範囲
+                                xyi_vrng_c1, xyi_vrng_c2, xyi_vrng_c3 = st.columns([1, 2, 2])
+                                with xyi_vrng_c1:
+                                    st.markdown("**🔍 Y 検索範囲**")
+                                    st.checkbox("指定する", key=f"{_xdkey}_use_vrange")
+                                _xuse_vrng = bool(st.session_state.get(f"{_xdkey}_use_vrange", False))
+                                with xyi_vrng_c2:
+                                    st.number_input("Y 下限", value=0.0, step=0.1,
+                                                    key=f"{_xdkey}_vrange_lo",
+                                                    disabled=not _xuse_vrng)
+                                with xyi_vrng_c3:
+                                    st.number_input("Y 上限", value=1.0, step=0.1,
+                                                    key=f"{_xdkey}_vrange_hi",
+                                                    disabled=not _xuse_vrng)
+                                _xrvlo_d = float(st.session_state.get(f"{_xdkey}_vrange_lo", 0.0)) if _xuse_vrng else None
+                                _xrvhi_d = float(st.session_state.get(f"{_xdkey}_vrange_hi", 1.0)) if _xuse_vrng else None
+
                                 st.markdown("---")
                                 st.markdown("**📊 3段階プレビュー**（サンプル波形 #1）")
                                 _xprev_xw0, _xprev_yw0 = xy_waves[0]
@@ -3171,6 +3192,31 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                         value=0, step=1, key=f"{_xdkey}_nth",
                                         help="サイクルごとにN番目の検出点のみ使用。0=全点。")
 
+                                # OK/NG 判定範囲
+                                st.markdown("**✅ OK/NG 判定範囲**")
+                                _xok_x1, _xok_x2, _xok_x3 = st.columns([1, 2, 2])
+                                with _xok_x1:
+                                    st.checkbox("X 範囲で判定", key=f"{_xdkey}_ok_t_on")
+                                _xok_x_on = bool(st.session_state.get(f"{_xdkey}_ok_t_on", False))
+                                with _xok_x2:
+                                    st.number_input("X OK 下限", value=0.0, step=0.5,
+                                                    key=f"{_xdkey}_ok_t_lo", disabled=not _xok_x_on)
+                                with _xok_x3:
+                                    st.number_input("X OK 上限", value=1.0, step=0.5,
+                                                    key=f"{_xdkey}_ok_t_hi", disabled=not _xok_x_on)
+                                _xok_y1, _xok_y2, _xok_y3 = st.columns([1, 2, 2])
+                                with _xok_y1:
+                                    st.checkbox("Y 値で判定", key=f"{_xdkey}_ok_v_on")
+                                _xok_y_on = bool(st.session_state.get(f"{_xdkey}_ok_v_on", False))
+                                with _xok_y2:
+                                    st.number_input("Y OK 下限", value=0.0, step=0.1,
+                                                    key=f"{_xdkey}_ok_v_lo", disabled=not _xok_y_on)
+                                with _xok_y3:
+                                    st.number_input("Y OK 上限", value=1.0, step=0.1,
+                                                    key=f"{_xdkey}_ok_v_hi", disabled=not _xok_y_on)
+                                st.checkbox("📈 傾向解析に出す", key=f"{_xdkey}_trend_on",
+                                            help="検出点の X・Y 値を CSVファイルごとに 📈 傾向解析タブへ送ります")
+
                                 _xdet_on  = bool(st.session_state.get(f"{_xdkey}_on", False))
                                 _xdet_thr = float(st.session_state.get(
                                     f"{_xdkey}_thresh", 0.0))
@@ -3190,6 +3236,9 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                         _xpts = [(float(xi),
                                                   float(np.interp(xi, xw[si], yw[si])))
                                                  for xi in ix_pts]
+                                        # Y 検索範囲フィルター
+                                        if _xrvlo_d is not None and _xrvhi_d is not None:
+                                            _xpts = [(xi, yi) for xi, yi in _xpts if _xrvlo_d <= yi <= _xrvhi_d]
                                         _xsel = _select_nth_pts(_xpts, _xdet_nth)
                                         for xi, yi in _xsel:
                                             _xmkx.append(xi); _xmky.append(yi)
@@ -3202,6 +3251,30 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                             "label": f"#{_xdi+1} 傾き変化点 ({len(_xmkx)}点)",
                                             "color": _xcolor,
                                         })
+                                    # OK/NG 範囲チェック
+                                    _xinf_ok_x_lo = float(st.session_state.get(f"{_xdkey}_ok_t_lo", 0.0))
+                                    _xinf_ok_x_hi = float(st.session_state.get(f"{_xdkey}_ok_t_hi", 1.0))
+                                    _xinf_ok_y_lo = float(st.session_state.get(f"{_xdkey}_ok_v_lo", 0.0))
+                                    _xinf_ok_y_hi = float(st.session_state.get(f"{_xdkey}_ok_v_hi", 1.0))
+                                    if _xok_x_on or _xok_y_on:
+                                        for _jxi, _pts_jxi in enumerate(_xcyc_pts_inf):
+                                            if _pts_jxi is None:
+                                                xy_peak_ng_flags[_jxi] = True; continue
+                                            _xi_c, _yi_c = _pts_jxi
+                                            if _xok_x_on and not (_xinf_ok_x_lo <= _xi_c <= _xinf_ok_x_hi):
+                                                xy_peak_ng_flags[_jxi] = True
+                                            if _xok_y_on and not (_xinf_ok_y_lo <= _yi_c <= _xinf_ok_y_hi):
+                                                xy_peak_ng_flags[_jxi] = True
+                                    # 傾向解析に出す
+                                    if bool(st.session_state.get(f"{_xdkey}_trend_on", False)):
+                                        if "wi_det_trend" not in st.session_state:
+                                            st.session_state["wi_det_trend"] = {}
+                                        st.session_state["wi_det_trend"][f"{_vkey}_{_xdid}"] = {
+                                            "label":  f"{var} vs {xy_xvar} #{_xdi+1} 傾き変化点",
+                                            "color":  _xcolor,
+                                            "t_vals": [p[0] if p else None for p in _xcyc_pts_inf],
+                                            "v_vals": [p[1] if p else None for p in _xcyc_pts_inf],
+                                        }
 
                             elif _xdtype == "上下判定比較":
                                 # ── XY 上下判定比較 ──────────────────────────
@@ -3403,8 +3476,133 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     if _xbnd_mk_lo["x"]:
                                         all_xy_inf_markers.append(_xbnd_mk_lo)
 
-                            elif _xdtype in ("Y最大値検査", "Y最小値検査"):
-                                _xis_max = (_xdtype == "Y最大値検査")
+                            elif _xdtype in ("Y最大値点", "Y最小値点"):
+                                # ── Y最大値点 / Y最小値点 取得 ─────────────────────
+                                _xis_max_pt = (_xdtype == "Y最大値点")
+                                _xvlabel_pt = "Y最大値" if _xis_max_pt else "Y最小値"
+                                st.caption(
+                                    f"各サイクルの検索範囲内の**{_xvlabel_pt}**点 (X, Y) を記録し、"
+                                    "マーカーとして表示します。OK/NG 範囲判定も設定できます。"
+                                )
+                                _xptp_hd, _xptp_on_col = st.columns([8, 1])
+                                with _xptp_on_col:
+                                    st.markdown("**有効**")
+                                    st.checkbox("ON", key=f"{_xdkey}_on")
+
+                                # 検索範囲 (X / Y)
+                                st.markdown("**🔍 検索範囲**")
+                                _xsrng_x1, _xsrng_x2, _xsrng_x3 = st.columns([1, 2, 2])
+                                with _xsrng_x1:
+                                    st.markdown("**X 値**")
+                                    st.checkbox("指定する", key=f"{_xdkey}_use_range")
+                                _xuse_srng_x = bool(st.session_state.get(f"{_xdkey}_use_range", False))
+                                with _xsrng_x2:
+                                    st.number_input("X 開始", value=0.0, step=0.5,
+                                                    key=f"{_xdkey}_range_s",
+                                                    disabled=not _xuse_srng_x)
+                                with _xsrng_x3:
+                                    st.number_input("X 終了", value=1.0, step=0.5,
+                                                    key=f"{_xdkey}_range_e",
+                                                    disabled=not _xuse_srng_x)
+                                _xsrng_y1, _xsrng_y2, _xsrng_y3 = st.columns([1, 2, 2])
+                                with _xsrng_y1:
+                                    st.markdown("**Y 値**")
+                                    st.checkbox("指定する", key=f"{_xdkey}_use_vrange")
+                                _xuse_srng_y = bool(st.session_state.get(f"{_xdkey}_use_vrange", False))
+                                with _xsrng_y2:
+                                    st.number_input("Y 下限", value=0.0, step=0.1,
+                                                    key=f"{_xdkey}_vrange_lo",
+                                                    disabled=not _xuse_srng_y)
+                                with _xsrng_y3:
+                                    st.number_input("Y 上限", value=1.0, step=0.1,
+                                                    key=f"{_xdkey}_vrange_hi",
+                                                    disabled=not _xuse_srng_y)
+                                _xpt_srng_xs  = float(st.session_state.get(f"{_xdkey}_range_s",   0.0)) if _xuse_srng_x else None
+                                _xpt_srng_xe  = float(st.session_state.get(f"{_xdkey}_range_e",   1.0)) if _xuse_srng_x else None
+                                _xpt_srng_ylo = float(st.session_state.get(f"{_xdkey}_vrange_lo", 0.0)) if _xuse_srng_y else None
+                                _xpt_srng_yhi = float(st.session_state.get(f"{_xdkey}_vrange_hi", 1.0)) if _xuse_srng_y else None
+
+                                # OK/NG 判定範囲
+                                st.markdown("**✅ OK/NG 判定範囲**")
+                                _xpt_ox1, _xpt_ox2, _xpt_ox3 = st.columns([1, 2, 2])
+                                with _xpt_ox1:
+                                    st.checkbox("X 範囲で判定", key=f"{_xdkey}_ok_t_on")
+                                _xok_x_on_pt = bool(st.session_state.get(f"{_xdkey}_ok_t_on", False))
+                                with _xpt_ox2:
+                                    st.number_input("X OK 下限", value=0.0, step=0.5,
+                                                    key=f"{_xdkey}_ok_t_lo", disabled=not _xok_x_on_pt)
+                                with _xpt_ox3:
+                                    st.number_input("X OK 上限", value=1.0, step=0.5,
+                                                    key=f"{_xdkey}_ok_t_hi", disabled=not _xok_x_on_pt)
+                                _xpt_oy1, _xpt_oy2, _xpt_oy3 = st.columns([1, 2, 2])
+                                with _xpt_oy1:
+                                    st.checkbox("Y 値で判定", key=f"{_xdkey}_ok_v_on")
+                                _xok_y_on_pt = bool(st.session_state.get(f"{_xdkey}_ok_v_on", False))
+                                with _xpt_oy2:
+                                    st.number_input("Y OK 下限", value=0.0, step=0.1,
+                                                    key=f"{_xdkey}_ok_v_lo", disabled=not _xok_y_on_pt)
+                                with _xpt_oy3:
+                                    st.number_input("Y OK 上限", value=1.0, step=0.1,
+                                                    key=f"{_xdkey}_ok_v_hi", disabled=not _xok_y_on_pt)
+                                st.checkbox("📈 傾向解析に出す", key=f"{_xdkey}_trend_on",
+                                            help="検出点の X・Y 値を CSVファイルごとに 📈 傾向解析タブへ送ります")
+
+                                _xdet_on_pt = bool(st.session_state.get(f"{_xdkey}_on", False))
+                                if _xdet_on_pt:
+                                    _xpt_mkx, _xpt_mky = [], []
+                                    _xcyc_pts_peak = []
+                                    for _jxp, (xw, yw) in enumerate(xy_waves):
+                                        # X 検索範囲マスク
+                                        _xtp_w, _xyp_w = xw, yw
+                                        if _xpt_srng_xs is not None and _xpt_srng_xe is not None:
+                                            _xmp_x = (xw >= _xpt_srng_xs) & (xw <= _xpt_srng_xe)
+                                            if _xmp_x.sum() > 0:
+                                                _xtp_w = xw[_xmp_x]; _xyp_w = yw[_xmp_x]
+                                        # Y 検索範囲マスク
+                                        if _xpt_srng_ylo is not None and _xpt_srng_yhi is not None:
+                                            _xmp_y = (_xyp_w >= _xpt_srng_ylo) & (_xyp_w <= _xpt_srng_yhi)
+                                            if _xmp_y.sum() > 0:
+                                                _xtp_w = _xtp_w[_xmp_y]; _xyp_w = _xyp_w[_xmp_y]
+                                        if len(_xyp_w) == 0:
+                                            _xcyc_pts_peak.append(None); continue
+                                        _xidx_pt = int(np.nanargmax(_xyp_w) if _xis_max_pt else np.nanargmin(_xyp_w))
+                                        _x_pt_v  = float(_xtp_w[_xidx_pt])
+                                        _y_pt_v  = float(_xyp_w[_xidx_pt])
+                                        _xpt_mkx.append(_x_pt_v); _xpt_mky.append(_y_pt_v)
+                                        _xcyc_pts_peak.append((_x_pt_v, _y_pt_v))
+                                    if _xpt_mkx:
+                                        all_xy_inf_markers.append({
+                                            "x": _xpt_mkx, "y": _xpt_mky,
+                                            "label": f"#{_xdi+1} {_xvlabel_pt}点 ({len(_xpt_mkx)}点)",
+                                            "color": _xcolor,
+                                        })
+                                    # OK/NG 範囲チェック
+                                    _xpt_ok_x_lo = float(st.session_state.get(f"{_xdkey}_ok_t_lo", 0.0))
+                                    _xpt_ok_x_hi = float(st.session_state.get(f"{_xdkey}_ok_t_hi", 1.0))
+                                    _xpt_ok_y_lo = float(st.session_state.get(f"{_xdkey}_ok_v_lo", 0.0))
+                                    _xpt_ok_y_hi = float(st.session_state.get(f"{_xdkey}_ok_v_hi", 1.0))
+                                    if _xok_x_on_pt or _xok_y_on_pt:
+                                        for _jxp2, _pts_jxp in enumerate(_xcyc_pts_peak):
+                                            if _pts_jxp is None:
+                                                xy_peak_ng_flags[_jxp2] = True; continue
+                                            _xp_c, _yp_c = _pts_jxp
+                                            if _xok_x_on_pt and not (_xpt_ok_x_lo <= _xp_c <= _xpt_ok_x_hi):
+                                                xy_peak_ng_flags[_jxp2] = True
+                                            if _xok_y_on_pt and not (_xpt_ok_y_lo <= _yp_c <= _xpt_ok_y_hi):
+                                                xy_peak_ng_flags[_jxp2] = True
+                                    # 傾向解析に出す
+                                    if bool(st.session_state.get(f"{_xdkey}_trend_on", False)):
+                                        if "wi_det_trend" not in st.session_state:
+                                            st.session_state["wi_det_trend"] = {}
+                                        st.session_state["wi_det_trend"][f"{_vkey}_{_xdid}"] = {
+                                            "label":  f"{var} vs {xy_xvar} #{_xdi+1} {_xvlabel_pt}点",
+                                            "color":  _xcolor,
+                                            "t_vals": [p[0] if p else None for p in _xcyc_pts_peak],
+                                            "v_vals": [p[1] if p else None for p in _xcyc_pts_peak],
+                                        }
+
+                            elif _xdtype in ("Y最大値判定", "Y最小値判定"):
+                                _xis_max = (_xdtype == "Y最大値判定")
                                 _xvlabel = "Y最大値" if _xis_max else "Y最小値"
                                 st.caption(
                                     f"検査ウィンドウ（X範囲）内の{_xvlabel}を各サイクルで"
@@ -3491,6 +3689,21 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                                     key=f"{_xdkey}_range_e",
                                                     disabled=not _xuse_rng_t)
 
+                                # Y 検索範囲
+                                _xrng_tv1, _xrng_tv2, _xrng_tv3 = st.columns([1, 2, 2])
+                                with _xrng_tv1:
+                                    st.markdown("**🔍 Y 検索範囲**")
+                                    st.checkbox("指定する", key=f"{_xdkey}_use_vrange")
+                                _xuse_vrng_t = bool(st.session_state.get(f"{_xdkey}_use_vrange", False))
+                                with _xrng_tv2:
+                                    st.number_input("Y 下限", value=0.0, step=0.1,
+                                                    key=f"{_xdkey}_vrange_lo",
+                                                    disabled=not _xuse_vrng_t)
+                                with _xrng_tv3:
+                                    st.number_input("Y 上限", value=1.0, step=0.1,
+                                                    key=f"{_xdkey}_vrange_hi",
+                                                    disabled=not _xuse_vrng_t)
+
                                 _xtv_val   = float(st.session_state.get(
                                     f"{_xdkey}_tv", 0.0))
                                 _xtdir_raw = st.session_state.get(
@@ -3504,6 +3717,38 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     f"{_xdkey}_range_s", 0.0)) if _xuse_rng_t else None
                                 _xtre      = float(st.session_state.get(
                                     f"{_xdkey}_range_e", 0.0)) if _xuse_rng_t else None
+                                _xt_rvlo   = float(st.session_state.get(f"{_xdkey}_vrange_lo", 0.0)) if _xuse_vrng_t else None
+                                _xt_rvhi   = float(st.session_state.get(f"{_xdkey}_vrange_hi", 1.0)) if _xuse_vrng_t else None
+
+                                # OK/NG 判定範囲
+                                st.markdown("**✅ OK/NG 判定範囲**")
+                                _xtok_x1, _xtok_x2, _xtok_x3 = st.columns([1, 2, 2])
+                                with _xtok_x1:
+                                    st.checkbox("X 範囲で判定", key=f"{_xdkey}_ok_t_on")
+                                _xtok_x_on = bool(st.session_state.get(f"{_xdkey}_ok_t_on", False))
+                                with _xtok_x2:
+                                    st.number_input("X OK 下限", value=0.0, step=0.5,
+                                                    key=f"{_xdkey}_ok_t_lo", disabled=not _xtok_x_on)
+                                with _xtok_x3:
+                                    st.number_input("X OK 上限", value=1.0, step=0.5,
+                                                    key=f"{_xdkey}_ok_t_hi", disabled=not _xtok_x_on)
+                                _xtok_y1, _xtok_y2, _xtok_y3 = st.columns([1, 2, 2])
+                                with _xtok_y1:
+                                    st.checkbox("Y 値で判定", key=f"{_xdkey}_ok_v_on")
+                                _xtok_y_on = bool(st.session_state.get(f"{_xdkey}_ok_v_on", False))
+                                with _xtok_y2:
+                                    st.number_input("Y OK 下限", value=0.0, step=0.1,
+                                                    key=f"{_xdkey}_ok_v_lo", disabled=not _xtok_y_on)
+                                with _xtok_y3:
+                                    st.number_input("Y OK 上限", value=1.0, step=0.1,
+                                                    key=f"{_xdkey}_ok_v_hi", disabled=not _xtok_y_on)
+                                st.checkbox("📈 傾向解析に出す", key=f"{_xdkey}_trend_on",
+                                            help="検出点の X・Y 値を CSVファイルごとに 📈 傾向解析タブへ送ります")
+
+                                _xtok_x_lo = float(st.session_state.get(f"{_xdkey}_ok_t_lo", 0.0))
+                                _xtok_x_hi = float(st.session_state.get(f"{_xdkey}_ok_t_hi", 1.0))
+                                _xtok_y_lo = float(st.session_state.get(f"{_xdkey}_ok_v_lo", 0.0))
+                                _xtok_y_hi = float(st.session_state.get(f"{_xdkey}_ok_v_hi", 1.0))
 
                                 if _xt_on:
                                     _xtmkx, _xtmky = [], []
@@ -3514,6 +3759,9 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                             xw[si], yw[si], _xtv_val,
                                             direction=_xtdir_str,
                                             range_s=_xtrs, range_e=_xtre)
+                                        # Y 検索範囲フィルター
+                                        if _xt_rvlo is not None and _xt_rvhi is not None:
+                                            _xcs = [(xc, yc) for xc, yc in _xcs if _xt_rvlo <= yc <= _xt_rvhi]
                                         _xsel = _select_nth_pts(_xcs, _xt_nth)
                                         for xc, yc in _xsel:
                                             _xtmkx.append(xc); _xtmky.append(yc)
@@ -3526,6 +3774,26 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                             "label": f"#{_xdi+1} 閾値超え ({len(_xtmkx)}点)",
                                             "color": _xcolor,
                                         })
+                                    # OK/NG
+                                    if _xtok_x_on or _xtok_y_on:
+                                        for _jxt, _pts_jxt in enumerate(_xcyc_pts_thr):
+                                            if _pts_jxt is None:
+                                                xy_peak_ng_flags[_jxt] = True; continue
+                                            _xc_c, _yc_c = _pts_jxt
+                                            if _xtok_x_on and not (_xtok_x_lo <= _xc_c <= _xtok_x_hi):
+                                                xy_peak_ng_flags[_jxt] = True
+                                            if _xtok_y_on and not (_xtok_y_lo <= _yc_c <= _xtok_y_hi):
+                                                xy_peak_ng_flags[_jxt] = True
+                                    # 傾向解析
+                                    if bool(st.session_state.get(f"{_xdkey}_trend_on", False)):
+                                        if "wi_det_trend" not in st.session_state:
+                                            st.session_state["wi_det_trend"] = {}
+                                        st.session_state["wi_det_trend"][f"{_vkey}_{_xdid}"] = {
+                                            "label":  f"{var} vs {xy_xvar} #{_xdi+1} 閾値超え検出",
+                                            "color":  _xcolor,
+                                            "t_vals": [p[0] if p else None for p in _xcyc_pts_thr],
+                                            "v_vals": [p[1] if p else None for p in _xcyc_pts_thr],
+                                        }
 
                             elif _xdtype == "検出点比較":  # 検出点比較
                                 # ── XY 検出点比較 ────────────────────────────
