@@ -942,6 +942,179 @@ def _render_item_insp_win_xy(dkey: str, x_min: float, x_max: float,
     return _xs, _xe, (_xs < _xe)
 
 
+# ═══════════════════════════════════════════════════════════════
+# 波形検査 検出点 — 傾向解析用ヘルパー関数
+# ═══════════════════════════════════════════════════════════════
+
+def _detect_point_for_trend(step_waves, dtype, dkey, ss):
+    """
+    各サイクルの波形から検出点 (t, v) を取得する（傾向解析用）。
+    step_waves : list of (t_arr: np.ndarray, v_arr: np.ndarray)
+    dtype      : "傾き変化点" | "閾値超え検出" | "最大値点" | "最小値点"
+    dkey       : session_state prefix (e.g. "wvol___global_Var_td0")
+    ss         : st.session_state (dict-like)
+    Returns    : list of (t, v) | None, length == len(step_waves)
+    """
+    result = []
+
+    if dtype == "傾き変化点":
+        if not bool(ss.get(f"{dkey}_on", False)):
+            return [None] * len(step_waves)
+        _sm    = int(ss.get(f"{dkey}_smooth", 5))
+        _nl    = int(ss.get(f"{dkey}_nleft",  3))
+        _nr    = int(ss.get(f"{dkey}_nright", 3))
+        _th    = float(ss.get(f"{dkey}_thresh", 0.0))
+        _nth   = int(ss.get(f"{dkey}_nth", 0))
+        _dinc  = bool(ss.get(f"{dkey}_dir_inc", True))
+        _ddec  = bool(ss.get(f"{dkey}_dir_dec", True))
+        _use_r = bool(ss.get(f"{dkey}_use_range", False))
+        _rs    = float(ss.get(f"{dkey}_range_s",   0.0)) if _use_r else None
+        _re    = float(ss.get(f"{dkey}_range_e", 200.0)) if _use_r else None
+        _use_v = bool(ss.get(f"{dkey}_use_vrange", False))
+        _rvlo  = float(ss.get(f"{dkey}_vrange_lo", 0.0)) if _use_v else None
+        _rvhi  = float(ss.get(f"{dkey}_vrange_hi", 1.0)) if _use_v else None
+        if _th <= 0.0:
+            return [None] * len(step_waves)
+        for (t_sw, v_sw) in step_waves:
+            try:
+                _ts = _detect_inflections(
+                    t_sw, v_sw, smooth_w=_sm, n_left=_nl, n_right=_nr,
+                    threshold=_th, range_s=_rs, range_e=_re,
+                    detect_increase=_dinc, detect_decrease=_ddec)
+                _pts = [(float(ti), float(np.interp(ti, t_sw, v_sw))) for ti in _ts]
+                if _rvlo is not None and _rvhi is not None:
+                    _pts = [(ti, vi) for ti, vi in _pts if _rvlo <= vi <= _rvhi]
+                _sel = _select_nth_pts(_pts, _nth)
+                result.append(_sel[0] if _sel else None)
+            except Exception:
+                result.append(None)
+        return result
+
+    elif dtype == "閾値超え検出":
+        if not bool(ss.get(f"{dkey}_on", False)):
+            return [None] * len(step_waves)
+        _tv       = float(ss.get(f"{dkey}_tv", 1.0))
+        _tdir_raw = str(ss.get(f"{dkey}_tdir", "上昇 ↑"))
+        _tdir     = ("rise" if "上昇" in _tdir_raw
+                     else "fall" if "下降" in _tdir_raw else "both")
+        _nth   = int(ss.get(f"{dkey}_nth", 1))
+        _use_r = bool(ss.get(f"{dkey}_use_range", False))
+        _rs    = float(ss.get(f"{dkey}_range_s",   0.0)) if _use_r else None
+        _re    = float(ss.get(f"{dkey}_range_e", 200.0)) if _use_r else None
+        _use_v = bool(ss.get(f"{dkey}_use_vrange", False))
+        _rvlo  = float(ss.get(f"{dkey}_vrange_lo", 0.0)) if _use_v else None
+        _rvhi  = float(ss.get(f"{dkey}_vrange_hi", 1.0)) if _use_v else None
+        for (t_sw, v_sw) in step_waves:
+            try:
+                _crs = _detect_threshold_crossings(
+                    t_sw, v_sw, _tv, direction=_tdir, range_s=_rs, range_e=_re)
+                if _rvlo is not None and _rvhi is not None:
+                    _crs = [(tc, vc) for tc, vc in _crs if _rvlo <= vc <= _rvhi]
+                _sel = _select_nth_pts(_crs, _nth)
+                result.append(_sel[0] if _sel else None)
+            except Exception:
+                result.append(None)
+        return result
+
+    elif dtype in ("最大値点", "最小値点"):
+        if not bool(ss.get(f"{dkey}_on", False)):
+            return [None] * len(step_waves)
+        _is_max   = (dtype == "最大値点")
+        _use_st   = bool(ss.get(f"{dkey}_use_range", False))
+        _srng_s   = float(ss.get(f"{dkey}_range_s",   0.0)) if _use_st else None
+        _srng_e   = float(ss.get(f"{dkey}_range_e", 200.0)) if _use_st else None
+        _use_sv   = bool(ss.get(f"{dkey}_use_vrange", False))
+        _srng_vlo = float(ss.get(f"{dkey}_vrange_lo", 0.0)) if _use_sv else None
+        _srng_vhi = float(ss.get(f"{dkey}_vrange_hi", 1.0)) if _use_sv else None
+        for (t_sw, v_sw) in step_waves:
+            try:
+                _tp_w, _vp_w = t_sw, v_sw
+                if _srng_s is not None and _srng_e is not None:
+                    _mp_t = (t_sw >= _srng_s) & (t_sw <= _srng_e)
+                    if _mp_t.sum() > 0:
+                        _tp_w = t_sw[_mp_t]; _vp_w = v_sw[_mp_t]
+                if _srng_vlo is not None and _srng_vhi is not None:
+                    _mp_v = (_vp_w >= _srng_vlo) & (_vp_w <= _srng_vhi)
+                    if _mp_v.sum() > 0:
+                        _tp_w = _tp_w[_mp_v]; _vp_w = _vp_w[_mp_v]
+                if len(_vp_w) == 0:
+                    result.append(None); continue
+                _idx = int(np.nanargmax(_vp_w) if _is_max else np.nanargmin(_vp_w))
+                result.append((float(_tp_w[_idx]), float(_vp_w[_idx])))
+            except Exception:
+                result.append(None)
+        return result
+
+    return [None] * len(step_waves)
+
+
+def _compute_wi_det_stats_for_csv(df, trigger_col, edge, var_list, ss):
+    """
+    CSV 1 ファイル分の波形検査検出点を解析し、各検出点の統計 (平均・σ) を返す。
+    df          : DataFrame (1 CSV)
+    trigger_col : トリガー列名 (wi_trigger)
+    edge        : "RISE" | "FALL"
+    var_list    : アナログ変数名リスト
+    ss          : st.session_state
+    Returns     : dict[det_key -> {label, color, t_mean, t_std, v_mean, v_std, n}]
+    """
+    _POINT_TYPES = ["傾き変化点", "閾値超え検出", "最大値点", "最小値点"]
+    _DET_COLORS  = ["darkorange", "deeppink", "limegreen", "dodgerblue",
+                    "gold", "orchid", "coral", "steelblue"]
+    stats = {}
+    if not trigger_col or trigger_col not in df.columns:
+        return stats
+    for var in var_list:
+        if var not in df.columns:
+            continue
+        _vkey      = f"wvol___global_{var}"
+        _tdet_list = ss.get(f"{_vkey}_t_det_list", [])
+        _trend_dets = [
+            (_di, _det["id"], _det["type"], f"{_vkey}_{_det['id']}")
+            for _di, _det in enumerate(_tdet_list)
+            if _det.get("type", "") in _POINT_TYPES
+            and bool(ss.get(f"{_vkey}_{_det['id']}_trend_on", False))
+        ]
+        if not _trend_dets:
+            continue
+        _wpre  = int(ss.get(f"{_vkey}_wpre",   50))
+        _wpost = int(ss.get(f"{_vkey}_wpost", 300))
+        try:
+            _waveforms = cached_waveforms(df, trigger_col, edge, (var,))
+        except Exception:
+            continue
+        step_waves = []
+        for _cyc_df in _waveforms:
+            _t_all = _cyc_df["time_offset_ms"].values.astype(float)
+            if var not in _cyc_df.columns:
+                continue
+            _v_all = _cyc_df[var].values.astype(float)
+            _mask  = (_t_all >= -_wpre) & (_t_all <= _wpost)
+            step_waves.append((_t_all[_mask], _v_all[_mask]))
+        if not step_waves:
+            continue
+        for (_di, _did, _dtype, _dkey) in _trend_dets:
+            _color  = _DET_COLORS[_di % len(_DET_COLORS)]
+            _pts    = _detect_point_for_trend(step_waves, _dtype, _dkey, ss)
+            _t_vals = [p[0] for p in _pts if p is not None]
+            _v_vals = [p[1] for p in _pts if p is not None]
+            _n = len(_t_vals)
+            if _n == 0:
+                continue
+            _type_lbl = {"傾き変化点": "傾き変化点", "閾値超え検出": "閾値超え検出",
+                         "最大値点": "最大値点", "最小値点": "最小値点"}.get(_dtype, _dtype)
+            stats[f"{_vkey}_{_did}"] = {
+                "label":  f"{var} #{_di+1} {_type_lbl}",
+                "color":  _color,
+                "t_mean": float(np.mean(_t_vals)),
+                "t_std":  float(np.std(_t_vals)) if _n > 1 else 0.0,
+                "v_mean": float(np.mean(_v_vals)),
+                "v_std":  float(np.std(_v_vals)) if _n > 1 else 0.0,
+                "n":      _n,
+            }
+    return stats
+
+
 import ast as _ast_mod
 import re as _re_mod
 
@@ -8102,9 +8275,24 @@ with _page_tabs[2]:
                                         )
                                     except Exception:
                                         pass
+                            _wi_det_stats_tr: dict = {}
+                            try:
+                                _wi_det_stats_tr = _compute_wi_det_stats_for_csv(
+                                    _tdf,
+                                    st.session_state.get(
+                                        "wi_trigger",
+                                        bool_cols[0] if bool_cols else "",
+                                    ),
+                                    st.session_state.get("wi_edge", "RISE"),
+                                    num_cols,
+                                    st.session_state,
+                                )
+                            except Exception:
+                                pass
                             _res_list.append(
                                 {"label": _lbl, "fname": _tk,
-                                 "result": _tres, "wv_stats": _wv_stats_tr}
+                                 "result": _tres, "wv_stats": _wv_stats_tr,
+                                 "wi_det_stats": _wi_det_stats_tr}
                             )
                         except Exception as _te:
                             st.warning(f"{_tk}: 解析失敗 ({_te})")
@@ -8618,125 +8806,147 @@ with _page_tabs[2]:
                                     key=f"wvtr_{_tr_pname}_{_wvs_sn}_{_wvs_var}",
                                 )
 
+                    # ── 波形検査 検出点トレンド ─────────────────────────────
+                    _wi_det_keys: dict = {}
+                    for _r in _tr_res_list:
+                        for _dk, _dv in _r.get("wi_det_stats", {}).items():
+                            if _dk not in _wi_det_keys:
+                                _wi_det_keys[_dk] = {
+                                    "label": _dv["label"],
+                                    "color": _dv["color"],
+                                }
+                    if _wi_det_keys:
+                        st.divider()
+                        st.markdown("#### 🔍 波形検査 検出点トレンド")
+                        st.caption(
+                            "「波形検査」タブで **📈 傾向解析に出す** を有効にした検出点の、"
+                            "CSVファイルごとの t・v 値（平均 ± σ）の傾向です。"
+                        )
+                        for _wdk, _wdinfo in _wi_det_keys.items():
+                            _wd_label = _wdinfo["label"]
+                            _wd_color = _wdinfo["color"]
+                            _wd_lbls: list = []
+                            _wd_t_means: list = []
+                            _wd_t_stds:  list = []
+                            _wd_v_means: list = []
+                            _wd_v_stds:  list = []
+                            for _r in _tr_res_list:
+                                _dstat = _r.get("wi_det_stats", {}).get(_wdk)
+                                if _dstat is None:
+                                    continue
+                                _wd_lbls.append(_r["label"])
+                                _wd_t_means.append(_dstat["t_mean"])
+                                _wd_t_stds.append(_dstat["t_std"])
+                                _wd_v_means.append(_dstat["v_mean"])
+                                _wd_v_stds.append(_dstat["v_std"])
+                            if not _wd_lbls:
+                                continue
+                            with st.expander(f"**{_wd_label}**", expanded=True):
+                                _wd_fig = make_subplots(
+                                    rows=2, cols=1,
+                                    subplot_titles=("t 値 [ms]", "v 値"),
+                                    vertical_spacing=0.25,
+                                    row_heights=[0.5, 0.5],
+                                )
+                                # t 値 ±1σ 帯
+                                if len(_wd_lbls) > 1:
+                                    _wd_fig.add_trace(go.Scatter(
+                                        x=_wd_lbls + _wd_lbls[::-1],
+                                        y=([m + s for m, s in
+                                            zip(_wd_t_means, _wd_t_stds)]
+                                           + [m - s for m, s in
+                                              zip(_wd_t_means[::-1],
+                                                  _wd_t_stds[::-1])]),
+                                        fill="toself",
+                                        fillcolor="rgba(68,114,196,0.15)",
+                                        line=dict(width=0),
+                                        showlegend=True, name="t ±1σ",
+                                    ), row=1, col=1)
+                                # t 値 平均線
+                                _wd_fig.add_trace(go.Scatter(
+                                    x=_wd_lbls, y=_wd_t_means,
+                                    mode="lines+markers", name="t 平均 [ms]",
+                                    line=dict(color=_wd_color, width=2),
+                                    marker=dict(size=9, color=_wd_color),
+                                    hovertemplate=(
+                                        "%{x}<br>t 平均: %{y:.3f} ms"
+                                        "<br>σ: %{customdata:.3f} ms<extra></extra>"
+                                    ),
+                                    customdata=_wd_t_stds,
+                                ), row=1, col=1)
+                                # v 値 ±1σ 帯
+                                if len(_wd_lbls) > 1:
+                                    _wd_fig.add_trace(go.Scatter(
+                                        x=_wd_lbls + _wd_lbls[::-1],
+                                        y=([m + s for m, s in
+                                            zip(_wd_v_means, _wd_v_stds)]
+                                           + [m - s for m, s in
+                                              zip(_wd_v_means[::-1],
+                                                  _wd_v_stds[::-1])]),
+                                        fill="toself",
+                                        fillcolor="rgba(68,114,196,0.15)",
+                                        line=dict(width=0),
+                                        showlegend=True, name="v ±1σ",
+                                    ), row=2, col=1)
+                                # v 値 平均線
+                                _wd_fig.add_trace(go.Scatter(
+                                    x=_wd_lbls, y=_wd_v_means,
+                                    mode="lines+markers", name="v 平均",
+                                    line=dict(color=_wd_color, width=2,
+                                              dash="dash"),
+                                    marker=dict(size=9, color=_wd_color,
+                                                symbol="diamond"),
+                                    hovertemplate=(
+                                        "%{x}<br>v 平均: %{y:.4f}"
+                                        "<br>σ: %{customdata:.4f}<extra></extra>"
+                                    ),
+                                    customdata=_wd_v_stds,
+                                ), row=2, col=1)
+                                _wd_fig.update_layout(
+                                    title=dict(
+                                        text=f"<b>{_wd_label}</b>　傾向",
+                                        font=dict(size=13),
+                                    ),
+                                    height=560,
+                                    margin=dict(t=60, b=48, l=80, r=100),
+                                    showlegend=True,
+                                    legend=dict(orientation="h", y=1.04,
+                                                x=1, xanchor="right"),
+                                    hovermode="x unified",
+                                )
+                                _wd_fig.update_yaxes(
+                                    title_text="t [ms]", row=1, col=1)
+                                _wd_fig.update_yaxes(
+                                    title_text="v", row=2, col=1)
+                                _wd_fig.update_xaxes(
+                                    title_text="時期", row=2, col=1)
+                                st.plotly_chart(
+                                    _wd_fig, width="stretch",
+                                    key=f"wi_det_tr_{_wdk.replace('/', '_')}",
+                                )
+                                # 統計サマリーテーブル
+                                _wd_stat_rows = [
+                                    {
+                                        "時期":        _sl,
+                                        "t 平均 [ms]": f"{_tm:.3f}",
+                                        "t σ [ms]":   f"{_ts_:.3f}",
+                                        "v 平均":      f"{_vm:.4f}",
+                                        "v σ":         f"{_vs:.4f}",
+                                    }
+                                    for _sl, _tm, _ts_, _vm, _vs in zip(
+                                        _wd_lbls, _wd_t_means, _wd_t_stds,
+                                        _wd_v_means, _wd_v_stds
+                                    )
+                                ]
+                                st.dataframe(
+                                    pd.DataFrame(_wd_stat_rows),
+                                    hide_index=True,
+                                    use_container_width=True,
+                                )
+
             else:
                 st.info("CSVファイルをアップロードして「傾向解析を実行」を押してください")
 
-    # ══════════════════════════════════════════════════════════
-    # 🔍 波形検査 検出点トレンド（🔍 波形検査タブから受信）
-    # ══════════════════════════════════════════════════════════
-    _wi_trend_data = st.session_state.get("wi_det_trend", {})
-    if _wi_trend_data:
-        st.divider()
-        st.markdown("#### 🔍 波形検査 検出点トレンド（サイクル単位）")
-        st.caption(
-            "🔍 波形検査タブで「📈 傾向解析に出す」を有効にした検出点の、"
-            "サイクルごとの t・v 値の推移です。"
-        )
-        for _wt_key, _wt_data in _wi_trend_data.items():
-            _wt_label  = _wt_data.get("label", _wt_key)
-            _wt_color  = _wt_data.get("color", "#4472C4")
-            _wt_t_vals = [v for v in _wt_data.get("t_vals", []) if v is not None]
-            _wt_v_vals = [v for v in _wt_data.get("v_vals", []) if v is not None]
-            _wt_t_cyc  = [i + 1 for i, v in enumerate(_wt_data.get("t_vals", [])) if v is not None]
-            _wt_v_cyc  = [i + 1 for i, v in enumerate(_wt_data.get("v_vals", [])) if v is not None]
-
-            if len(_wt_t_vals) < 2 and len(_wt_v_vals) < 2:
-                continue
-
-            with st.expander(f"**{_wt_label}**", expanded=True):
-                _wt_rows = 1 + (1 if len(_wt_v_vals) >= 2 else 0)
-                _wt_fig  = make_subplots(
-                    rows=_wt_rows, cols=1,
-                    subplot_titles=(
-                        ("t 座標 [ms]", "v 値") if _wt_rows == 2 else ("t 座標 [ms]",)
-                    ),
-                    vertical_spacing=0.22,
-                    row_heights=[0.5, 0.5] if _wt_rows == 2 else [1.0],
-                )
-
-                if len(_wt_t_vals) >= 2:
-                    _wt_t_mean = float(np.mean(_wt_t_vals))
-                    _wt_t_std  = float(np.std(_wt_t_vals))
-                    _wt_fig.add_trace(go.Scatter(
-                        x=_wt_t_cyc, y=_wt_t_vals,
-                        mode="lines+markers", name="t [ms]",
-                        line=dict(color=_wt_color, width=1.5),
-                        marker=dict(size=6, color=_wt_color),
-                        hovertemplate="サイクル %{x}<br>t = %{y:.3f} ms<extra></extra>",
-                    ), row=1, col=1)
-                    for _wt_lv, _wt_ln, _wt_lc in [
-                        (_wt_t_mean, "平均", "gray"),
-                        (_wt_t_mean + 3 * _wt_t_std, "+3σ", "red"),
-                        (_wt_t_mean - 3 * _wt_t_std, "−3σ", "red"),
-                    ]:
-                        _wt_fig.add_hline(
-                            y=_wt_lv, line_dash="dot", line_color=_wt_lc,
-                            annotation_text=_wt_ln,
-                            annotation_font=dict(color=_wt_lc, size=11),
-                            row=1, col=1,
-                        )
-
-                if _wt_rows == 2 and len(_wt_v_vals) >= 2:
-                    _wt_v_mean = float(np.mean(_wt_v_vals))
-                    _wt_v_std  = float(np.std(_wt_v_vals))
-                    _wt_fig.add_trace(go.Scatter(
-                        x=_wt_v_cyc, y=_wt_v_vals,
-                        mode="lines+markers", name="v 値",
-                        line=dict(color=_wt_color, width=1.5, dash="dash"),
-                        marker=dict(size=6, color=_wt_color, symbol="diamond"),
-                        hovertemplate="サイクル %{x}<br>v = %{y:.4f}<extra></extra>",
-                    ), row=2, col=1)
-                    for _wt_lv2, _wt_ln2, _wt_lc2 in [
-                        (_wt_v_mean, "平均", "gray"),
-                        (_wt_v_mean + 3 * _wt_v_std, "+3σ", "red"),
-                        (_wt_v_mean - 3 * _wt_v_std, "−3σ", "red"),
-                    ]:
-                        _wt_fig.add_hline(
-                            y=_wt_lv2, line_dash="dot", line_color=_wt_lc2,
-                            annotation_text=_wt_ln2,
-                            annotation_font=dict(color=_wt_lc2, size=11),
-                            row=2, col=1,
-                        )
-
-                _wt_fig.update_layout(
-                    title=dict(text=f"<b>{_wt_label}</b>", font=dict(size=13)),
-                    height=300 * _wt_rows + 60,
-                    margin=dict(t=60, b=48, l=80, r=100),
-                    showlegend=True,
-                    legend=dict(orientation="h", y=1.04, x=1, xanchor="right"),
-                    hovermode="x unified",
-                )
-                _wt_fig.update_yaxes(title_text="t [ms]", row=1, col=1)
-                if _wt_rows == 2:
-                    _wt_fig.update_yaxes(title_text="v", row=2, col=1)
-                    _wt_fig.update_xaxes(title_text="サイクル番号", row=2, col=1)
-                else:
-                    _wt_fig.update_xaxes(title_text="サイクル番号", row=1, col=1)
-                st.plotly_chart(_wt_fig, width="stretch", key=f"wi_trend_{_wt_key}")
-
-                # 統計表
-                _wt_stat_rows = []
-                if len(_wt_t_vals) >= 2:
-                    _wt_stat_rows.append({
-                        "項目": "t [ms]",
-                        "件数": len(_wt_t_vals),
-                        "平均": f"{float(np.mean(_wt_t_vals)):.3f}",
-                        "σ":   f"{float(np.std(_wt_t_vals)):.3f}",
-                        "最小": f"{float(min(_wt_t_vals)):.3f}",
-                        "最大": f"{float(max(_wt_t_vals)):.3f}",
-                    })
-                if len(_wt_v_vals) >= 2:
-                    _wt_stat_rows.append({
-                        "項目": "v",
-                        "件数": len(_wt_v_vals),
-                        "平均": f"{float(np.mean(_wt_v_vals)):.4f}",
-                        "σ":   f"{float(np.std(_wt_v_vals)):.4f}",
-                        "最小": f"{float(min(_wt_v_vals)):.4f}",
-                        "最大": f"{float(max(_wt_v_vals)):.4f}",
-                    })
-                if _wt_stat_rows:
-                    st.dataframe(pd.DataFrame(_wt_stat_rows),
-                                 hide_index=True, use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════════
 # 🔍 波形検査タブ（ステップ依存なしの独立波形監視）
