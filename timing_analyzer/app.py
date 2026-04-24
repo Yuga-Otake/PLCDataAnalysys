@@ -9085,6 +9085,21 @@ with _page_tabs[2]:
                     # ── 波形検査 検出点トレンド ─────────────────────────────
                     st.divider()
                     st.markdown("#### 🔍 波形検査 検出点トレンド")
+
+                    # 解析エラーがあれば表示
+                    _wi_errs = [
+                        (r["label"], r["wi_err"])
+                        for r in _tr_res_list
+                        if r.get("wi_err")
+                    ]
+                    if _wi_errs:
+                        with st.expander(
+                            f"⚠️ 波形検査 解析エラー ({len(_wi_errs)} 件)",
+                            expanded=True,
+                        ):
+                            for _el, _ee in _wi_errs:
+                                st.error(f"**{_el}**: {_ee}")
+
                     _wi_det_keys: dict = {}
                     for _r in _tr_res_list:
                         for _dk, _dv in _r.get("wi_det_stats", {}).items():
