@@ -62,6 +62,9 @@ from comparator import compare_normal_abnormal, calc_diff_ranking, detect_anomal
 
 st.set_page_config(page_title="APB タイミング解析", page_icon="🏭", layout="wide")
 
+# ── wi_saved_setups 永続化ファイルパス ──────────────────────────────
+_WI_SAVE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wi_saved_setups.json")
+
 st.markdown("""
 <style>
 [data-testid="stSidebarNav"] { display: none !important; }
@@ -91,6 +94,25 @@ _CMP_PALETTE = [
 # ═══════════════════════════════════════════════════════════════
 # ヘルパー関数
 # ═══════════════════════════════════════════════════════════════
+
+def _wi_save_to_file(setups: list) -> None:
+    try:
+        import json as _json
+        with open(_WI_SAVE_FILE, "w", encoding="utf-8") as f:
+            _json.dump(setups, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def _wi_load_from_file() -> list:
+    try:
+        import json as _json
+        if os.path.isfile(_WI_SAVE_FILE):
+            with open(_WI_SAVE_FILE, "r", encoding="utf-8") as f:
+                return _json.load(f)
+    except Exception:
+        pass
+    return []
+
 
 def pk(pname: str, suffix: str) -> str:
     safe = "".join(c if c.isalnum() else "_" for c in pname)
@@ -1045,6 +1067,89 @@ def _detect_point_for_trend(step_waves, dtype, dkey, ss):
     return [None] * len(step_waves)
 
 
+def _detect_xy_point_for_trend(x_sw, y_sw, dtype, dkey, ss):
+    """
+    XYグラフ検出点を1サイクル分検出して (x, y) | None を返す（傾向解析用）。
+    x_sw, y_sw: 1サイクルの X/Y 波形配列
+    dtype: "傾き変化点"|"閾値超え検出"|"Y最大値点"|"Y最小値点"
+    """
+    if dtype == "傾き変化点":
+        _sm   = int(ss.get(f"{dkey}_smooth", 5))
+        _nl   = int(ss.get(f"{dkey}_nleft",  3))
+        _nr   = int(ss.get(f"{dkey}_nright", 3))
+        _th   = float(ss.get(f"{dkey}_thresh", 0.0))
+        _nth  = int(ss.get(f"{dkey}_nth", 0))
+        _dinc = bool(ss.get(f"{dkey}_dir_inc", True))
+        _ddec = bool(ss.get(f"{dkey}_dir_dec", True))
+        _use_r = bool(ss.get(f"{dkey}_use_range", False))
+        _rs    = float(ss.get(f"{dkey}_range_s", 0.0))  if _use_r else None
+        _re    = float(ss.get(f"{dkey}_range_e", 1.0))  if _use_r else None
+        _use_v = bool(ss.get(f"{dkey}_use_vrange", False))
+        _rvlo  = float(ss.get(f"{dkey}_vrange_lo", 0.0)) if _use_v else None
+        _rvhi  = float(ss.get(f"{dkey}_vrange_hi", 1.0)) if _use_v else None
+        if _th <= 0.0:
+            return None
+        try:
+            _xs  = _detect_inflections(x_sw, y_sw, smooth_w=_sm, n_left=_nl, n_right=_nr,
+                                       threshold=_th, range_s=_rs, range_e=_re,
+                                       detect_increase=_dinc, detect_decrease=_ddec)
+            _pts = [(float(xi), float(np.interp(xi, x_sw, y_sw))) for xi in _xs]
+            if _rvlo is not None and _rvhi is not None:
+                _pts = [(xi, yi) for xi, yi in _pts if _rvlo <= yi <= _rvhi]
+            _sel = _select_nth_pts(_pts, _nth)
+            return _sel[0] if _sel else None
+        except Exception:
+            return None
+
+    elif dtype == "閾値超え検出":
+        _tv      = float(ss.get(f"{dkey}_tv", 1.0))
+        _tdir_r  = str(ss.get(f"{dkey}_tdir", "上昇 ↑"))
+        _tdir    = "rise" if "上昇" in _tdir_r else "fall" if "下降" in _tdir_r else "both"
+        _nth     = int(ss.get(f"{dkey}_nth", 1))
+        _use_r   = bool(ss.get(f"{dkey}_use_range", False))
+        _rs      = float(ss.get(f"{dkey}_range_s", 0.0)) if _use_r else None
+        _re      = float(ss.get(f"{dkey}_range_e", 1.0)) if _use_r else None
+        _use_v   = bool(ss.get(f"{dkey}_use_vrange", False))
+        _rvlo    = float(ss.get(f"{dkey}_vrange_lo", 0.0)) if _use_v else None
+        _rvhi    = float(ss.get(f"{dkey}_vrange_hi", 1.0)) if _use_v else None
+        try:
+            _crs = _detect_threshold_crossings(x_sw, y_sw, _tv, direction=_tdir,
+                                               range_s=_rs, range_e=_re)
+            if _rvlo is not None and _rvhi is not None:
+                _crs = [(xc, yc) for xc, yc in _crs if _rvlo <= yc <= _rvhi]
+            _sel = _select_nth_pts(_crs, _nth)
+            return _sel[0] if _sel else None
+        except Exception:
+            return None
+
+    elif dtype in ("Y最大値点", "Y最小値点"):
+        _is_max = (dtype == "Y最大値点")
+        _use_xr = bool(ss.get(f"{dkey}_use_range",  False))
+        _xrs    = float(ss.get(f"{dkey}_range_s",  0.0)) if _use_xr else None
+        _xre    = float(ss.get(f"{dkey}_range_e",  1.0)) if _use_xr else None
+        _use_yr = bool(ss.get(f"{dkey}_use_vrange", False))
+        _yrlo   = float(ss.get(f"{dkey}_vrange_lo", 0.0)) if _use_yr else None
+        _yrhi   = float(ss.get(f"{dkey}_vrange_hi", 1.0)) if _use_yr else None
+        try:
+            _xw, _yw = x_sw, y_sw
+            if _xrs is not None and _xre is not None:
+                _mx = (x_sw >= _xrs) & (x_sw <= _xre)
+                if _mx.sum() > 0:
+                    _xw = x_sw[_mx]; _yw = y_sw[_mx]
+            if _yrlo is not None and _yrhi is not None:
+                _my = (_yw >= _yrlo) & (_yw <= _yrhi)
+                if _my.sum() > 0:
+                    _xw = _xw[_my]; _yw = _yw[_my]
+            if len(_yw) == 0:
+                return None
+            _idx = int(np.nanargmax(_yw) if _is_max else np.nanargmin(_yw))
+            return (float(_xw[_idx]), float(_yw[_idx]))
+        except Exception:
+            return None
+
+    return None
+
+
 def _compute_wi_det_stats_for_csv(df, trigger_col, edge, var_list, ss):
     """
     CSV 1 ファイル分の波形検査検出点を解析し、各検出点の統計 (平均・σ) を返す。
@@ -1109,6 +1214,68 @@ def _compute_wi_det_stats_for_csv(df, trigger_col, edge, var_list, ss):
                 "v_std":  float(np.std(_v_vals)) if _n > 1 else 0.0,
                 "n":      _n,
             }
+
+    # ── XY グラフ検出点 ───────────────────────────────────────────
+    _XY_POINT_TYPES = ["傾き変化点", "閾値超え検出", "Y最大値点", "Y最小値点"]
+    for var in var_list:
+        if var not in df.columns:
+            continue
+        _vkey   = f"wvol___global_{var}"
+        _xvar   = ss.get(f"{_vkey}_xy_xvar", "")
+        if not _xvar or _xvar not in df.columns:
+            continue
+        _xydet_list = ss.get(f"{_vkey}_xy_det_list", [])
+        _xy_trend_dets = [
+            (_di, _det["id"], _det["type"], f"{_vkey}_{_det['id']}")
+            for _di, _det in enumerate(_xydet_list)
+            if _det.get("type", "") in _XY_POINT_TYPES
+            and bool(ss.get(f"{_vkey}_{_det['id']}_trend_on", False))
+        ]
+        if not _xy_trend_dets:
+            continue
+        _wpre  = int(ss.get(f"{_vkey}_wpre",   50))
+        _wpost = int(ss.get(f"{_vkey}_wpost", 300))
+        try:
+            _wf_y = cached_waveforms(df, trigger_col, edge, (var,))
+            _wf_x = cached_waveforms(df, trigger_col, edge, (_xvar,))
+        except Exception:
+            continue
+        step_waves_xy = []
+        for _cy, _cx in zip(_wf_y, _wf_x):
+            _t_all = _cy["time_offset_ms"].values.astype(float)
+            if var not in _cy.columns or _xvar not in _cx.columns:
+                continue
+            _y_all = _cy[var].values.astype(float)
+            _x_all = _cx[_xvar].values.astype(float)
+            _mask  = (_t_all >= -_wpre) & (_t_all <= _wpost)
+            step_waves_xy.append((_x_all[_mask], _y_all[_mask]))
+        if not step_waves_xy:
+            continue
+        for (_di, _did, _dtype, _dkey) in _xy_trend_dets:
+            _color = _DET_COLORS[_di % len(_DET_COLORS)]
+            _x_vals, _y_vals = [], []
+            for (x_sw, y_sw) in step_waves_xy:
+                _pt = _detect_xy_point_for_trend(x_sw, y_sw, _dtype, _dkey, ss)
+                if _pt is not None:
+                    _x_vals.append(_pt[0])
+                    _y_vals.append(_pt[1])
+            _n = len(_x_vals)
+            if _n == 0:
+                continue
+            _type_lbl = _dtype
+            stats[f"{_vkey}_{_did}_xy"] = {
+                "label":   f"{_xvar}→{var} #{_di+1} {_type_lbl} [XY]",
+                "color":   _color,
+                "t_mean":  float(np.mean(_x_vals)),
+                "t_std":   float(np.std(_x_vals)) if _n > 1 else 0.0,
+                "v_mean":  float(np.mean(_y_vals)),
+                "v_std":   float(np.std(_y_vals)) if _n > 1 else 0.0,
+                "n":       _n,
+                "is_xy":   True,
+                "x_label": _xvar,
+                "y_label": var,
+            }
+
     return stats
 
 
@@ -8515,7 +8682,6 @@ with _page_tabs[2]:
                 )
                 _wi_edge_pre = st.session_state.get("wi_edge", "RISE")
                 _wi_pre_items: list = []    # {var, idx, type, id, warn}
-                _wi_pre_xy_cnt = 0
                 for _pv in num_cols:
                     _pvkey = f"wvol___global_{_pv}"
                     for _pi, _pdet in enumerate(
@@ -8536,13 +8702,19 @@ with _page_tabs[2]:
                                 "type": _ptype, "id": _pdid,
                                 "warn": _pwarn,
                             })
-                    # XY 検出点は傾向解析未対応なのでカウントだけ
-                    for _pdet in st.session_state.get(
-                            f"{_pvkey}_xy_det_list", []):
-                        _pdid = _pdet.get("id", "")
-                        if st.session_state.get(
-                                f"{_pvkey}_{_pdid}_trend_on", False):
-                            _wi_pre_xy_cnt += 1
+                    # XY 検出点も傾向解析に対応したので _wi_pre_items に追加
+                    for _pi, _pdet in enumerate(
+                            st.session_state.get(f"{_pvkey}_xy_det_list", [])):
+                        _pdid  = _pdet.get("id", "")
+                        _ptype = _pdet.get("type", "")
+                        if st.session_state.get(f"{_pvkey}_{_pdid}_trend_on", False):
+                            _xvar_conf = st.session_state.get(f"{_pvkey}_xy_xvar", "（X未設定）")
+                            _wi_pre_items.append({
+                                "var": _pv, "idx": _pi + 1,
+                                "type": _ptype, "id": _pdid,
+                                "warn": "" if _xvar_conf != "（X未設定）" else "⚠️ X変数未選択",
+                                "is_xy": True,
+                            })
 
                 _wi_pre_ok = sum(
                     1 for x in _wi_pre_items if not x["warn"])
@@ -8562,30 +8734,17 @@ with _page_tabs[2]:
                                 f"#{_px['idx']} {_px['type']}"
                                 + (f"　{_px['warn']}" if _px["warn"] else "")
                             )
-                        if _wi_pre_xy_cnt:
-                            st.caption(
-                                f"※ XY グラフ検出点 {_wi_pre_xy_cnt} 件は"
-                                "傾向解析未対応のため集計されません"
-                            )
                         st.caption(
                             "設定を変更した場合は **「📊 傾向解析を実行」を再クリック** してください。"
                         )
                     else:
-                        if _wi_pre_xy_cnt:
-                            st.warning(
-                                f"XY グラフ検出点 {_wi_pre_xy_cnt} 件に "
-                                "**📈 傾向解析に出す** が設定されていますが、"
-                                "XY 検出点は現在傾向解析に対応していません。\n\n"
-                                "**「🔍 波形検査」タブの「⏱ 時間軸」タブ**で"
-                                "検出点を追加してください。"
-                            )
-                        else:
-                            st.info(
-                                "傾向解析に送出する波形検査の検出点がありません。\n\n"
-                                "「🔍 波形検査」タブ → **「⏱ 時間軸」タブ** で"
-                                "検出点を追加し、**📈 傾向解析に出す** をオンに"
-                                "してください。"
-                            )
+                        st.info(
+                            "傾向解析に送出する波形検査の検出点がありません。\n\n"
+                            "「🔍 波形検査」タブ → **「⏱ 時間軸」タブ** または "
+                            "**「XY グラフ」タブ** で"
+                            "検出点を追加し、**📈 傾向解析に出す** をオンに"
+                            "してください。"
+                        )
 
                 # ── 解析実行 ────────────────────────────────────────
                 st.divider()
@@ -9186,6 +9345,9 @@ with _page_tabs[2]:
                                 _wi_det_keys[_dk] = {
                                     "label": _dv["label"],
                                     "color": _dv["color"],
+                                    "is_xy":   _dv.get("is_xy", False),
+                                    "x_label": _dv.get("x_label", "t"),
+                                    "y_label": _dv.get("y_label", "v"),
                                 }
                     if not _wi_det_keys:
                         # 設定状況を診断して案内
@@ -9240,9 +9402,15 @@ with _page_tabs[2]:
                             if not _wd_lbls:
                                 continue
                             with st.expander(f"**{_wd_label}**", expanded=True):
+                                _wdinfo_is_xy = _wdinfo.get("is_xy", False)
+                                _wd_xlabel = _wdinfo.get("x_label", "t [ms]")
+                                _wd_ylabel = _wdinfo.get("y_label", "v")
                                 _wd_fig = make_subplots(
                                     rows=2, cols=1,
-                                    subplot_titles=("t 値 [ms]", "v 値"),
+                                    subplot_titles=(
+                                        f"{'X: ' + _wd_xlabel if _wdinfo_is_xy else 't 値 [ms]'}",
+                                        f"{'Y: ' + _wd_ylabel if _wdinfo_is_xy else 'v 値'}",
+                                    ),
                                     vertical_spacing=0.25,
                                     row_heights=[0.5, 0.5],
                                 )
@@ -9417,7 +9585,7 @@ with _page_tabs[3]:
             st.divider()
             st.markdown("##### 💾 設定の保存・読込")
             if "wi_saved_setups" not in st.session_state:
-                st.session_state["wi_saved_setups"] = []
+                st.session_state["wi_saved_setups"] = _wi_load_from_file()
 
             # ── 保存 ──────────────────────────────────────
             _wsave_c1, _wsave_c2 = st.columns([3, 1])
@@ -9460,6 +9628,7 @@ with _page_tabs[3]:
                             "snapshot":   _snap,
                         }
                         st.session_state["wi_saved_setups"].append(_wi_saved_new)
+                        _wi_save_to_file(st.session_state["wi_saved_setups"])
                         st.toast(
                             f"✅ 「{_wi_save_name.strip()}」を保存しました"
                             f"（検出点 {_wi_n_dets} 件）"
@@ -9507,6 +9676,7 @@ with _page_tabs[3]:
                     _del_name = st.session_state[
                         "wi_saved_setups"][_wi_del_idx]["name"]
                     st.session_state["wi_saved_setups"].pop(_wi_del_idx)
+                    _wi_save_to_file(st.session_state["wi_saved_setups"])
                     st.toast(f"🗑 「{_del_name}」を削除しました")
                     st.rerun()
 
