@@ -64,6 +64,9 @@ st.set_page_config(page_title="APB タイミング解析", page_icon="🏭", lay
 
 # ── wi_saved_setups 永続化ファイルパス ──────────────────────────────
 _WI_SAVE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wi_saved_setups.json")
+_WI_CONFIG_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "wi_current_config.json"
+)
 
 st.markdown("""
 <style>
@@ -112,6 +115,41 @@ def _wi_load_from_file() -> list:
     except Exception:
         pass
     return []
+
+
+def _wi_save_config(ss, num_cols_list: list) -> None:
+    """現在の波形検査設定を wi_current_config.json に保存する。"""
+    snap: dict = {
+        "wi_trigger": ss.get("wi_trigger", ""),
+        "wi_edge":    ss.get("wi_edge", "RISE"),
+    }
+    for _v in num_cols_list:
+        _vk = f"wvol___global_{_v}"
+        for _k, _val in ss.items():
+            if isinstance(_k, str) and _k.startswith(_vk):
+                snap[_k] = _val
+    try:
+        import json as _j
+        with open(_WI_CONFIG_FILE, "w", encoding="utf-8") as _f:
+            _j.dump(snap, _f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _wi_restore_config(ss) -> bool:
+    """wi_current_config.json から波形検査設定を session_state へ復元する。
+    復元できたら True を返す。"""
+    try:
+        import json as _j
+        if not os.path.isfile(_WI_CONFIG_FILE):
+            return False
+        with open(_WI_CONFIG_FILE, "r", encoding="utf-8") as _f:
+            snap = _j.load(_f)
+        for _k, _v in snap.items():
+            ss[_k] = _v
+        return True
+    except Exception:
+        return False
 
 
 def pk(pname: str, suffix: str) -> str:
@@ -7081,7 +7119,7 @@ if _wizard_step > 0 and _wizard_pname in processes:
 # ページタブ
 # ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═
 
-_page_tabs = st.tabs(["⚙️ 画面設定", "📐 新データ評価", "📈 傾向解析", "🔍 波形検査"])
+_page_tabs = st.tabs(["⚙️ 画面設定", "📈 傾向解析", "🔍 波形検査"])
 
 with _page_tabs[0]:
 
@@ -8375,244 +8413,11 @@ with _page_tabs[0]:
                 else:
                     st.info("比較対象の工程にステップが設定されていません。")
 
-
-# Tab 2: 新データ評価
-# ═══════════════════════════════════════════════════════════════
-
-with _page_tabs[1]:
-    st.subheader("📐 新データ評価")
-
-    if not processes:
-        st.info("「解析」タブで工程を設定してください")
-    else:
-        _ev_proc_list = list(processes.keys())
-        _ev_pname = st.selectbox("工程を選択", _ev_proc_list, key="ev_page_proc")
-        _ev_trigger = st.session_state.get(pk(_ev_pname, "trigger"), bool_cols[0] if bool_cols else "")
-        _ev_edge    = st.session_state.get(pk(_ev_pname, "edge"), "RISE")
-        _ev_steps   = st.session_state.get(pk(_ev_pname, "steps_list"), [])
-        _ev_takt    = int(st.session_state.get(pk(_ev_pname, "takt"), 0))
-        _ev_bl      = st.session_state.get(pk(_ev_pname, "baseline"), {})
-        _ev_bl_meta = st.session_state.get(pk(_ev_pname, "baseline_meta"), {})
-
-        if not _ev_steps:
-            st.info("「解析」タブでこの工程のステップを設定してください")
-        elif not _ev_bl:
-            st.warning("基準値が未登録です。「解析」タブのガントチャート下「📐 基準値を登録・編集」で登録してください。")
-        else:
-            st.success(
-                f"基準値: {_ev_bl_meta.get('source','?')} / "
-                f"{_ev_bl_meta.get('n_cycles','?')} サイクル "
-                f"({_ev_bl_meta.get('created_at','')})"
-            )
-
-            # ── 評価CSV: サイドバーの csv_store から選択 ─────────────
-            _ev_csv_store = st.session_state.get("csv_store", {})
-            _ev_df = None
-            if not _ev_csv_store:
-                st.info("サイドバーの「② 比較CSV」にCSVをアップロードしてください")
-            else:
-                _ev_csv_keys = list(_ev_csv_store.keys())
-                _ev_sel = st.selectbox(
-                    "評価するCSV",
-                    _ev_csv_keys,
-                    format_func=lambda k: (
-                        "📌 " + _ev_csv_store[k].get("label", k)
-                        if _ev_csv_store[k].get("is_ref")
-                        else "📊 " + _ev_csv_store[k].get("label", k)
-                    ),
-                    key=f"ev_page_csv_sel_{_ev_pname}",
-                )
-                _ev_df = _ev_csv_store[_ev_sel]["df"]
-                st.caption(f"📄 {_ev_csv_store[_ev_sel].get('label', _ev_sel)}  （{len(_ev_df):,} 行）")
-
-            if _ev_df is not None and len(_ev_df) > 0:
-
-                _ev_steps_json = json.dumps(_ev_steps, ensure_ascii=False, sort_keys=True)
-                try:
-                    _ev_result = cached_analyze_v2(_ev_df, _ev_trigger, _ev_edge, _ev_steps_json)
-                except Exception as _e:
-                    st.error(f"解析エラー: {_e}")
-                    _ev_result = None
-
-                if _ev_result is not None and len(_ev_result) > 0:
-                    # ガントチャート（キャッシュ済みラッパーで再計算を抑止）
-                    _ev_fig, _ev_step_stats = cached_build_gantt(
-                        _ev_result, _ev_steps_json, _ev_takt
-                    )
-                    if _ev_fig:
-                        st.markdown("**ガントチャート（評価データ）**")
-                        st.plotly_chart(_ev_fig, width="stretch",
-                                        key=f"evpage_gantt_{_ev_pname}")
-
-                    # σ倍率 & サマリーテーブル
-                    _ev_sigma = st.number_input(
-                        "異常判定 (σ倍)", value=3.0, step=0.5, min_value=1.0,
-                        key=f"ev_page_sigma_{_ev_pname}",
-                    )
-                    _ev_delta_rows = []
-                    for _s in (_ev_step_stats or []):
-                        _sn = _s["name"]
-                        _sm = _s["mode"]
-                        _ble = _ev_bl.get(_sn, {})
-                        _col = f"{_sn}_遅れ[ms]" if _sm == "single" else f"{_sn}_dur[ms]"
-                        _ref = _ble.get("ref_ms") if _sm == "single" else _ble.get("ref_dur_ms")
-                        _std = _ble.get("std_ms", 0.0) if _sm == "single" else _ble.get("std_dur_ms", 0.0)
-                        if _col not in _ev_result.columns or _ref is None:
-                            continue
-                        _vals = _ev_result[_col].dropna().values
-                        if len(_vals) == 0:
-                            continue
-                        _deltas = _vals - _ref
-                        _thresh = _ev_sigma * _std if _std > 0 else None
-                        _ng = int(np.sum(np.abs(_deltas) > _thresh)) if _thresh else 0
-                        _rate = _ng / len(_deltas) * 100
-                        _ev_delta_rows.append({
-                            "ステップ":     _sn,
-                            "基準[ms]":    round(_ref, 1),
-                            "評価平均[ms]": round(float(np.mean(_vals)), 1),
-                            "差分平均[ms]": round(float(np.mean(_deltas)), 1),
-                            "差分σ[ms]":   round(float(np.std(_deltas)), 1),
-                            "NG件数":       _ng,
-                            "NG率":         f"{_rate:.1f}%",
-                            "判定":         "🔴" if _rate > 0 else "🟢",
-                        })
-                    if _ev_delta_rows:
-                        st.markdown("**ステップ別サマリー**")
-                        st.dataframe(pd.DataFrame(_ev_delta_rows),
-                                     hide_index=True, width="stretch")
-
-                    # ── 波形監視 NG サマリー ──────────────────────────
-                    _wv_ng_by_step: dict = {}   # {step_name: {var: result_dict}}
-                    _wv_ng_rows = []
-                    for _ev_s in _ev_steps:
-                        _ev_sn  = _ev_s.get("name", "")
-                        _ev_wvv = [v for v in _ev_s.get("waveform_vars", [])
-                                   if v in _ev_df.columns]
-                        if not _ev_wvv:
-                            continue
-                        _ev_stat_s = next(
-                            (s for s in (_ev_step_stats or []) if s["name"] == _ev_sn), None
-                        )
-                        if _ev_stat_s is None:
-                            continue
-                        try:
-                            _ev_wv_res = _compute_wv_ng(
-                                _ev_df, _ev_trigger, _ev_edge,
-                                _ev_s, _ev_pname, _ev_result,
-                            )
-                        except Exception:
-                            _ev_wv_res = {}
-                        _wv_ng_by_step[_ev_sn] = _ev_wv_res
-                        for _ev_v, _ev_r in _ev_wv_res.items():
-                            _ev_nr = (
-                                _ev_r["ng_count"] / _ev_r["total"] * 100
-                                if _ev_r["total"] > 0 else 0.0
-                            )
-                            _wv_ng_rows.append({
-                                "ステップ":   _ev_sn,
-                                "変数":      _ev_v,
-                                "サイクル数":  _ev_r["total"],
-                                "NG数":      _ev_r["ng_count"],
-                                "NG率":      f"{_ev_nr:.1f}%",
-                                "判定":      "🔴" if _ev_r["ng_count"] > 0 else "🟢",
-                            })
-                    if _wv_ng_rows:
-                        st.markdown("**📈 波形監視 NG サマリー**")
-                        st.dataframe(
-                            pd.DataFrame(_wv_ng_rows),
-                            hide_index=True, width="stretch",
-                        )
-
-                    # ステップ詳細（差分ヒストグラム）
-                    st.divider()
-                    st.markdown("**ステップ詳細（基準値との差分）**")
-                    _ev_step_names = [s["name"] for s in (_ev_step_stats or [])]
-                    if _ev_step_names:
-                        _ev_sel = st.selectbox(
-                            "詳細を見るステップ", _ev_step_names,
-                            key=f"ev_page_sel_{_ev_pname}",
-                            label_visibility="collapsed",
-                        )
-                        _ev_stat = next(
-                            (s for s in (_ev_step_stats or []) if s["name"] == _ev_sel), None)
-                        _ev_step_cfg = next(
-                            (s for s in _ev_steps if s.get("name") == _ev_sel), None)
-                        if _ev_stat and _ev_step_cfg:
-                            # ウィジェットキー重複を避けるためサフィックス付き pname を使用
-                            _pname_ev = _ev_pname + "::ev"
-                            # 基準値を ev 用キーにコピーして render 内の baseline 参照を解決
-                            _bl_src = pk(_ev_pname, "baseline")
-                            if _bl_src in st.session_state:
-                                st.session_state[pk(_pname_ev, "baseline")] = (
-                                    st.session_state[_bl_src]
-                                )
-                            render_step_detail(
-                                _ev_df, _ev_trigger, _ev_edge,
-                                _ev_stat, _ev_step_cfg, _pname_ev, _ev_result,
-                            )
-
-                    # サイクル別判定テーブル（ベクトル化で高速化）
-                    st.divider()
-                    st.markdown("**サイクル別判定**")
-                    _ev_cyc_df = pd.DataFrame({"サイクル#": _ev_result["サイクル#"].astype(int)})
-                    _ng_any = pd.Series(False, index=_ev_result.index)
-                    for _s in (_ev_step_stats or []):
-                        _sn = _s["name"]
-                        _sm = _s["mode"]
-                        _ble = _ev_bl.get(_sn, {})
-                        _col = (f"{_sn}_遅れ[ms]" if _sm == "single"
-                                else f"{_sn}_dur[ms]")
-                        _ref = (_ble.get("ref_ms") if _sm == "single"
-                                else _ble.get("ref_dur_ms"))
-                        _std = (_ble.get("std_ms", 0.0) if _sm == "single"
-                                else _ble.get("std_dur_ms", 0.0))
-                        if _col not in _ev_result.columns or _ref is None:
-                            continue
-                        _delta_s = _ev_result[_col] - _ref          # Series演算（高速）
-                        _thresh = _ev_sigma * _std if _std > 0 else None
-                        _is_ng_s = (
-                            _delta_s.abs() > _thresh
-                            if _thresh is not None
-                            else pd.Series(False, index=_ev_result.index)
-                        )
-                        _ng_any |= _is_ng_s
-                        # 書式はリスト内包表記で（行ループより大幅に速い）
-                        _ev_cyc_df[_sn] = [
-                            f"{'🔴 ' if ng else ''}{d:+.1f}ms" if pd.notna(d) else ""
-                            for d, ng in zip(_delta_s, _is_ng_s)
-                        ]
-                    # 波形NG列を追加（_wv_ng_by_step は上の波形NGサマリーブロックで計算済み）
-                    for _sn_w, _wv_res_w in _wv_ng_by_step.items():
-                        for _v_w, _wr_w in _wv_res_w.items():
-                            _flags_w = _wr_w.get("ng_flags", [])
-                            # サイクル数が result と一致しない場合はパディング
-                            _padded = (_flags_w + [False] * len(_ev_result))[:len(_ev_result)]
-                            _wv_ng_s = pd.Series(_padded, index=_ev_result.index)
-                            _ng_any |= _wv_ng_s
-                            _col_label = f"📈{_sn_w}\n{_v_w}"
-                            _ev_cyc_df[_col_label] = [
-                                "🔴 NG" if ng else "" for ng in _wv_ng_s
-                            ]
-                    _ev_cyc_df["総合判定"] = [
-                        "🔴 NG" if ng else "🟢 OK" for ng in _ng_any
-                    ]
-                    if not _ev_cyc_df.empty:
-                        st.dataframe(_ev_cyc_df, hide_index=True, width="stretch")
-                        st.download_button(
-                            "サイクル判定CSVダウンロード",
-                            _ev_cyc_df.to_csv(index=False, encoding="utf-8-sig"),
-                            f"{_ev_pname}_eval.csv",
-                            key=f"ev_page_dl_{_ev_pname}",
-                        )
-            else:
-                st.caption("評価したいCSVをアップロードしてください")
-
-
 # ═══════════════════════════════════════════════════════════════
 # 傾向解析タブ
 # ═══════════════════════════════════════════════════════════════
 
-with _page_tabs[2]:
+with _page_tabs[1]:
     import re as _re
 
     st.subheader("📈 傾向解析")
@@ -9518,13 +9323,19 @@ with _page_tabs[2]:
 # 🔍 波形検査タブ（ステップ依存なしの独立波形監視）
 # ═══════════════════════════════════════════════════════════════
 
-with _page_tabs[3]:
+with _page_tabs[2]:
     st.subheader("🔍 波形検査")
     st.caption("工程・ステップ設定に関係なく、アナログ変数の波形を直接確認・検査条件を設定できます")
 
     if not num_cols:
         st.info("アナログ（数値）変数が見つかりません。CSVを読み込んでください。")
     else:
+        # ── 初回セッションのみ: ファイルから設定を復元 ─────────────
+        if "wi_config_loaded" not in st.session_state:
+            _restored = _wi_restore_config(st.session_state)
+            st.session_state["wi_config_loaded"] = True
+            if _restored:
+                st.rerun()  # 復元した値をウィジェットに反映するため即 rerun
         # ══════════════════════════════════════════════════════════════
         # 📋 登録サマリー & 保存・読込
         # ══════════════════════════════════════════════════════════════
@@ -9789,3 +9600,5 @@ with _page_tabs[3]:
                         _ref_df=_wi_ref_overlay,
                         _compare_entries=_wi_cmp_entries if _wi_cmp_entries else None,
                     )
+                    # 現在の設定を自動保存（サーバー再起動対策）
+                    _wi_save_config(st.session_state, num_cols)
