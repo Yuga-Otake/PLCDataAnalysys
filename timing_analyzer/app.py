@@ -8508,6 +8508,85 @@ with _page_tabs[2]:
                                 key=f"tr_lbl_{_tr_pname}_{_tk_wkey}",
                             )
 
+                # ── 波形検査 設定確認パネル ─────────────────────────────
+                # ※ 傾向解析対象は時間軸検出点のみ（XY は今後対応）
+                _wi_trig_pre = st.session_state.get(
+                    "wi_trigger", bool_cols[0] if bool_cols else "（未設定）"
+                )
+                _wi_edge_pre = st.session_state.get("wi_edge", "RISE")
+                _wi_pre_items: list = []    # {var, idx, type, id, warn}
+                _wi_pre_xy_cnt = 0
+                for _pv in num_cols:
+                    _pvkey = f"wvol___global_{_pv}"
+                    for _pi, _pdet in enumerate(
+                            st.session_state.get(f"{_pvkey}_t_det_list", [])):
+                        _pdid  = _pdet.get("id", "")
+                        _ptype = _pdet.get("type", "")
+                        if st.session_state.get(
+                                f"{_pvkey}_{_pdid}_trend_on", False):
+                            # 傾き変化点で閾値=0 は実際には検出しない
+                            _pwarn = ""
+                            if _ptype == "傾き変化点":
+                                _pth = float(st.session_state.get(
+                                    f"{_pvkey}_{_pdid}_thresh", 0.0))
+                                if _pth <= 0.0:
+                                    _pwarn = "⚠️ 閾値=0（検出されません）"
+                            _wi_pre_items.append({
+                                "var": _pv, "idx": _pi + 1,
+                                "type": _ptype, "id": _pdid,
+                                "warn": _pwarn,
+                            })
+                    # XY 検出点は傾向解析未対応なのでカウントだけ
+                    for _pdet in st.session_state.get(
+                            f"{_pvkey}_xy_det_list", []):
+                        _pdid = _pdet.get("id", "")
+                        if st.session_state.get(
+                                f"{_pvkey}_{_pdid}_trend_on", False):
+                            _wi_pre_xy_cnt += 1
+
+                _wi_pre_ok = sum(
+                    1 for x in _wi_pre_items if not x["warn"])
+                with st.expander(
+                    f"🔍 波形検査 設定確認　"
+                    f"トリガー: **{_wi_trig_pre}** / {_wi_edge_pre}　"
+                    f"傾向送出: **{_wi_pre_ok}** 件"
+                    + (f"（⚠️ {len(_wi_pre_items)-_wi_pre_ok} 件 閾値=0）"
+                       if len(_wi_pre_items) > _wi_pre_ok else ""),
+                    expanded=(len(_wi_pre_items) == 0),
+                ):
+                    if _wi_pre_items:
+                        for _px in _wi_pre_items:
+                            _icon = "📈" if not _px["warn"] else "⚠️"
+                            st.markdown(
+                                f"{_icon} **{_px['var']}** "
+                                f"#{_px['idx']} {_px['type']}"
+                                + (f"　{_px['warn']}" if _px["warn"] else "")
+                            )
+                        if _wi_pre_xy_cnt:
+                            st.caption(
+                                f"※ XY グラフ検出点 {_wi_pre_xy_cnt} 件は"
+                                "傾向解析未対応のため集計されません"
+                            )
+                        st.caption(
+                            "設定を変更した場合は **「📊 傾向解析を実行」を再クリック** してください。"
+                        )
+                    else:
+                        if _wi_pre_xy_cnt:
+                            st.warning(
+                                f"XY グラフ検出点 {_wi_pre_xy_cnt} 件に "
+                                "**📈 傾向解析に出す** が設定されていますが、"
+                                "XY 検出点は現在傾向解析に対応していません。\n\n"
+                                "**「🔍 波形検査」タブの「⏱ 時間軸」タブ**で"
+                                "検出点を追加してください。"
+                            )
+                        else:
+                            st.info(
+                                "傾向解析に送出する波形検査の検出点がありません。\n\n"
+                                "「🔍 波形検査」タブ → **「⏱ 時間軸」タブ** で"
+                                "検出点を追加し、**📈 傾向解析に出す** をオンに"
+                                "してください。"
+                            )
+
                 # ── 解析実行 ────────────────────────────────────────
                 st.divider()
                 if st.button(
