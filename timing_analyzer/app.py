@@ -8462,6 +8462,15 @@ with _page_tabs[1]:
 
             # 重複を除去（multiselect の session_state がズレたとき対策）
             _tr_sel_list = list(dict.fromkeys(locals().get("_tr_sel", [])))
+
+            # ── 並び順を session_state で管理 ────────────────────
+            _tr_order_key = f"tr_order_{_tr_pname}"
+            _cur_ord = st.session_state.get(_tr_order_key, [])
+            _synced  = [k for k in _cur_ord if k in _tr_sel_list]
+            _synced += [k for k in _tr_sel_list if k not in _synced]
+            st.session_state[_tr_order_key] = _synced
+            _tr_sel_list = _synced
+
             if _tr_sel_list:
                 with st.expander("ラベル設定（グラフX軸に使用）", expanded=False):
                     _n_cols = min(len(_tr_sel_list), 4)
@@ -8479,6 +8488,30 @@ with _page_tabs[1]:
                                 value=st.session_state[_tr_labels_key][_tk],
                                 key=f"tr_lbl_{_tr_pname}_{_tk_wkey}",
                             )
+
+                # ── CSV 並び順変更 ────────────────────────────────────
+                if len(_tr_sel_list) > 1:
+                    with st.expander("↕️ CSV の並び順を変更", expanded=False):
+                        for _oi in range(len(_tr_sel_list)):
+                            _ok = _tr_sel_list[_oi]
+                            _oc1, _oc2, _oc3 = st.columns([6, 1, 1])
+                            _lbl_d = _tr_csv_store.get(_ok, {}).get(
+                                "label", os.path.basename(_ok) if os.sep in _ok else _ok
+                            )
+                            with _oc1:
+                                st.write(f"**{_oi + 1}.** {_lbl_d}")
+                            with _oc2:
+                                if _oi > 0:
+                                    if st.button("↑", key=f"tr_up_{_tr_pname}_{_oi}"):
+                                        _ord = st.session_state[_tr_order_key]
+                                        _ord[_oi - 1], _ord[_oi] = _ord[_oi], _ord[_oi - 1]
+                                        st.rerun()
+                            with _oc3:
+                                if _oi < len(_tr_sel_list) - 1:
+                                    if st.button("↓", key=f"tr_dn_{_tr_pname}_{_oi}"):
+                                        _ord = st.session_state[_tr_order_key]
+                                        _ord[_oi], _ord[_oi + 1] = _ord[_oi + 1], _ord[_oi]
+                                        st.rerun()
 
                 # ── 波形検査 設定確認パネル ─────────────────────────────
                 # ※ 傾向解析対象は時間軸検出点のみ（XY は今後対応）
