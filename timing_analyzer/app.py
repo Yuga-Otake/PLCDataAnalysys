@@ -1375,7 +1375,11 @@ def _compute_wi_det_stats_for_csv(df, trigger_col, edge, var_list, ss):
         for (_fdi, _fdid, _fdkey) in _fm_trend_dets:
             _color    = _DET_COLORS[_fdi % len(_DET_COLORS)]
             _fm_expr  = str(ss.get(f"{_fdkey}_expr", ""))
+            _fm_label = f"{var} #{_fdi + 1} 数式"
             if not _fm_expr.strip():
+                stats.setdefault("__formula_warns__", []).append(
+                    f"⚠️ {_fm_label}: 数式が未入力です"
+                )
                 continue
             _fm_py    = _translate_formula(_fm_expr)
             _fm_vals: list = []
@@ -1391,6 +1395,18 @@ def _compute_wi_det_stats_for_csv(df, trigger_col, edge, var_list, ss):
                     _fm_vals.append(float(_res))
             _n = len(_fm_vals)
             if _n == 0:
+                if not _ref_fm:
+                    _why = "参照先の検出点がありません（傾き変化点・閾値超え検出等を先に追加してください）"
+                elif all(all(p is None for p in pts) for pts in _ref_fm.values()):
+                    _why = (
+                        f"参照先の検出点が全サイクルで未検出です"
+                        f"（傾き変化点なら閾値 > 0 が必要です）"
+                    )
+                else:
+                    _why = f"数式 `{_fm_expr}` の評価が全サイクルで None でした（変数名 #N.t / #N.v を確認してください）"
+                stats.setdefault("__formula_warns__", []).append(
+                    f"⚠️ {_fm_label} [{_fm_expr}]: {_why}"
+                )
                 continue
             _short_expr = _fm_expr if len(_fm_expr) <= 20 else _fm_expr[:17] + "..."
             stats[f"{_vkey}_{_fdid}_formula"] = {
@@ -8753,6 +8769,21 @@ with _page_tabs[1]:
                             for _el, _em in _wi_errs:
                                 st.error(f"**{_el}**: {_em}")
 
+                    # ── 数式検出点 診断警告 ───────────────────────────
+                    _fm_warn_all: list = []
+                    for _r in _tr_res_list:
+                        for _fw in _r.get("wi_det_stats", {}).get("__formula_warns__", []):
+                            _entry = f"[{_r['label']}] {_fw}"
+                            if _entry not in _fm_warn_all:
+                                _fm_warn_all.append(_entry)
+                    if _fm_warn_all:
+                        with st.expander(
+                            f"🧮 数式検出点 診断 ({len(_fm_warn_all)} 件)",
+                            expanded=True,
+                        ):
+                            for _fw in _fm_warn_all:
+                                st.warning(_fw)
+
                     # ── チャートタイプ切り替え ────────────────────────
                     _chart_mode = st.radio(
                         "表示形式",
@@ -9274,6 +9305,8 @@ with _page_tabs[1]:
                     _wi_det_keys: dict = {}
                     for _r in _tr_res_list:
                         for _dk, _dv in _r.get("wi_det_stats", {}).items():
+                            if _dk.startswith("__"):  # 内部管理キーをスキップ
+                                continue
                             if _dk not in _wi_det_keys:
                                 _wi_det_keys[_dk] = {
                                     "label":      _dv["label"],
