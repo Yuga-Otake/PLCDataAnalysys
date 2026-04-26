@@ -117,6 +117,19 @@ def _wi_load_from_file() -> list:
     return []
 
 
+_WI_SKIP_KEY_SUFFIXES = (
+    "_t_det_add",   # ＋ 検出点を追加 ボタン（時間軸）
+    "_xy_det_add",  # ＋ 検出点を追加 ボタン（XY）
+    "_del",         # 🗑 削除ボタン
+)
+
+
+def _wi_skip_key(k: str) -> bool:
+    """ウィジェット（ボタン等）として使われるキーは session_state への
+    直接書き込みが Streamlit に禁止されているためスキップする。"""
+    return any(k.endswith(s) for s in _WI_SKIP_KEY_SUFFIXES)
+
+
 def _wi_save_config(ss, num_cols_list: list) -> None:
     """現在の波形検査設定を wi_current_config.json に保存する。"""
     snap: dict = {
@@ -126,7 +139,7 @@ def _wi_save_config(ss, num_cols_list: list) -> None:
     for _v in num_cols_list:
         _vk = f"wvol___global_{_v}"
         for _k, _val in ss.items():
-            if isinstance(_k, str) and _k.startswith(_vk):
+            if isinstance(_k, str) and _k.startswith(_vk) and not _wi_skip_key(_k):
                 snap[_k] = _val
     try:
         import json as _j
@@ -146,6 +159,8 @@ def _wi_restore_config(ss) -> bool:
         with open(_WI_CONFIG_FILE, "r", encoding="utf-8") as _f:
             snap = _j.load(_f)
         for _k, _v in snap.items():
+            if _wi_skip_key(_k):
+                continue  # ボタンキーは書き込み禁止のためスキップ
             ss[_k] = _v
         return True
     except Exception:
