@@ -1244,13 +1244,15 @@ def _compute_wi_det_stats_for_csv(df, trigger_col, edge, var_list, ss):
             _type_lbl = {"傾き変化点": "傾き変化点", "閾値超え検出": "閾値超え検出",
                          "最大値点": "最大値点", "最小値点": "最小値点"}.get(_dtype, _dtype)
             stats[f"{_vkey}_{_did}"] = {
-                "label":  f"{var} #{_di+1} {_type_lbl}",
-                "color":  _color,
-                "t_mean": float(np.mean(_t_vals)),
-                "t_std":  float(np.std(_t_vals)) if _n > 1 else 0.0,
-                "v_mean": float(np.mean(_v_vals)),
-                "v_std":  float(np.std(_v_vals)) if _n > 1 else 0.0,
-                "n":      _n,
+                "label":   f"{var} #{_di+1} {_type_lbl}",
+                "color":   _color,
+                "t_mean":  float(np.mean(_t_vals)),
+                "t_std":   float(np.std(_t_vals)) if _n > 1 else 0.0,
+                "t_range": float(np.max(_t_vals) - np.min(_t_vals)) if _n > 1 else 0.0,
+                "v_mean":  float(np.mean(_v_vals)),
+                "v_std":   float(np.std(_v_vals)) if _n > 1 else 0.0,
+                "v_range": float(np.max(_v_vals) - np.min(_v_vals)) if _n > 1 else 0.0,
+                "n":       _n,
             }
 
     # ── XY グラフ検出点 ───────────────────────────────────────────
@@ -1306,12 +1308,88 @@ def _compute_wi_det_stats_for_csv(df, trigger_col, edge, var_list, ss):
                 "color":   _color,
                 "t_mean":  float(np.mean(_x_vals)),
                 "t_std":   float(np.std(_x_vals)) if _n > 1 else 0.0,
+                "t_range": float(np.max(_x_vals) - np.min(_x_vals)) if _n > 1 else 0.0,
                 "v_mean":  float(np.mean(_y_vals)),
                 "v_std":   float(np.std(_y_vals)) if _n > 1 else 0.0,
+                "v_range": float(np.max(_y_vals) - np.min(_y_vals)) if _n > 1 else 0.0,
                 "n":       _n,
                 "is_xy":   True,
                 "x_label": _xvar,
                 "y_label": var,
+            }
+
+    # ── 数式検出点（他の検出点を参照する計算式）──────────────────────
+    for var in var_list:
+        if var not in df.columns:
+            continue
+        _vkey = f"wvol___global_{var}"
+        _tdet_list = ss.get(f"{_vkey}_t_det_list", [])
+        # 数式型で傾向解析 ON のものを収集
+        _fm_trend_dets = [
+            (_di, _det["id"], f"{_vkey}_{_det['id']}")
+            for _di, _det in enumerate(_tdet_list)
+            if _det.get("type", "") == "数式"
+            and bool(ss.get(f"{_vkey}_{_det['id']}_trend_on", False))
+        ]
+        if not _fm_trend_dets:
+            continue
+        _wpre  = int(ss.get(f"{_vkey}_wpre",   50))
+        _wpost = int(ss.get(f"{_vkey}_wpost", 300))
+        try:
+            _wf_fm = cached_waveforms(df, trigger_col, edge, (var,))
+        except Exception:
+            continue
+        _sw_fm = []
+        for _cyc_df in _wf_fm:
+            _t_all = _cyc_df["time_offset_ms"].values.astype(float)
+            if var not in _cyc_df.columns:
+                continue
+            _v_all = _cyc_df[var].values.astype(float)
+            _mask  = (_t_all >= -_wpre) & (_t_all <= _wpost)
+            _sw_fm.append((_t_all[_mask], _v_all[_mask]))
+        if not _sw_fm:
+            continue
+        # 数式が参照する全非数式検出点をサイクルごとに計算（trend_on 不問）
+        _ref_fm: dict = {}  # {di: [(t,v)|None, ...]}
+        for _rdi, _rdet in enumerate(_tdet_list):
+            _rtype = _rdet.get("type", "")
+            _rdkey = f"{_vkey}_{_rdet['id']}"
+            if _rtype in _POINT_TYPES:
+                _ref_fm[_rdi] = _detect_point_for_trend(_sw_fm, _rtype, _rdkey, ss)
+        # 各数式検出点を評価
+        for (_fdi, _fdid, _fdkey) in _fm_trend_dets:
+            _color    = _DET_COLORS[_fdi % len(_DET_COLORS)]
+            _fm_expr  = str(ss.get(f"{_fdkey}_expr", ""))
+            if not _fm_expr.strip():
+                continue
+            _fm_py    = _translate_formula(_fm_expr)
+            _fm_vals: list = []
+            for _ci in range(len(_sw_fm)):
+                _vd: dict = {}
+                for _rdi, _rpts in _ref_fm.items():
+                    if _ci < len(_rpts) and _rpts[_ci] is not None:
+                        _rc, _rv = _rpts[_ci]
+                        _vd[f"p{_rdi + 1}t"] = _rc
+                        _vd[f"p{_rdi + 1}v"] = _rv
+                _res = _safe_eval_expr(_fm_py, _vd)
+                if _res is not None:
+                    _fm_vals.append(float(_res))
+            _n = len(_fm_vals)
+            if _n == 0:
+                continue
+            _short_expr = _fm_expr if len(_fm_expr) <= 20 else _fm_expr[:17] + "..."
+            stats[f"{_vkey}_{_fdid}_formula"] = {
+                "label":      f"{var} #{_fdi + 1} 数式 [{_short_expr}]",
+                "color":      _color,
+                "t_mean":     float(np.mean(_fm_vals)),
+                "t_std":      float(np.std(_fm_vals)) if _n > 1 else 0.0,
+                "t_range":    float(np.max(_fm_vals) - np.min(_fm_vals)) if _n > 1 else 0.0,
+                "v_mean":     0.0,
+                "v_std":      0.0,
+                "v_range":    0.0,
+                "n":          _n,
+                "is_formula": True,
+                "expr":       _fm_expr,
             }
 
     return stats
@@ -9181,11 +9259,13 @@ with _page_tabs[1]:
                         for _dk, _dv in _r.get("wi_det_stats", {}).items():
                             if _dk not in _wi_det_keys:
                                 _wi_det_keys[_dk] = {
-                                    "label": _dv["label"],
-                                    "color": _dv["color"],
-                                    "is_xy":   _dv.get("is_xy", False),
-                                    "x_label": _dv.get("x_label", "t"),
-                                    "y_label": _dv.get("y_label", "v"),
+                                    "label":      _dv["label"],
+                                    "color":      _dv["color"],
+                                    "is_xy":      _dv.get("is_xy", False),
+                                    "is_formula": _dv.get("is_formula", False),
+                                    "x_label":    _dv.get("x_label", "t"),
+                                    "y_label":    _dv.get("y_label", "v"),
+                                    "expr":       _dv.get("expr", ""),
                                 }
                     if not _wi_det_keys:
                         # 設定状況を診断して案内
@@ -9218,16 +9298,24 @@ with _page_tabs[1]:
                     if _wi_det_keys:
                         st.caption(
                             "「波形検査」タブで **📈 傾向解析に出す** を有効にした検出点の、"
-                            "CSVファイルごとの t・v 値（平均 ± σ）の傾向です。"
+                            "CSVファイルごとの傾向です。"
                         )
                         for _wdk, _wdinfo in _wi_det_keys.items():
-                            _wd_label = _wdinfo["label"]
-                            _wd_color = _wdinfo["color"]
-                            _wd_lbls: list = []
-                            _wd_t_means: list = []
-                            _wd_t_stds:  list = []
-                            _wd_v_means: list = []
-                            _wd_v_stds:  list = []
+                            _wd_label          = _wdinfo["label"]
+                            _wd_color          = _wdinfo["color"]
+                            _wdinfo_is_xy      = _wdinfo.get("is_xy", False)
+                            _wdinfo_is_formula = _wdinfo.get("is_formula", False)
+                            _wd_xlabel         = _wdinfo.get("x_label", "t [ms]")
+                            _wd_ylabel         = _wdinfo.get("y_label", "v")
+                            # ── per-CSV データ収集 ──────────────────────
+                            _wd_lbls: list     = []
+                            _wd_t_means: list  = []
+                            _wd_t_stds:  list  = []
+                            _wd_t_ranges: list = []
+                            _wd_v_means: list  = []
+                            _wd_v_stds:  list  = []
+                            _wd_v_ranges: list = []
+                            _wd_ns: list       = []
                             for _r in _tr_res_list:
                                 _dstat = _r.get("wi_det_stats", {}).get(_wdk)
                                 if _dstat is None:
@@ -9235,118 +9323,282 @@ with _page_tabs[1]:
                                 _wd_lbls.append(_r["label"])
                                 _wd_t_means.append(_dstat["t_mean"])
                                 _wd_t_stds.append(_dstat["t_std"])
+                                _wd_t_ranges.append(_dstat.get("t_range", 0.0))
                                 _wd_v_means.append(_dstat["v_mean"])
                                 _wd_v_stds.append(_dstat["v_std"])
+                                _wd_v_ranges.append(_dstat.get("v_range", 0.0))
+                                _wd_ns.append(_dstat.get("n", 1))
                             if not _wd_lbls:
                                 continue
                             with st.expander(f"**{_wd_label}**", expanded=True):
-                                _wdinfo_is_xy = _wdinfo.get("is_xy", False)
-                                _wd_xlabel = _wdinfo.get("x_label", "t [ms]")
-                                _wd_ylabel = _wdinfo.get("y_label", "v")
-                                _wd_fig = make_subplots(
-                                    rows=2, cols=1,
-                                    subplot_titles=(
-                                        f"{'X: ' + _wd_xlabel if _wdinfo_is_xy else 't 値 [ms]'}",
-                                        f"{'Y: ' + _wd_ylabel if _wdinfo_is_xy else 'v 値'}",
-                                    ),
-                                    vertical_spacing=0.25,
-                                    row_heights=[0.5, 0.5],
-                                )
-                                # t 値 ±1σ 帯
-                                if len(_wd_lbls) > 1:
-                                    _wd_fig.add_trace(go.Scatter(
-                                        x=_wd_lbls + _wd_lbls[::-1],
-                                        y=([m + s for m, s in
-                                            zip(_wd_t_means, _wd_t_stds)]
-                                           + [m - s for m, s in
-                                              zip(_wd_t_means[::-1],
-                                                  _wd_t_stds[::-1])]),
-                                        fill="toself",
-                                        fillcolor="rgba(68,114,196,0.15)",
-                                        line=dict(width=0),
-                                        showlegend=True, name="t ±1σ",
-                                    ), row=1, col=1)
-                                # t 値 平均線
-                                _wd_fig.add_trace(go.Scatter(
-                                    x=_wd_lbls, y=_wd_t_means,
-                                    mode="lines+markers", name="t 平均 [ms]",
-                                    line=dict(color=_wd_color, width=2),
-                                    marker=dict(size=9, color=_wd_color),
-                                    hovertemplate=(
-                                        "%{x}<br>t 平均: %{y:.3f} ms"
-                                        "<br>σ: %{customdata:.3f} ms<extra></extra>"
-                                    ),
-                                    customdata=_wd_t_stds,
-                                ), row=1, col=1)
-                                # v 値 ±1σ 帯
-                                if len(_wd_lbls) > 1:
-                                    _wd_fig.add_trace(go.Scatter(
-                                        x=_wd_lbls + _wd_lbls[::-1],
-                                        y=([m + s for m, s in
-                                            zip(_wd_v_means, _wd_v_stds)]
-                                           + [m - s for m, s in
-                                              zip(_wd_v_means[::-1],
-                                                  _wd_v_stds[::-1])]),
-                                        fill="toself",
-                                        fillcolor="rgba(68,114,196,0.15)",
-                                        line=dict(width=0),
-                                        showlegend=True, name="v ±1σ",
-                                    ), row=2, col=1)
-                                # v 値 平均線
-                                _wd_fig.add_trace(go.Scatter(
-                                    x=_wd_lbls, y=_wd_v_means,
-                                    mode="lines+markers", name="v 平均",
-                                    line=dict(color=_wd_color, width=2,
-                                              dash="dash"),
-                                    marker=dict(size=9, color=_wd_color,
-                                                symbol="diamond"),
-                                    hovertemplate=(
-                                        "%{x}<br>v 平均: %{y:.4f}"
-                                        "<br>σ: %{customdata:.4f}<extra></extra>"
-                                    ),
-                                    customdata=_wd_v_stds,
-                                ), row=2, col=1)
-                                _wd_fig.update_layout(
-                                    title=dict(
-                                        text=f"<b>{_wd_label}</b>　傾向",
-                                        font=dict(size=13),
-                                    ),
-                                    height=560,
-                                    margin=dict(t=60, b=48, l=80, r=100),
-                                    showlegend=True,
-                                    legend=dict(orientation="h", y=1.04,
-                                                x=1, xanchor="right"),
-                                    hovermode="x unified",
-                                )
-                                _wd_fig.update_yaxes(
-                                    title_text="t [ms]", row=1, col=1)
-                                _wd_fig.update_yaxes(
-                                    title_text="v", row=2, col=1)
-                                _wd_fig.update_xaxes(
-                                    title_text="時期", row=2, col=1)
-                                st.plotly_chart(
-                                    _wd_fig, width="stretch",
-                                    key=f"wi_det_tr_{_wdk.replace('/', '_')}",
-                                )
-                                # 統計サマリーテーブル
-                                _wd_stat_rows = [
-                                    {
-                                        "時期":        _sl,
-                                        "t 平均 [ms]": f"{_tm:.3f}",
-                                        "t σ [ms]":   f"{_ts_:.3f}",
-                                        "v 平均":      f"{_vm:.4f}",
-                                        "v σ":         f"{_vs:.4f}",
-                                    }
-                                    for _sl, _tm, _ts_, _vm, _vs in zip(
-                                        _wd_lbls, _wd_t_means, _wd_t_stds,
-                                        _wd_v_means, _wd_v_stds
-                                    )
-                                ]
-                                st.dataframe(
-                                    pd.DataFrame(_wd_stat_rows),
-                                    hide_index=True,
-                                    use_container_width=True,
-                                )
+                                # ─────────────────────────────────────────
+                                # A) 傾向チャート（平均 ± σ）
+                                # ─────────────────────────────────────────
+                                if _chart_mode == "📈 傾向チャート（平均 ± σ）":
+                                    if _wdinfo_is_formula:
+                                        # 数式: 1行（数式結果のみ）
+                                        _wd_fig = make_subplots(rows=1, cols=1)
+                                        if len(_wd_lbls) > 1:
+                                            _wd_fig.add_trace(go.Scatter(
+                                                x=_wd_lbls + _wd_lbls[::-1],
+                                                y=([m + s for m, s in zip(_wd_t_means, _wd_t_stds)]
+                                                   + [m - s for m, s in zip(_wd_t_means[::-1], _wd_t_stds[::-1])]),
+                                                fill="toself",
+                                                fillcolor="rgba(68,114,196,0.15)",
+                                                line=dict(width=0),
+                                                showlegend=True, name="±1σ",
+                                            ), row=1, col=1)
+                                        _wd_fig.add_trace(go.Scatter(
+                                            x=_wd_lbls, y=_wd_t_means,
+                                            mode="lines+markers", name="数式結果 平均",
+                                            line=dict(color=_wd_color, width=2),
+                                            marker=dict(size=9, color=_wd_color),
+                                            hovertemplate="%{x}<br>平均: %{y:.4f}<br>σ: %{customdata:.4f}<extra></extra>",
+                                            customdata=_wd_t_stds,
+                                        ), row=1, col=1)
+                                        _wd_fig.update_layout(
+                                            title=dict(text=f"<b>{_wd_label}</b>　傾向", font=dict(size=13)),
+                                            height=300,
+                                            margin=dict(t=60, b=48, l=80, r=100),
+                                            showlegend=True,
+                                            legend=dict(orientation="h", y=1.08, x=1, xanchor="right"),
+                                            hovermode="x unified",
+                                        )
+                                        _wd_fig.update_yaxes(title_text="数式結果")
+                                        _wd_fig.update_xaxes(title_text="時期")
+                                    else:
+                                        # 時間軸 / XY: t + v の 2行
+                                        _t_title = f"{'X: ' + _wd_xlabel if _wdinfo_is_xy else 't 値 [ms]'}"
+                                        _v_title = f"{'Y: ' + _wd_ylabel if _wdinfo_is_xy else 'v 値'}"
+                                        _wd_fig = make_subplots(
+                                            rows=2, cols=1,
+                                            subplot_titles=(_t_title, _v_title),
+                                            vertical_spacing=0.25,
+                                            row_heights=[0.5, 0.5],
+                                        )
+                                        if len(_wd_lbls) > 1:
+                                            _wd_fig.add_trace(go.Scatter(
+                                                x=_wd_lbls + _wd_lbls[::-1],
+                                                y=([m + s for m, s in zip(_wd_t_means, _wd_t_stds)]
+                                                   + [m - s for m, s in zip(_wd_t_means[::-1], _wd_t_stds[::-1])]),
+                                                fill="toself", fillcolor="rgba(68,114,196,0.15)",
+                                                line=dict(width=0), showlegend=True, name="t ±1σ",
+                                            ), row=1, col=1)
+                                        _wd_fig.add_trace(go.Scatter(
+                                            x=_wd_lbls, y=_wd_t_means,
+                                            mode="lines+markers", name="t 平均 [ms]",
+                                            line=dict(color=_wd_color, width=2),
+                                            marker=dict(size=9, color=_wd_color),
+                                            hovertemplate="%{x}<br>t 平均: %{y:.3f} ms<br>σ: %{customdata:.3f} ms<extra></extra>",
+                                            customdata=_wd_t_stds,
+                                        ), row=1, col=1)
+                                        if len(_wd_lbls) > 1:
+                                            _wd_fig.add_trace(go.Scatter(
+                                                x=_wd_lbls + _wd_lbls[::-1],
+                                                y=([m + s for m, s in zip(_wd_v_means, _wd_v_stds)]
+                                                   + [m - s for m, s in zip(_wd_v_means[::-1], _wd_v_stds[::-1])]),
+                                                fill="toself", fillcolor="rgba(68,114,196,0.15)",
+                                                line=dict(width=0), showlegend=True, name="v ±1σ",
+                                            ), row=2, col=1)
+                                        _wd_fig.add_trace(go.Scatter(
+                                            x=_wd_lbls, y=_wd_v_means,
+                                            mode="lines+markers", name="v 平均",
+                                            line=dict(color=_wd_color, width=2, dash="dash"),
+                                            marker=dict(size=9, color=_wd_color, symbol="diamond"),
+                                            hovertemplate="%{x}<br>v 平均: %{y:.4f}<br>σ: %{customdata:.4f}<extra></extra>",
+                                            customdata=_wd_v_stds,
+                                        ), row=2, col=1)
+                                        _wd_fig.update_layout(
+                                            title=dict(text=f"<b>{_wd_label}</b>　傾向", font=dict(size=13)),
+                                            height=560,
+                                            margin=dict(t=60, b=48, l=80, r=100),
+                                            showlegend=True,
+                                            legend=dict(orientation="h", y=1.04, x=1, xanchor="right"),
+                                            hovermode="x unified",
+                                        )
+                                        _wd_fig.update_yaxes(title_text="t [ms]", row=1, col=1)
+                                        _wd_fig.update_yaxes(title_text="v", row=2, col=1)
+                                        _wd_fig.update_xaxes(title_text="時期", row=2, col=1)
+                                    st.plotly_chart(_wd_fig, width="stretch",
+                                                    key=f"wi_det_tr_{_wdk.replace('/', '_')}")
+
+                                # ─────────────────────────────────────────
+                                # B) Xbar-R 管理図
+                                # ─────────────────────────────────────────
+                                else:
+                                    # サブグループ: n≥2 のCSVのみ有効
+                                    _sgw_lbls  = [l for l, n in zip(_wd_lbls,    _wd_ns) if n >= 2]
+                                    _sgw_xbar  = [m for m, n in zip(_wd_t_means, _wd_ns) if n >= 2]
+                                    _sgw_r     = [r for r, n in zip(_wd_t_ranges,_wd_ns) if n >= 2]
+                                    _sgw_s     = [s for s, n in zip(_wd_t_stds,  _wd_ns) if n >= 2]
+                                    _sgw_n     = [n for n in _wd_ns if n >= 2]
+                                    if len(_sgw_lbls) < 2:
+                                        st.info(
+                                            "Xbar-R 管理図には n≥2 のサブグループ（サイクル数≥2 のCSVファイル）"
+                                            "が **2時期以上** 必要です"
+                                        )
+                                    else:
+                                        _xbar_bar_w = float(np.mean(_sgw_xbar))
+                                        _r_bar_w    = float(np.mean(_sgw_r))
+                                        _s_bar_w    = float(np.mean(_sgw_s))
+                                        _n_avg_w    = float(np.mean(_sgw_n))
+                                        _n_rep_w    = int(round(_n_avg_w))
+                                        _A2w, _D3w, _D4w, _c4w, _B3w, _B4w = _spc_consts(_n_rep_w)
+                                        _use_s_w = (_n_rep_w > 25)
+                                        if _use_s_w:
+                                            _sigma_w  = _s_bar_w / _c4w
+                                            _UCL_xw   = _xbar_bar_w + 3 * _sigma_w / (_n_avg_w ** 0.5)
+                                            _LCL_xw   = _xbar_bar_w - 3 * _sigma_w / (_n_avg_w ** 0.5)
+                                            _UCL_rw   = _B4w * _s_bar_w
+                                            _LCL_rw   = _B3w * _s_bar_w
+                                            _sub_v_w  = _sgw_s
+                                            _sub_lbl_w = "S（標準偏差）"
+                                            _sub_cl_w  = _s_bar_w
+                                        else:
+                                            _UCL_xw   = _xbar_bar_w + _A2w * _r_bar_w
+                                            _LCL_xw   = _xbar_bar_w - _A2w * _r_bar_w
+                                            _UCL_rw   = _D4w * _r_bar_w
+                                            _LCL_rw   = _D3w * _r_bar_w
+                                            _sub_v_w  = _sgw_r
+                                            _sub_lbl_w = "R（範囲）"
+                                            _sub_cl_w  = _r_bar_w
+                                        _xbar_ng_w = [v > _UCL_xw or v < _LCL_xw for v in _sgw_xbar]
+                                        _sub_ng_w  = [v > _UCL_rw or (_LCL_rw > 0 and v < _LCL_rw)
+                                                      for v in _sub_v_w]
+                                        _xbr_ylbl = ("数式結果" if _wdinfo_is_formula
+                                                      else ("X: " + _wd_xlabel if _wdinfo_is_xy else "t [ms]"))
+                                        _fig_wi_xbr = make_subplots(
+                                            rows=2, cols=1,
+                                            shared_xaxes=True,
+                                            subplot_titles=(
+                                                f"X̄ 管理図  (UCL={_UCL_xw:.3f}  CL={_xbar_bar_w:.3f}  LCL={_LCL_xw:.3f})",
+                                                f"{'S' if _use_s_w else 'R'} 管理図"
+                                                f"  (UCL={_UCL_rw:.3f}  CL={_sub_cl_w:.3f}"
+                                                + (f"  LCL={_LCL_rw:.3f}" if _LCL_rw > 0 else "") + ")",
+                                            ),
+                                            vertical_spacing=0.14,
+                                            row_heights=[0.6, 0.4],
+                                        )
+                                        # X̄ チャート
+                                        _xc_w = ["#e74c3c" if ng else _wd_color for ng in _xbar_ng_w]
+                                        _xs_w = ["x-thin"  if ng else "circle"  for ng in _xbar_ng_w]
+                                        _fig_wi_xbr.add_trace(go.Scatter(
+                                            x=_sgw_lbls, y=_sgw_xbar,
+                                            mode="lines+markers", name="X̄",
+                                            line=dict(color=_wd_color, width=2),
+                                            marker=dict(color=_xc_w, size=11, symbol=_xs_w,
+                                                        line=dict(width=2, color="white")),
+                                            hovertemplate="%{x}<br>X̄ = %{y:.4f}<extra></extra>",
+                                        ), row=1, col=1)
+                                        for _yv, _dash, _col, _ann in [
+                                            (_UCL_xw,     "dash",  "#e74c3c", f"UCL={_UCL_xw:.3f}"),
+                                            (_xbar_bar_w, "solid", "#27ae60", f"X̄̄={_xbar_bar_w:.3f}"),
+                                            (_LCL_xw,     "dash",  "#e74c3c", f"LCL={_LCL_xw:.3f}"),
+                                        ]:
+                                            _fig_wi_xbr.add_hline(
+                                                y=_yv, line_dash=_dash, line_color=_col, line_width=1.5,
+                                                annotation_text=_ann, annotation_position="right",
+                                                row=1, col=1,
+                                            )
+                                        _sigma_xw = (_UCL_xw - _xbar_bar_w) / 3
+                                        _fig_wi_xbr.add_hrect(
+                                            y0=_xbar_bar_w - _sigma_xw,
+                                            y1=_xbar_bar_w + _sigma_xw,
+                                            fillcolor="rgba(68,114,196,0.10)", line_width=0,
+                                            annotation_text="±1σ帯", annotation_position="right",
+                                            row=1, col=1,
+                                        )
+                                        # R / S チャート
+                                        _rc_w = ["#e74c3c" if ng else "#7f8c8d" for ng in _sub_ng_w]
+                                        _fig_wi_xbr.add_trace(go.Scatter(
+                                            x=_sgw_lbls, y=_sub_v_w,
+                                            mode="lines+markers",
+                                            name="S" if _use_s_w else "R",
+                                            line=dict(color="#7f8c8d", width=2),
+                                            marker=dict(color=_rc_w, size=10,
+                                                        symbol=["x-thin" if ng else "circle" for ng in _sub_ng_w],
+                                                        line=dict(width=2, color="white")),
+                                            hovertemplate=f"%{{x}}<br>{'S' if _use_s_w else 'R'} = %{{y:.4f}}<extra></extra>",
+                                        ), row=2, col=1)
+                                        _sub_lines_w = [
+                                            (_UCL_rw,   "dash",  "#e74c3c", f"UCL={_UCL_rw:.3f}"),
+                                            (_sub_cl_w, "solid", "#27ae60",
+                                             f"{'S̄' if _use_s_w else 'R̄'}={_sub_cl_w:.3f}"),
+                                        ]
+                                        if _LCL_rw > 0:
+                                            _sub_lines_w.append((_LCL_rw, "dash", "#e74c3c", f"LCL={_LCL_rw:.3f}"))
+                                        for _yv, _dash, _col, _ann in _sub_lines_w:
+                                            _fig_wi_xbr.add_hline(
+                                                y=_yv, line_dash=_dash, line_color=_col, line_width=1.5,
+                                                annotation_text=_ann, annotation_position="right",
+                                                row=2, col=1,
+                                            )
+                                        # Western Electric ルール
+                                        _we_w: list = []
+                                        _xv_w = _sgw_xbar
+                                        if sum(_xbar_ng_w) > 0:
+                                            _we_w.append(f"🔴 Rule1: X̄管理外 **{sum(_xbar_ng_w)}** 点（UCL/LCL超え）")
+                                        if len(_xv_w) >= 9:
+                                            for _ri in range(len(_xv_w) - 8):
+                                                _seg = _xv_w[_ri:_ri + 9]
+                                                if all(v > _xbar_bar_w for v in _seg) or all(v < _xbar_bar_w for v in _seg):
+                                                    _we_w.append(f"🟠 Rule2: 連続9点が中心線の同側（{_sgw_lbls[_ri]}〜）")
+                                                    break
+                                        if len(_xv_w) >= 6:
+                                            for _ri in range(len(_xv_w) - 5):
+                                                _seg = _xv_w[_ri:_ri + 6]
+                                                if all(_seg[j] < _seg[j+1] for j in range(5)):
+                                                    _we_w.append(f"🟡 Rule3: 連続6点単調増加（{_sgw_lbls[_ri]}〜）")
+                                                    break
+                                                if all(_seg[j] > _seg[j+1] for j in range(5)):
+                                                    _we_w.append(f"🟡 Rule3: 連続6点単調減少（{_sgw_lbls[_ri]}〜）")
+                                                    break
+                                        for _ww in _we_w:
+                                            st.warning(f"**{_wd_label}**: {_ww}")
+                                        _fig_wi_xbr.update_layout(
+                                            title=dict(
+                                                text=f"<b>{_wd_label}</b>　"
+                                                     f"Xbar-{'S' if _use_s_w else 'R'} 管理図"
+                                                     + (f"　(n={_n_rep_w}、Xbar-S)" if _use_s_w
+                                                        else f"　(n={_n_rep_w})"),
+                                                font=dict(size=13),
+                                            ),
+                                            height=480,
+                                            margin=dict(t=60, b=48, l=80, r=120),
+                                            showlegend=True,
+                                            legend=dict(orientation="h", y=1.04, x=1, xanchor="right"),
+                                            hovermode="x unified",
+                                        )
+                                        _fig_wi_xbr.update_yaxes(title_text=_xbr_ylbl, row=1, col=1)
+                                        _fig_wi_xbr.update_yaxes(title_text=_sub_lbl_w, row=2, col=1)
+                                        _fig_wi_xbr.update_xaxes(title_text="時期", row=2, col=1)
+                                        st.plotly_chart(_fig_wi_xbr, width="stretch",
+                                                        key=f"wi_xbr_{_wdk.replace('/', '_')}")
+
+                                # ── 統計サマリーテーブル（共通）────────────
+                                if _wdinfo_is_formula:
+                                    _wd_stat_rows = [
+                                        {"時期": _sl, "数式結果 平均": f"{_tm:.4f}",
+                                         "σ": f"{_ts_:.4f}", "n": _n}
+                                        for _sl, _tm, _ts_, _n in zip(
+                                            _wd_lbls, _wd_t_means, _wd_t_stds, _wd_ns)
+                                    ]
+                                else:
+                                    _wd_stat_rows = [
+                                        {
+                                            "時期":        _sl,
+                                            "t 平均 [ms]": f"{_tm:.3f}",
+                                            "t σ [ms]":   f"{_ts_:.3f}",
+                                            "v 平均":      f"{_vm:.4f}",
+                                            "v σ":         f"{_vs:.4f}",
+                                            "n":           _n,
+                                        }
+                                        for _sl, _tm, _ts_, _vm, _vs, _n in zip(
+                                            _wd_lbls, _wd_t_means, _wd_t_stds,
+                                            _wd_v_means, _wd_v_stds, _wd_ns)
+                                    ]
+                                st.dataframe(pd.DataFrame(_wd_stat_rows),
+                                             hide_index=True, use_container_width=True)
 
             else:
                 st.info("CSVファイルをアップロードして「傾向解析を実行」を押してください")
