@@ -2818,6 +2818,8 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                             st.number_input("NG 下限（下回ったらNG、0=判定なし）",
                                             value=0.0, step=0.1,
                                             key=f"{_dkey}_lo")
+                        st.checkbox("📈 傾向解析に出す", key=f"{_dkey}_trend_on",
+                                    help="数式の計算結果をサイクルごとに 📈 傾向解析タブへ送ります")
 
                         _fm_expr = str(st.session_state.get(f"{_dkey}_expr", ""))
                         _fm_on   = bool(st.session_state.get(f"{_dkey}_on", False))
