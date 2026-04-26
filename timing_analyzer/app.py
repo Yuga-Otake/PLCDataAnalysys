@@ -1258,8 +1258,9 @@ def _compute_wi_det_stats_for_csv(df, trigger_col, edge, var_list, ss):
                 continue
             _type_lbl = {"傾き変化点": "傾き変化点", "閾値超え検出": "閾値超え検出",
                          "最大値点": "最大値点", "最小値点": "最小値点"}.get(_dtype, _dtype)
+            _det_name_lbl = ss.get(f"{_dkey}_name", "").strip()
             stats[f"{_vkey}_{_did}"] = {
-                "label":   f"{var} #{_di+1} {_type_lbl}",
+                "label":   f"{var} #{_di+1} {_det_name_lbl or _type_lbl}",
                 "color":   _color,
                 "t_mean":  float(np.mean(_t_vals)),
                 "t_std":   float(np.std(_t_vals)) if _n > 1 else 0.0,
@@ -1318,8 +1319,9 @@ def _compute_wi_det_stats_for_csv(df, trigger_col, edge, var_list, ss):
             if _n == 0:
                 continue
             _type_lbl = _dtype
+            _xy_det_name_lbl = ss.get(f"{_dkey}_name", "").strip()
             stats[f"{_vkey}_{_did}_xy"] = {
-                "label":   f"{_xvar}→{var} #{_di+1} {_type_lbl} [XY]",
+                "label":   f"{_xvar}→{var} #{_di+1} {_xy_det_name_lbl or _type_lbl} [XY]",
                 "color":   _color,
                 "t_mean":  float(np.mean(_x_vals)),
                 "t_std":   float(np.std(_x_vals)) if _n > 1 else 0.0,
@@ -1375,7 +1377,8 @@ def _compute_wi_det_stats_for_csv(df, trigger_col, edge, var_list, ss):
         for (_fdi, _fdid, _fdkey) in _fm_trend_dets:
             _color    = _DET_COLORS[_fdi % len(_DET_COLORS)]
             _fm_expr  = str(ss.get(f"{_fdkey}_expr", ""))
-            _fm_label = f"{var} #{_fdi + 1} 数式"
+            _fm_name_lbl = ss.get(f"{_fdkey}_name", "").strip()
+            _fm_label = f"{var} #{_fdi + 1} {_fm_name_lbl or '数式'}"
             if not _fm_expr.strip():
                 stats.setdefault("__formula_warns__", []).append(
                     f"⚠️ {_fm_label}: 数式が未入力です"
@@ -1410,7 +1413,7 @@ def _compute_wi_det_stats_for_csv(df, trigger_col, edge, var_list, ss):
                 continue
             _short_expr = _fm_expr if len(_fm_expr) <= 20 else _fm_expr[:17] + "..."
             stats[f"{_vkey}_{_fdid}_formula"] = {
-                "label":      f"{var} #{_fdi + 1} 数式 [{_short_expr}]",
+                "label":      f"{var} #{_fdi + 1} {_fm_name_lbl or ('数式 [' + _short_expr + ']')}",
                 "color":      _color,
                 "t_mean":     float(np.mean(_fm_vals)),
                 "t_std":      float(np.std(_fm_vals)) if _n > 1 else 0.0,
@@ -1968,11 +1971,15 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                           "上下判定比較": "📊", "最大値判定": "🔺", "最小値判定": "🔻",
                           "検出点比較": "🔲", "数式": "🧮"}.get(_dtype, "📏")
 
-                with st.expander(f"{_icon} #{_di+1} {_dtype}", expanded=True):
+                _det_disp_name = st.session_state.get(f"{_dkey}_name", "").strip()
+                with st.expander(f"{_icon} #{_di+1} {_det_disp_name or _dtype}", expanded=True):
                     _hd, _del_btn = st.columns([8, 1])
                     with _del_btn:
                         if st.button("🗑", key=f"{_dkey}_del", help="削除"):
                             _t_del_idx = _di
+                    st.text_input("名前（任意）", key=f"{_dkey}_name",
+                                  placeholder=f"例: {_dtype}①",
+                                  help="傾向解析ラベル・サマリーに表示されます")
 
                     if _dtype == "傾き変化点":
                         st.caption(
@@ -2139,7 +2146,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                             if _mkt:
                                 all_inf_markers.append({
                                     "t": _mkt, "v": _mkv,
-                                    "label": f"#{_di+1} 傾き変化点 ({len(_mkt)}点)",
+                                    "label": f"#{_di+1} {_det_disp_name or '傾き変化点'} ({len(_mkt)}点)",
                                     "color": _color,
                                 })
                             # OK/NG 範囲チェック → peak_ng_flags
@@ -2161,7 +2168,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                 if "wi_det_trend" not in st.session_state:
                                     st.session_state["wi_det_trend"] = {}
                                 st.session_state["wi_det_trend"][f"{_vkey}_{_did}"] = {
-                                    "label":  f"{var} #{_di+1} 傾き変化点",
+                                    "label":  f"{var} #{_di+1} {_det_disp_name or '傾き変化点'}",
                                     "color":  _color,
                                     "t_vals": [p[0] if p else None for p in _cyc_pts_inf],
                                     "v_vals": [p[1] if p else None for p in _cyc_pts_inf],
@@ -2523,7 +2530,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                             if _tmkt:
                                 all_inf_markers.append({
                                     "t": _tmkt, "v": _tmkv,
-                                    "label": f"#{_di+1} 閾値超え ({len(_tmkt)}点)",
+                                    "label": f"#{_di+1} {_det_disp_name or '閾値超え'} ({len(_tmkt)}点)",
                                     "color": _color,
                                 })
                             # OK/NG 範囲チェック → peak_ng_flags
@@ -2545,7 +2552,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                 if "wi_det_trend" not in st.session_state:
                                     st.session_state["wi_det_trend"] = {}
                                 st.session_state["wi_det_trend"][f"{_vkey}_{_did}"] = {
-                                    "label":  f"{var} #{_di+1} 閾値超え検出",
+                                    "label":  f"{var} #{_di+1} {_det_disp_name or '閾値超え検出'}",
                                     "color":  _color,
                                     "t_vals": [p[0] if p else None for p in _cyc_pts_thr],
                                     "v_vals": [p[1] if p else None for p in _cyc_pts_thr],
@@ -2659,7 +2666,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                             if _pt_mkt:
                                 all_inf_markers.append({
                                     "t": _pt_mkt, "v": _pt_mkv,
-                                    "label": f"#{_di+1} {_vlabel_pt}点 ({len(_pt_mkt)}点)",
+                                    "label": f"#{_di+1} {_det_disp_name or _vlabel_pt + '点'} ({len(_pt_mkt)}点)",
                                     "color": _color,
                                 })
                             # OK/NG 範囲チェック → peak_ng_flags
@@ -2681,7 +2688,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                 if "wi_det_trend" not in st.session_state:
                                     st.session_state["wi_det_trend"] = {}
                                 st.session_state["wi_det_trend"][f"{_vkey}_{_did}"] = {
-                                    "label":  f"{var} #{_di+1} {_vlabel_pt}点",
+                                    "label":  f"{var} #{_di+1} {_det_disp_name or _vlabel_pt + '点'}",
                                     "color":  _color,
                                     "t_vals": [p[0] if p else None for p in _cyc_pts_peak],
                                     "v_vals": [p[1] if p else None for p in _cyc_pts_peak],
@@ -3377,11 +3384,15 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                    "上下判定比較": "📊", "Y最大値判定": "🔺", "Y最小値判定": "🔻",
                                    "検出点比較": "🔲", "数式": "🧮"}.get(_xdtype, "📏")
 
-                        with st.expander(f"{_xicon} #{_xdi+1} {_xdtype}", expanded=True):
+                        _xdet_disp_name = st.session_state.get(f"{_xdkey}_name", "").strip()
+                        with st.expander(f"{_xicon} #{_xdi+1} {_xdet_disp_name or _xdtype}", expanded=True):
                             _xhd, _xdel_btn = st.columns([8, 1])
                             with _xdel_btn:
                                 if st.button("🗑", key=f"{_xdkey}_del", help="削除"):
                                     _xy_del_idx = _xdi
+                            st.text_input("名前（任意）", key=f"{_xdkey}_name",
+                                          placeholder=f"例: {_xdtype}①",
+                                          help="傾向解析ラベル・サマリーに表示されます")
 
                             if _xdtype == "傾き変化点":
                                 st.caption(
