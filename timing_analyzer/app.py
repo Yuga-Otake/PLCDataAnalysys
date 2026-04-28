@@ -1756,52 +1756,13 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
 
         with _tab_time:
             # ── コントロールパネル ─────────────────────────────────
-            ctrl_c1, ctrl_c2, ctrl_c3 = st.columns([3, 3, 3])
-
-            with ctrl_c1:
-                st.markdown("**表示ウィンドウ（ステップ開始基準）**")
+            _wwin_c1, _wwin_c2 = st.columns([2, 5])
+            with _wwin_c1:
+                st.markdown("**表示ウィンドウ**")
                 win_pre  = st.number_input("開始前 [ms]", min_value=0, max_value=500,
                                             value=50, step=10, key=f"{_vkey}_wpre")
                 win_post = st.number_input("終了後 [ms]", min_value=10, max_value=2000,
                                             value=300, step=10, key=f"{_vkey}_wpost")
-
-            with ctrl_c2:
-                st.markdown("**検査ウィンドウ**")
-                insp_type = st.radio("種別", ["時間軸", "値トリガ"],
-                                      horizontal=True, key=f"{_vkey}_itype")
-                if insp_type == "時間軸":
-                    insp_s = st.number_input("開始 [ms]", min_value=-500, max_value=2000,
-                                              value=0, step=5, key=f"{_vkey}_is")
-                    insp_e = st.number_input("終了 [ms]", min_value=-500, max_value=2000,
-                                              value=200, step=5, key=f"{_vkey}_ie")
-                    insp_e = max(insp_e, insp_s + 1)
-                    insp_trig_val = None; insp_trig_pre = None; insp_trig_post = None
-                else:
-                    st.caption("この変数が閾値を超えた瞬間を起点にウィンドウを設定")
-                    insp_trig_val  = st.number_input("トリガ閾値", value=1.0, step=0.5,
-                                                      key=f"{_vkey}_itv")
-                    insp_trig_pre  = st.number_input("前 [ms]", min_value=0, max_value=500,
-                                                      value=10, step=5, key=f"{_vkey}_itpre")
-                    insp_trig_post = st.number_input("後 [ms]", min_value=1, max_value=2000,
-                                                      value=150, step=5, key=f"{_vkey}_itpost")
-                    insp_s = None; insp_e = None
-
-            with ctrl_c3:
-                st.markdown("**良品範囲**")
-                good_mode = st.radio("種別", ["手動入力", "自動（基準±Nσ）"],
-                                      horizontal=True, key=f"{_vkey}_gmode")
-                if good_mode == "手動入力":
-                    good_lo = st.number_input("下限", value=0.0, step=0.5,
-                                               key=f"{_vkey}_glo")
-                    good_hi = st.number_input("上限", value=0.0, step=0.5,
-                                               key=f"{_vkey}_ghi")
-                    use_manual_range = good_lo < good_hi
-                    good_nsig = None
-                else:
-                    good_nsig = st.number_input("N（±Nσ）", min_value=1.0, max_value=6.0,
-                                                 value=3.0, step=0.5, key=f"{_vkey}_nsig")
-                    use_manual_range = False
-                    good_lo = good_hi = None
 
             # ── 波形データ抽出（ステップ開始基準に変換）─────────────
             step_waves = []   # list of (t_step_rel, v_arr)
@@ -1864,62 +1825,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                 except Exception:
                     pass
 
-            # 良品範囲の確定
-            if good_mode == "自動（基準±Nσ）":
-                bl_key = f"{pname}_{name}_{var}"
-                bl     = _wv_bl.get(bl_key, {})
-                if bl:
-                    mean_v_bl   = np.array(bl["mean"])
-                    std_v_bl    = np.array(bl["std"])
-                    t_bl        = np.array(bl["t"])
-                    mean_v_bl_i = np.interp(t_common, t_bl, mean_v_bl, left=np.nan, right=np.nan)
-                    std_v_bl_i  = np.interp(t_common, t_bl, std_v_bl,  left=np.nan, right=np.nan)
-                    env_hi = mean_v_bl_i + good_nsig * std_v_bl_i
-                    env_lo = mean_v_bl_i - good_nsig * std_v_bl_i
-                    has_envelope = True
-                else:
-                    env_hi = mean_v + good_nsig * std_v
-                    env_lo = mean_v - good_nsig * std_v
-                    has_envelope = True
-                    st.caption("⚠️ 基準未登録のため現データ平均±Nσを仮表示")
-            else:
-                has_envelope = use_manual_range
-                env_hi = np.full_like(t_common, good_hi) if use_manual_range else None
-                env_lo = np.full_like(t_common, good_lo) if use_manual_range else None
-
-            # ── 検査ウィンドウの確定（値トリガ対応）────────────────
-            insp_windows = []
-            for (t_sw, v_sw) in step_waves:
-                if insp_type == "時間軸":
-                    insp_windows.append((insp_s, insp_e))
-                else:
-                    over = np.where(v_sw >= insp_trig_val)[0]
-                    if len(over) > 0:
-                        t0_trig = float(t_sw[over[0]])
-                        insp_windows.append((t0_trig - insp_trig_pre, t0_trig + insp_trig_post))
-                    else:
-                        insp_windows.append(None)
-
-            # ── NG判定 ───────────────────────────────────────────────
-            ng_flags = []
-            if has_envelope:
-                for j, (t_sw, v_sw) in enumerate(step_waves):
-                    win = insp_windows[j]
-                    if win is None:
-                        ng_flags.append(False)
-                        continue
-                    ws, we = win
-                    mask_insp = (t_sw >= ws) & (t_sw <= we)
-                    if mask_insp.sum() == 0:
-                        ng_flags.append(False)
-                        continue
-                    t_insp  = t_sw[mask_insp]
-                    v_insp  = v_sw[mask_insp]
-                    hi_insp = np.interp(t_insp, t_common, env_hi)
-                    lo_insp = np.interp(t_insp, t_common, env_lo)
-                    ng_flags.append(bool(np.any(v_insp > hi_insp) or np.any(v_insp < lo_insp)))
-            else:
-                ng_flags = [False] * len(step_waves)
+            ng_flags = [False] * len(step_waves)
 
             # ── 検出点リスト ──────────────────────────────────────
             _tdet_list_key = f"{_vkey}_t_det_list"
@@ -2100,32 +2006,21 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                 value=0, step=1, key=f"{_dkey}_nth",
                                 help="サイクルごとにN番目の検出点のみ使用。0=全点。")
 
-                        # ── OK/NG 判定範囲 & 傾向解析 ────────────────
-                        st.markdown("**✅ OK/NG 判定範囲**")
-                        _okng_t1, _okng_t2, _okng_t3 = st.columns([1, 2, 2])
-                        with _okng_t1:
-                            st.checkbox("t 範囲で判定", key=f"{_dkey}_ok_t_on")
-                        _ok_t_on_inf = bool(st.session_state.get(f"{_dkey}_ok_t_on", False))
-                        with _okng_t2:
-                            st.number_input("t OK 下限 [ms]", value=0.0, step=5.0,
-                                            key=f"{_dkey}_ok_t_lo",
-                                            disabled=not _ok_t_on_inf)
-                        with _okng_t3:
-                            st.number_input("t OK 上限 [ms]", value=100.0, step=5.0,
-                                            key=f"{_dkey}_ok_t_hi",
-                                            disabled=not _ok_t_on_inf)
-                        _okng_v1, _okng_v2, _okng_v3 = st.columns([1, 2, 2])
-                        with _okng_v1:
-                            st.checkbox("v 値で判定", key=f"{_dkey}_ok_v_on")
-                        _ok_v_on_inf = bool(st.session_state.get(f"{_dkey}_ok_v_on", False))
-                        with _okng_v2:
-                            st.number_input("v OK 下限", value=0.0, step=0.1,
-                                            key=f"{_dkey}_ok_v_lo",
-                                            disabled=not _ok_v_on_inf)
-                        with _okng_v3:
-                            st.number_input("v OK 上限", value=1.0, step=0.1,
-                                            key=f"{_dkey}_ok_v_hi",
-                                            disabled=not _ok_v_on_inf)
+                        # ── OK/NG 判定（基準±Δ）& 傾向解析 ──────────
+                        st.markdown("**✅ OK/NG 判定**")
+                        _pm_c1, _pm_c2, _pm_c3 = st.columns([1.5, 2, 2])
+                        with _pm_c1:
+                            st.checkbox("基準±Δで判定", key=f"{_dkey}_pm_on",
+                                        help="現データの平均検出値を基準に±許容差を超えたサイクルをNG")
+                        _pm_on_inf = bool(st.session_state.get(f"{_dkey}_pm_on", False))
+                        with _pm_c2:
+                            st.number_input("t 許容差 [ms]（0=無効）", min_value=0.0,
+                                            value=0.0, step=1.0, key=f"{_dkey}_pm_dt",
+                                            disabled=not _pm_on_inf)
+                        with _pm_c3:
+                            st.number_input("v 許容差（0=無効）", min_value=0.0,
+                                            value=0.0, step=0.01, key=f"{_dkey}_pm_dv",
+                                            disabled=not _pm_on_inf)
                         st.checkbox("📈 傾向解析に出す", key=f"{_dkey}_trend_on",
                                     help="検出点の t・v 値をサイクルごとに 📈 傾向解析タブへ送ります")
 
@@ -2160,20 +2055,23 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     "label": f"#{_di+1} {_det_disp_name or '傾き変化点'} ({len(_mkt)}点)",
                                     "color": _color,
                                 })
-                            # OK/NG 範囲チェック → peak_ng_flags
-                            _inf_ok_t_lo = float(st.session_state.get(f"{_dkey}_ok_t_lo", 0.0))
-                            _inf_ok_t_hi = float(st.session_state.get(f"{_dkey}_ok_t_hi", 100.0))
-                            _inf_ok_v_lo = float(st.session_state.get(f"{_dkey}_ok_v_lo", 0.0))
-                            _inf_ok_v_hi = float(st.session_state.get(f"{_dkey}_ok_v_hi", 1.0))
-                            if _ok_t_on_inf or _ok_v_on_inf:
-                                for _ji, _pts_ji in enumerate(_cyc_pts_inf):
-                                    if _pts_ji is None:
-                                        peak_ng_flags[_ji] = True; continue
-                                    _ti_c, _vi_c = _pts_ji
-                                    if _ok_t_on_inf and not (_inf_ok_t_lo <= _ti_c <= _inf_ok_t_hi):
-                                        peak_ng_flags[_ji] = True
-                                    if _ok_v_on_inf and not (_inf_ok_v_lo <= _vi_c <= _inf_ok_v_hi):
-                                        peak_ng_flags[_ji] = True
+                            # OK/NG 判定（基準±Δ）
+                            _pm_on = bool(st.session_state.get(f"{_dkey}_pm_on", False))
+                            _pm_dt = float(st.session_state.get(f"{_dkey}_pm_dt", 0.0))
+                            _pm_dv = float(st.session_state.get(f"{_dkey}_pm_dv", 0.0))
+                            if _pm_on and (_pm_dt > 0 or _pm_dv > 0):
+                                _valid_inf = [p for p in _cyc_pts_inf if p is not None]
+                                if _valid_inf:
+                                    _ref_t_m = float(np.mean([p[0] for p in _valid_inf]))
+                                    _ref_v_m = float(np.mean([p[1] for p in _valid_inf]))
+                                    for _ji, _pts_ji in enumerate(_cyc_pts_inf):
+                                        if _pts_ji is None:
+                                            peak_ng_flags[_ji] = True; continue
+                                        _ti_c, _vi_c = _pts_ji
+                                        if _pm_dt > 0 and abs(_ti_c - _ref_t_m) > _pm_dt:
+                                            peak_ng_flags[_ji] = True
+                                        if _pm_dv > 0 and abs(_vi_c - _ref_v_m) > _pm_dv:
+                                            peak_ng_flags[_ji] = True
                             # 傾向解析に出す
                             if bool(st.session_state.get(f"{_dkey}_trend_on", False)):
                                 if "wi_det_trend" not in st.session_state:
@@ -2303,7 +2201,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                 t_arr, t_common, _ref_wave - _ref_offset_f)
 
                         # 境界プレビュー描画
-                        if has_envelope or True:
+                        if True:
                             _prev_hi = _bnd_hi_fn(t_common)
                             _prev_lo = _bnd_lo_fn(t_common)
                             _fig_bnd = go.Figure()
@@ -2337,9 +2235,6 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                             st.plotly_chart(_fig_bnd, width="stretch",
                                             key=f"{_dkey}_bnd_preview")
 
-                        _eff_insp_wins_bnd = _render_item_insp_win_t(
-                            _dkey, step_waves, insp_windows)
-
                         # NG 判定（各サイクル）
                         if _bnd_on:
                             _bnd_markers_hi = {"t": [], "v": [], "label": f"#{_di+1} 上限超過",
@@ -2347,14 +2242,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                             _bnd_markers_lo = {"t": [], "v": [], "label": f"#{_di+1} 下限超過",
                                                "color": _color}
                             for j, (t_sw, v_sw) in enumerate(step_waves):
-                                win = (_eff_insp_wins_bnd[j]
-                                       if j < len(_eff_insp_wins_bnd) else None)
-                                if win is not None:
-                                    ws_p, we_p = win
-                                    _mp = (t_sw >= ws_p) & (t_sw <= we_p)
-                                    t_insp, v_insp = t_sw[_mp], v_sw[_mp]
-                                else:
-                                    t_insp, v_insp = t_sw, v_sw
+                                t_insp, v_insp = t_sw, v_sw
                                 if len(t_insp) == 0:
                                     continue
                                 hi_j = _bnd_hi_fn(t_insp)
@@ -2386,7 +2274,7 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                     elif _dtype in ("最大値判定", "最小値判定"):
                         _is_max = (_dtype == "最大値判定")
                         _vlabel = "最大値" if _is_max else "最小値"
-                        st.caption(f"検査ウィンドウ内の{_vlabel}を各サイクルで計算し、合格基準と照合します。")
+                        st.caption(f"各サイクルの{_vlabel}を計算し、合格基準と照合します。")
                         _pk_ca, _pk_cb, _pk_cc = st.columns([1, 2, 2])
                         with _pk_ca:
                             st.markdown(f"**{_vlabel}**")
@@ -2400,21 +2288,12 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                             value=0.0, step=0.1,
                                             key=f"{_dkey}_lo", help="0 = 判定なし")
 
-                        _eff_insp_wins = _render_item_insp_win_t(
-                            _dkey, step_waves, insp_windows)
-
                         _det_on = bool(st.session_state.get(f"{_dkey}_on", False))
                         _det_hi = float(st.session_state.get(f"{_dkey}_hi", 0.0))
                         _det_lo = float(st.session_state.get(f"{_dkey}_lo", 0.0))
                         if _det_on:
                             for j, (t_sw, v_sw) in enumerate(step_waves):
-                                win = _eff_insp_wins[j] if j < len(_eff_insp_wins) else None
-                                if win is not None:
-                                    ws_p, we_p = win
-                                    _mp = (t_sw >= ws_p) & (t_sw <= we_p)
-                                    _vp = v_sw[_mp] if _mp.sum() > 0 else v_sw
-                                else:
-                                    _vp = v_sw
+                                _vp = v_sw
                                 _val = float(np.nanmax(_vp) if _is_max else np.nanmin(_vp))
                                 if _det_hi != 0.0 and _val > _det_hi:
                                     peak_ng_flags[j] = True
@@ -2477,32 +2356,21 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                             key=f"{_dkey}_vrange_hi",
                                             disabled=not _use_vrng_t)
 
-                        # ── OK/NG 判定範囲 & 傾向解析 ────────────────
-                        st.markdown("**✅ OK/NG 判定範囲**")
-                        _thr_ot1, _thr_ot2, _thr_ot3 = st.columns([1, 2, 2])
-                        with _thr_ot1:
-                            st.checkbox("t 範囲で判定", key=f"{_dkey}_ok_t_on")
-                        _ok_t_on_thr = bool(st.session_state.get(f"{_dkey}_ok_t_on", False))
-                        with _thr_ot2:
-                            st.number_input("t OK 下限 [ms]", value=0.0, step=5.0,
-                                            key=f"{_dkey}_ok_t_lo",
-                                            disabled=not _ok_t_on_thr)
-                        with _thr_ot3:
-                            st.number_input("t OK 上限 [ms]", value=100.0, step=5.0,
-                                            key=f"{_dkey}_ok_t_hi",
-                                            disabled=not _ok_t_on_thr)
-                        _thr_ov1, _thr_ov2, _thr_ov3 = st.columns([1, 2, 2])
-                        with _thr_ov1:
-                            st.checkbox("v 値で判定", key=f"{_dkey}_ok_v_on")
-                        _ok_v_on_thr = bool(st.session_state.get(f"{_dkey}_ok_v_on", False))
-                        with _thr_ov2:
-                            st.number_input("v OK 下限", value=0.0, step=0.1,
-                                            key=f"{_dkey}_ok_v_lo",
-                                            disabled=not _ok_v_on_thr)
-                        with _thr_ov3:
-                            st.number_input("v OK 上限", value=1.0, step=0.1,
-                                            key=f"{_dkey}_ok_v_hi",
-                                            disabled=not _ok_v_on_thr)
+                        # ── OK/NG 判定（基準±Δ）& 傾向解析 ──────────
+                        st.markdown("**✅ OK/NG 判定**")
+                        _thr_pm1, _thr_pm2, _thr_pm3 = st.columns([1.5, 2, 2])
+                        with _thr_pm1:
+                            st.checkbox("基準±Δで判定", key=f"{_dkey}_pm_on",
+                                        help="現データの平均検出値を基準に±許容差を超えたサイクルをNG")
+                        _pm_on_thr = bool(st.session_state.get(f"{_dkey}_pm_on", False))
+                        with _thr_pm2:
+                            st.number_input("t 許容差 [ms]（0=無効）", min_value=0.0,
+                                            value=0.0, step=1.0, key=f"{_dkey}_pm_dt",
+                                            disabled=not _pm_on_thr)
+                        with _thr_pm3:
+                            st.number_input("v 許容差（0=無効）", min_value=0.0,
+                                            value=0.0, step=0.01, key=f"{_dkey}_pm_dv",
+                                            disabled=not _pm_on_thr)
                         st.checkbox("📈 傾向解析に出す", key=f"{_dkey}_trend_on",
                                     help="検出点の t・v 値をサイクルごとに 📈 傾向解析タブへ送ります")
 
@@ -2544,20 +2412,23 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     "label": f"#{_di+1} {_det_disp_name or '閾値超え'} ({len(_tmkt)}点)",
                                     "color": _color,
                                 })
-                            # OK/NG 範囲チェック → peak_ng_flags
-                            _thr_ok_t_lo = float(st.session_state.get(f"{_dkey}_ok_t_lo", 0.0))
-                            _thr_ok_t_hi = float(st.session_state.get(f"{_dkey}_ok_t_hi", 100.0))
-                            _thr_ok_v_lo = float(st.session_state.get(f"{_dkey}_ok_v_lo", 0.0))
-                            _thr_ok_v_hi = float(st.session_state.get(f"{_dkey}_ok_v_hi", 1.0))
-                            if _ok_t_on_thr or _ok_v_on_thr:
-                                for _jt, _pts_jt in enumerate(_cyc_pts_thr):
-                                    if _pts_jt is None:
-                                        peak_ng_flags[_jt] = True; continue
-                                    _tc_c, _vc_c = _pts_jt
-                                    if _ok_t_on_thr and not (_thr_ok_t_lo <= _tc_c <= _thr_ok_t_hi):
-                                        peak_ng_flags[_jt] = True
-                                    if _ok_v_on_thr and not (_thr_ok_v_lo <= _vc_c <= _thr_ok_v_hi):
-                                        peak_ng_flags[_jt] = True
+                            # OK/NG 判定（基準±Δ）
+                            _pm_on = bool(st.session_state.get(f"{_dkey}_pm_on", False))
+                            _pm_dt = float(st.session_state.get(f"{_dkey}_pm_dt", 0.0))
+                            _pm_dv = float(st.session_state.get(f"{_dkey}_pm_dv", 0.0))
+                            if _pm_on and (_pm_dt > 0 or _pm_dv > 0):
+                                _valid_thr = [p for p in _cyc_pts_thr if p is not None]
+                                if _valid_thr:
+                                    _ref_t_m = float(np.mean([p[0] for p in _valid_thr]))
+                                    _ref_v_m = float(np.mean([p[1] for p in _valid_thr]))
+                                    for _jt, _pts_jt in enumerate(_cyc_pts_thr):
+                                        if _pts_jt is None:
+                                            peak_ng_flags[_jt] = True; continue
+                                        _tc_c, _vc_c = _pts_jt
+                                        if _pm_dt > 0 and abs(_tc_c - _ref_t_m) > _pm_dt:
+                                            peak_ng_flags[_jt] = True
+                                        if _pm_dv > 0 and abs(_vc_c - _ref_v_m) > _pm_dv:
+                                            peak_ng_flags[_jt] = True
                             # 傾向解析に出す
                             if bool(st.session_state.get(f"{_dkey}_trend_on", False)):
                                 if "wi_det_trend" not in st.session_state:
@@ -2620,32 +2491,21 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                         _pt_srng_vhi = float(st.session_state.get(f"{_dkey}_vrange_hi", 1.0)) \
                                        if _use_srng_v else None
 
-                        # OK/NG 判定範囲 & 傾向解析
-                        st.markdown("**✅ OK/NG 判定範囲**")
-                        _pt_ot1, _pt_ot2, _pt_ot3 = st.columns([1, 2, 2])
-                        with _pt_ot1:
-                            st.checkbox("t 範囲で判定", key=f"{_dkey}_ok_t_on")
-                        _ok_t_on_pt = bool(st.session_state.get(f"{_dkey}_ok_t_on", False))
-                        with _pt_ot2:
-                            st.number_input("t OK 下限 [ms]", value=0.0, step=5.0,
-                                            key=f"{_dkey}_ok_t_lo",
-                                            disabled=not _ok_t_on_pt)
-                        with _pt_ot3:
-                            st.number_input("t OK 上限 [ms]", value=100.0, step=5.0,
-                                            key=f"{_dkey}_ok_t_hi",
-                                            disabled=not _ok_t_on_pt)
-                        _pt_ov1, _pt_ov2, _pt_ov3 = st.columns([1, 2, 2])
-                        with _pt_ov1:
-                            st.checkbox("v 値で判定", key=f"{_dkey}_ok_v_on")
-                        _ok_v_on_pt = bool(st.session_state.get(f"{_dkey}_ok_v_on", False))
-                        with _pt_ov2:
-                            st.number_input("v OK 下限", value=0.0, step=0.1,
-                                            key=f"{_dkey}_ok_v_lo",
-                                            disabled=not _ok_v_on_pt)
-                        with _pt_ov3:
-                            st.number_input("v OK 上限", value=1.0, step=0.1,
-                                            key=f"{_dkey}_ok_v_hi",
-                                            disabled=not _ok_v_on_pt)
+                        # OK/NG 判定（基準±Δ）& 傾向解析
+                        st.markdown("**✅ OK/NG 判定**")
+                        _pt_pm1, _pt_pm2, _pt_pm3 = st.columns([1.5, 2, 2])
+                        with _pt_pm1:
+                            st.checkbox("基準±Δで判定", key=f"{_dkey}_pm_on",
+                                        help="現データの平均検出値を基準に±許容差を超えたサイクルをNG")
+                        _pm_on_pt = bool(st.session_state.get(f"{_dkey}_pm_on", False))
+                        with _pt_pm2:
+                            st.number_input("t 許容差 [ms]（0=無効）", min_value=0.0,
+                                            value=0.0, step=1.0, key=f"{_dkey}_pm_dt",
+                                            disabled=not _pm_on_pt)
+                        with _pt_pm3:
+                            st.number_input("v 許容差（0=無効）", min_value=0.0,
+                                            value=0.0, step=0.01, key=f"{_dkey}_pm_dv",
+                                            disabled=not _pm_on_pt)
                         st.checkbox("📈 傾向解析に出す", key=f"{_dkey}_trend_on",
                                     help="検出点の t・v 値をサイクルごとに 📈 傾向解析タブへ送ります")
 
@@ -2680,20 +2540,23 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     "label": f"#{_di+1} {_det_disp_name or _vlabel_pt + '点'} ({len(_pt_mkt)}点)",
                                     "color": _color,
                                 })
-                            # OK/NG 範囲チェック → peak_ng_flags
-                            _pt_ok_t_lo = float(st.session_state.get(f"{_dkey}_ok_t_lo", 0.0))
-                            _pt_ok_t_hi = float(st.session_state.get(f"{_dkey}_ok_t_hi", 100.0))
-                            _pt_ok_v_lo = float(st.session_state.get(f"{_dkey}_ok_v_lo", 0.0))
-                            _pt_ok_v_hi = float(st.session_state.get(f"{_dkey}_ok_v_hi", 1.0))
-                            if _ok_t_on_pt or _ok_v_on_pt:
-                                for _jp2, _pts_jp in enumerate(_cyc_pts_peak):
-                                    if _pts_jp is None:
-                                        peak_ng_flags[_jp2] = True; continue
-                                    _tp_c, _vp_c = _pts_jp
-                                    if _ok_t_on_pt and not (_pt_ok_t_lo <= _tp_c <= _pt_ok_t_hi):
-                                        peak_ng_flags[_jp2] = True
-                                    if _ok_v_on_pt and not (_pt_ok_v_lo <= _vp_c <= _pt_ok_v_hi):
-                                        peak_ng_flags[_jp2] = True
+                            # OK/NG 判定（基準±Δ）
+                            _pm_on = bool(st.session_state.get(f"{_dkey}_pm_on", False))
+                            _pm_dt = float(st.session_state.get(f"{_dkey}_pm_dt", 0.0))
+                            _pm_dv = float(st.session_state.get(f"{_dkey}_pm_dv", 0.0))
+                            if _pm_on and (_pm_dt > 0 or _pm_dv > 0):
+                                _valid_pk = [p for p in _cyc_pts_peak if p is not None]
+                                if _valid_pk:
+                                    _ref_t_m = float(np.mean([p[0] for p in _valid_pk]))
+                                    _ref_v_m = float(np.mean([p[1] for p in _valid_pk]))
+                                    for _jp2, _pts_jp in enumerate(_cyc_pts_peak):
+                                        if _pts_jp is None:
+                                            peak_ng_flags[_jp2] = True; continue
+                                        _tp_c, _vp_c = _pts_jp
+                                        if _pm_dt > 0 and abs(_tp_c - _ref_t_m) > _pm_dt:
+                                            peak_ng_flags[_jp2] = True
+                                        if _pm_dv > 0 and abs(_vp_c - _ref_v_m) > _pm_dv:
+                                            peak_ng_flags[_jp2] = True
                             # 傾向解析に出す
                             if bool(st.session_state.get(f"{_dkey}_trend_on", False)):
                                 if "wi_det_trend" not in st.session_state:
@@ -3052,36 +2915,8 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                     name="基準 平均",
                 ))
 
-            if has_envelope and env_hi is not None:
-                fig.add_trace(go.Scatter(
-                    x=np.concatenate([t_common, t_common[::-1]]),
-                    y=np.concatenate([env_hi, env_lo[::-1]]),
-                    fill="toself", fillcolor="rgba(0,200,100,0.10)",
-                    line=dict(color="rgba(0,0,0,0)"),
-                    name="良品範囲", showlegend=True,
-                ))
-                fig.add_trace(go.Scatter(
-                    x=t_common, y=env_hi, mode="lines",
-                    line=dict(color="green", width=1.5, dash="dash"),
-                    name="上限", showlegend=False,
-                ))
-                fig.add_trace(go.Scatter(
-                    x=t_common, y=env_lo, mode="lines",
-                    line=dict(color="green", width=1.5, dash="dash"),
-                    name="下限", showlegend=False,
-                ))
-
             fig.add_vline(x=0, line_color="gray", line_dash="dot",
                           annotation_text="ステップ開始", annotation_position="top left")
-
-            _repr_win = next((w for w in insp_windows if w is not None), None)
-            if _repr_win is not None:
-                ws_r, we_r = _repr_win
-                fig.add_vrect(x0=ws_r, x1=we_r,
-                              fillcolor="rgba(255,200,0,0.08)",
-                              line_width=1, line_color="orange",
-                              annotation_text="検査ウィンドウ",
-                              annotation_position="top right")
 
             ng_count = sum(ng_flags)
             pk_ng_count = sum(peak_ng_flags)
