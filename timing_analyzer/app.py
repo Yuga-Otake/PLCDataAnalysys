@@ -1960,6 +1960,12 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
             # 数式タイプが参照するサイクルごとの検出点 {di: [(coord, val)|None, ...]}
             _det_pts_per_cycle = {}
 
+            if _tdet_list:
+                _h1, _h2, _h3, _h4, _h5 = st.columns([0.5, 3.5, 1.8, 0.8, 0.5])
+                _h1.caption("種別")
+                _h2.caption("名前 / タイプ")
+                _h3.caption("")
+                _h4.caption("有効")
             _t_del_idx = None
             for _di, _det in enumerate(_tdet_list):
                 _did   = _det["id"]
@@ -1972,11 +1978,16 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                           "検出点比較": "🔲", "数式": "🧮"}.get(_dtype, "📏")
 
                 _det_disp_name = st.session_state.get(f"{_dkey}_name", "").strip()
-                with st.expander(f"{_icon} #{_di+1} {_det_disp_name or _dtype}", expanded=True):
-                    _hd, _del_btn = st.columns([8, 1])
-                    with _del_btn:
-                        if st.button("🗑", key=f"{_dkey}_del", help="削除"):
-                            _t_del_idx = _di
+                _is_on = bool(st.session_state.get(f"{_dkey}_on", False))
+                _ri1, _ri2, _ri3, _ri4, _ri5 = st.columns([0.5, 3.5, 1.8, 0.8, 0.5])
+                with _ri1: st.markdown(f"{_icon} **{_di+1}**")
+                with _ri2: st.markdown(_det_disp_name or f"*{_dtype}*")
+                with _ri3: st.caption(_dtype if _det_disp_name else "")
+                with _ri4: st.markdown("✅" if _is_on else "⬜")
+                with _ri5:
+                    if st.button("🗑", key=f"{_dkey}_del", help="削除"):
+                        _t_del_idx = _di
+                with st.popover(f"⚙️ #{_di+1} {_det_disp_name or _dtype}"):
                     st.text_input("名前（任意）", key=f"{_dkey}_name",
                                   placeholder=f"例: {_dtype}①",
                                   help="傾向解析ラベル・サマリーに表示されます")
@@ -3373,6 +3384,12 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                     # 数式タイプが参照するサイクルごとの検出点 {xdi: [(coord, val)|None, ...]}
                     _xdet_pts_per_cycle = {}
 
+                    if _xydet_list:
+                        _xh1, _xh2, _xh3, _xh4, _xh5 = st.columns([0.5, 3.5, 1.8, 0.8, 0.5])
+                        _xh1.caption("種別")
+                        _xh2.caption("名前 / タイプ")
+                        _xh3.caption("")
+                        _xh4.caption("有効")
                     _xy_del_idx = None
                     for _xdi, _xdet in enumerate(_xydet_list):
                         _xdid   = _xdet["id"]
@@ -3385,11 +3402,16 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                    "検出点比較": "🔲", "数式": "🧮"}.get(_xdtype, "📏")
 
                         _xdet_disp_name = st.session_state.get(f"{_xdkey}_name", "").strip()
-                        with st.expander(f"{_xicon} #{_xdi+1} {_xdet_disp_name or _xdtype}", expanded=True):
-                            _xhd, _xdel_btn = st.columns([8, 1])
-                            with _xdel_btn:
-                                if st.button("🗑", key=f"{_xdkey}_del", help="削除"):
-                                    _xy_del_idx = _xdi
+                        _xis_on = bool(st.session_state.get(f"{_xdkey}_on", False))
+                        _xri1, _xri2, _xri3, _xri4, _xri5 = st.columns([0.5, 3.5, 1.8, 0.8, 0.5])
+                        with _xri1: st.markdown(f"{_xicon} **{_xdi+1}**")
+                        with _xri2: st.markdown(_xdet_disp_name or f"*{_xdtype}*")
+                        with _xri3: st.caption(_xdtype if _xdet_disp_name else "")
+                        with _xri4: st.markdown("✅" if _xis_on else "⬜")
+                        with _xri5:
+                            if st.button("🗑", key=f"{_xdkey}_del", help="削除"):
+                                _xy_del_idx = _xdi
+                        with st.popover(f"⚙️ #{_xdi+1} {_xdet_disp_name or _xdtype}"):
                             st.text_input("名前（任意）", key=f"{_xdkey}_name",
                                           placeholder=f"例: {_xdtype}①",
                                           help="傾向解析ラベル・サマリーに表示されます")
