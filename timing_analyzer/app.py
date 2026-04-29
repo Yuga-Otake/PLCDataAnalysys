@@ -9558,10 +9558,13 @@ with _page_tabs[2]:
                     "グラフ":   "時間軸",
                     "No":       _si + 1,
                     "タイプ":   _sdet.get("type", ""),
+                    "名前":     st.session_state.get(f"{_svkey}_{_did}_name", ""),
                     "有効":     "✅" if st.session_state.get(
                                     f"{_svkey}_{_did}_on", False) else "−",
                     "傾向解析": "📈" if st.session_state.get(
                                     f"{_svkey}_{_did}_trend_on", False) else "−",
+                    "_svkey":   _svkey,
+                    "_did":     _did,
                 })
             for _si, _sdet in enumerate(
                     st.session_state.get(f"{_svkey}_xy_det_list", [])):
@@ -9571,10 +9574,13 @@ with _page_tabs[2]:
                     "グラフ":   "XY",
                     "No":       _si + 1,
                     "タイプ":   _sdet.get("type", ""),
+                    "名前":     st.session_state.get(f"{_svkey}_{_did}_name", ""),
                     "有効":     "✅" if st.session_state.get(
                                     f"{_svkey}_{_did}_on", False) else "−",
                     "傾向解析": "📈" if st.session_state.get(
                                     f"{_svkey}_{_did}_trend_on", False) else "−",
+                    "_svkey":   _svkey,
+                    "_did":     _did,
                 })
 
         _wi_trig_now = st.session_state.get("wi_trigger",
@@ -9589,11 +9595,59 @@ with _page_tabs[2]:
             expanded=True,
         ):
             if _wi_sum_items:
-                st.dataframe(
-                    pd.DataFrame(_wi_sum_items),
+                _DISP_COLS = ["変数", "グラフ", "No", "タイプ", "名前", "有効", "傾向解析"]
+                _wi_df_disp = pd.DataFrame(
+                    [{c: item[c] for c in _DISP_COLS} for item in _wi_sum_items]
+                )
+                _wi_sel = st.dataframe(
+                    _wi_df_disp,
                     hide_index=True,
                     use_container_width=True,
+                    selection_mode="single-row",
+                    on_select="rerun",
                 )
+                _wi_sel_rows = _wi_sel.selection.rows
+                if _wi_sel_rows:
+                    _edit_item = _wi_sum_items[_wi_sel_rows[0]]
+                    _r_svkey   = _edit_item["_svkey"]
+                    _r_did     = _edit_item["_did"]
+                    with st.container(border=True):
+                        st.caption(
+                            f"✏️ {_edit_item['変数']} / {_edit_item['グラフ']}"
+                            f" #{_edit_item['No']}  {_edit_item['タイプ']}"
+                        )
+                        _sum_name_key = f"_sumtab_{_r_svkey}_{_r_did}_name"
+                        _cur_name = st.session_state.get(
+                            f"{_r_svkey}_{_r_did}_name", "")
+                        _new_name = st.text_input(
+                            "名前", value=_cur_name,
+                            key=_sum_name_key,
+                            placeholder=f"例: {_edit_item['タイプ']}①",
+                        )
+                        if _new_name != _cur_name:
+                            st.session_state[f"{_r_svkey}_{_r_did}_name"] = _new_name
+                        _is_on    = bool(st.session_state.get(
+                            f"{_r_svkey}_{_r_did}_on", False))
+                        _is_trend = bool(st.session_state.get(
+                            f"{_r_svkey}_{_r_did}_trend_on", False))
+                        _ec1, _ec2 = st.columns(2)
+                        with _ec1:
+                            if st.button(
+                                "✅ 有効 ON" if _is_on else "⬜ 有効 OFF",
+                                key=f"_sumtab_{_r_svkey}_{_r_did}_on_btn",
+                                use_container_width=True,
+                            ):
+                                st.session_state[f"{_r_svkey}_{_r_did}_on"] = not _is_on
+                                st.rerun()
+                        with _ec2:
+                            if st.button(
+                                "📈 傾向解析 ON" if _is_trend else "📉 傾向解析 OFF",
+                                key=f"_sumtab_{_r_svkey}_{_r_did}_trend_btn",
+                                use_container_width=True,
+                            ):
+                                st.session_state[f"{_r_svkey}_{_r_did}_trend_on"] = \
+                                    not _is_trend
+                                st.rerun()
             else:
                 st.info(
                     "検出点はまだ設定されていません。"
