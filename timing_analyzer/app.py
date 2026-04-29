@@ -1736,17 +1736,17 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
             return
         start_offsets = result_df[start_col].values  # ms, per cycle
 
-    # 全サイクル波形取得
-    try:
-        waveforms = cached_waveforms(df, trigger_col, edge, tuple(waveform_vars))
-    except Exception as e:
-        st.error(f"波形データ取得エラー: {e}")
-        return
-
-    n_cyc = min(len(waveforms), len(start_offsets))
-    if n_cyc == 0:
-        st.warning("波形データがありません")
-        return
+    # 非スタンドアロン: 全変数まとめて波形取得
+    if not _standalone:
+        try:
+            waveforms = cached_waveforms(df, trigger_col, edge, tuple(waveform_vars))
+        except Exception as e:
+            st.error(f"波形データ取得エラー: {e}")
+            return
+        n_cyc = min(len(waveforms), len(start_offsets))
+        if n_cyc == 0:
+            st.warning("波形データがありません")
+            return
 
     # 基準登録データ取得
     _baseline = st.session_state.get(pk(pname, "baseline"), {})
@@ -1756,6 +1756,28 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
         st.markdown(f"---\n#### 📈 {var}")
         # スタンドアロン: wvol_{pname}_{var} / 通常: wvol_{pname}_{step}_{var}
         _vkey = f"wvol_{pname}_{var}" if _standalone else f"wvol_{pname}_{name}_{var}"
+
+        # スタンドアロン: 変数ごとにトリガーを持つ（未設定は global wi_trigger を引き継ぐ）
+        if _standalone:
+            _var_trig = st.session_state.get(
+                f"{_vkey}_trigger",
+                st.session_state.get("wi_trigger", trigger_col),
+            )
+            _var_edge = st.session_state.get(
+                f"{_vkey}_edge",
+                st.session_state.get("wi_edge", edge),
+            )
+            try:
+                _var_n_cyc = len(cached_detect_cycles(df, _var_trig, _var_edge))
+            except Exception:
+                _var_n_cyc = 1
+            _var_start = np.zeros(_var_n_cyc)
+            try:
+                _var_waves = cached_waveforms(df, _var_trig, _var_edge, (var,))
+            except Exception:
+                _var_waves = []
+            _var_n_cyc = min(len(_var_waves), _var_n_cyc)
+
         _tab_time, _tab_xy = st.tabs(["⏱ 時間軸", "📊 XY グラフ"])
 
         with _tab_time:
@@ -1770,20 +1792,37 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
 
             # ── 波形データ抽出（ステップ開始基準に変換）─────────────
             step_waves = []   # list of (t_step_rel, v_arr)
-            for i in range(n_cyc):
-                cyc        = waveforms[i]
-                step_off   = float(start_offsets[i]) if not np.isnan(start_offsets[i]) else None
-                if step_off is None or var not in cyc.columns:
-                    continue
-                t_abs  = cyc["time_offset_ms"].values          # cycle-relative [ms]
-                t_step = t_abs - step_off                       # step-relative [ms]
-                v_arr  = cyc[var].values.astype(np.float64)
+            if _standalone:
+                for i in range(_var_n_cyc):
+                    cyc = _var_waves[i]
+                    if var not in cyc.columns:
+                        continue
+                    t_abs  = cyc["time_offset_ms"].values
+                    t_step = t_abs  # start_offset = 0 (trigger-relative)
+                    v_arr  = cyc[var].values.astype(np.float64)
+                    mask = (t_step >= -win_pre) & (t_step <= win_post)
+                    if mask.sum() < 2:
+                        continue
+                    step_waves.append((t_step[mask], v_arr[mask]))
+            else:
+                for i in range(n_cyc):
+                    cyc        = waveforms[i]
+                    step_off   = float(start_offsets[i]) if not np.isnan(start_offsets[i]) else None
+                    if step_off is None or var not in cyc.columns:
+                        continue
+                    t_abs  = cyc["time_offset_ms"].values          # cycle-relative [ms]
+                    t_step = t_abs - step_off                       # step-relative [ms]
+                    v_arr  = cyc[var].values.astype(np.float64)
+                    mask = (t_step >= -win_pre) & (t_step <= win_post)
+                    if mask.sum() < 2:
+                        continue
+                    step_waves.append((t_step[mask], v_arr[mask]))
 
-                # 表示ウィンドウでクリップ
-                mask = (t_step >= -win_pre) & (t_step <= win_post)
-                if mask.sum() < 2:
-                    continue
-                step_waves.append((t_step[mask], v_arr[mask]))
+            # ダイアログ用にキャッシュ（スタンドアロンのみ）
+            if _standalone and step_waves:
+                st.session_state[f"{_vkey}_step_waves_cache"] = [
+                    (t.tolist(), v.tolist()) for t, v in step_waves
+                ]
 
             if not step_waves:
                 st.warning(f"{var}: 有効な波形データがありません")
@@ -9527,6 +9566,346 @@ with _page_tabs[1]:
 
 
 # ═══════════════════════════════════════════════════════════════
+# 波形検査 ダイアログ定義
+# ═══════════════════════════════════════════════════════════════
+
+@st.dialog("波形検査 - 検出点編集", width="large")
+def _wi_edit_dialog():
+    ss   = st.session_state
+    item = ss.get("wi_edit_target", {})
+    if not item:
+        st.error("編集対象が見つかりません"); return
+
+    _r_svkey = item["_svkey"]
+    _r_did   = item["_did"]
+    _r_sv    = item["_sv"]
+    _r_graph = item["_graph"]
+    _r_dtype = item["_dtype"]
+    _r_no    = item["No"]
+    _dkey    = f"{_r_svkey}_{_r_did}"
+    _vkey    = _r_svkey
+    _dpfx    = f"_dlg_{_dkey}_"      # draft: 検出点設定
+    _vpfx    = f"_dlg_{_r_svkey}_"   # draft: 変数レベル設定
+
+    # ── 初回オープン: draft キーを実キーからコピー ──────────────
+    _init_flag = f"_dlg_init_{_dkey}"
+    if _init_flag not in ss:
+        for _rk, _rv in list(ss.items()):
+            if isinstance(_rk, str) and _rk.startswith(f"{_dkey}_") \
+                    and not _wi_skip_key(_rk):
+                ss[f"_dlg_{_rk}"] = _rv
+        ss[f"{_vpfx}trigger"] = ss.get(
+            f"{_r_svkey}_trigger",
+            ss.get("wi_trigger", bool_cols[0] if bool_cols else ""))
+        ss[f"{_vpfx}edge"] = ss.get(
+            f"{_r_svkey}_edge", ss.get("wi_edge", "RISE"))
+        ss[_init_flag] = True
+
+    st.caption(
+        f"変数: **{_r_sv}** / グラフ: {_r_graph} / #{_r_no}  {_r_dtype}")
+
+    # ── 波形プレビュー ────────────────────────────────────────────
+    _cached_sw = ss.get(f"{_vkey}_step_waves_cache", [])
+    if _cached_sw:
+        _sw_dlg = [(np.array(t), np.array(v)) for t, v in _cached_sw]
+        _fig_dlg = go.Figure()
+        for _t_sw, _v_sw in _sw_dlg[:60]:
+            _fig_dlg.add_trace(go.Scatter(
+                x=_t_sw, y=_v_sw, mode="lines",
+                line=dict(color="rgba(100,120,200,0.10)", width=1),
+                showlegend=False))
+        _tc_d = np.linspace(
+            float(min(t[0] for t, _ in _sw_dlg)),
+            float(max(t[-1] for t, _ in _sw_dlg)), 500)
+        _mat_d = np.full((len(_sw_dlg), len(_tc_d)), np.nan)
+        for _ji, (_t_sw, _v_sw) in enumerate(_sw_dlg):
+            _ix = np.searchsorted(_t_sw, _tc_d).clip(0, len(_t_sw) - 1)
+            _in = (_tc_d >= _t_sw[0]) & (_tc_d <= _t_sw[-1])
+            _mat_d[_ji, _in] = _v_sw[_ix[_in]]
+        _fig_dlg.add_trace(go.Scatter(
+            x=_tc_d, y=np.nanmean(_mat_d, axis=0),
+            mode="lines", line=dict(color="royalblue", width=2.5), name="平均"))
+        _fig_dlg.update_layout(
+            height=240, margin=dict(t=10, b=30, l=50, r=10),
+            xaxis_title="t [ms]", yaxis_title=_r_sv)
+        st.plotly_chart(_fig_dlg, use_container_width=True,
+                        key=f"_dlg_chart_{_dkey}")
+    else:
+        st.info("波形プレビューは波形検査タブで一度データを表示後に利用できます")
+
+    st.divider()
+
+    # ── トリガー / エッジ ─────────────────────────────────────────
+    _tc1, _tc2 = st.columns([3, 1])
+    with _tc1:
+        _trig_opts = bool_cols if bool_cols else [""]
+        _cur_trig  = ss.get(f"{_vpfx}trigger", _trig_opts[0] if _trig_opts else "")
+        _tidx      = _trig_opts.index(_cur_trig) if _cur_trig in _trig_opts else 0
+        st.selectbox("トリガー変数", _trig_opts, index=_tidx, key=f"{_vpfx}trigger")
+    with _tc2:
+        _cur_edge = ss.get(f"{_vpfx}edge", "RISE")
+        _eidx     = ["RISE", "FALL"].index(_cur_edge) if _cur_edge in ["RISE", "FALL"] else 0
+        st.radio("エッジ", ["RISE", "FALL"], index=_eidx,
+                 horizontal=True, key=f"{_vpfx}edge")
+
+    # ── 名前 / 有効 / 傾向解析 ───────────────────────────────────
+    _na1, _na2, _na3 = st.columns([4, 1, 1])
+    with _na1:
+        st.text_input("名前", value=ss.get(f"{_dpfx}name", ""),
+                      key=f"{_dpfx}name", placeholder=f"例: {_r_dtype}①")
+    with _na2:
+        st.checkbox("有効", value=bool(ss.get(f"{_dpfx}on", False)),
+                    key=f"{_dpfx}on")
+    with _na3:
+        st.checkbox("📈 傾向解析", value=bool(ss.get(f"{_dpfx}trend_on", False)),
+                    key=f"{_dpfx}trend_on")
+
+    # ── タイプ固有の設定 ──────────────────────────────────────────
+    if _r_graph == "時間軸":
+        if _r_dtype == "傾き変化点":
+            _pa, _pb, _pc, _pd = st.columns([2, 2, 2, 3])
+            with _pa:
+                st.markdown("**① 平滑化幅**")
+                st.number_input("サンプル数", min_value=1, max_value=50,
+                                value=int(ss.get(f"{_dpfx}smooth", 5)), step=1,
+                                key=f"{_dpfx}smooth")
+            with _pb:
+                st.markdown("**n_L（左）**")
+                st.number_input("左へ何サンプル", min_value=1, max_value=100,
+                                value=int(ss.get(f"{_dpfx}nleft", 3)), step=1,
+                                key=f"{_dpfx}nleft")
+            with _pc:
+                st.markdown("**n_R（右）**")
+                st.number_input("右へ何サンプル", min_value=1, max_value=100,
+                                value=int(ss.get(f"{_dpfx}nright", 3)), step=1,
+                                key=f"{_dpfx}nright")
+            with _pd:
+                st.markdown("**③ 閾値 |R − L|**")
+                st.number_input("閾値", min_value=0.0,
+                                value=float(ss.get(f"{_dpfx}thresh", 0.0)),
+                                step=0.0001, format="%.4f", key=f"{_dpfx}thresh")
+            _dc1, _dc2 = st.columns(2)
+            with _dc1:
+                st.checkbox("📈 増加方向を検出 (R > L)",
+                            value=bool(ss.get(f"{_dpfx}dir_inc", True)),
+                            key=f"{_dpfx}dir_inc")
+            with _dc2:
+                st.checkbox("📉 減少方向を検出 (L > R)",
+                            value=bool(ss.get(f"{_dpfx}dir_dec", True)),
+                            key=f"{_dpfx}dir_dec")
+            _rca, _rcb, _rcc = st.columns([1, 2, 2])
+            with _rca:
+                st.markdown("**🔍 t 検索範囲 [ms]**")
+                st.checkbox("指定する", value=bool(ss.get(f"{_dpfx}use_range", False)),
+                            key=f"{_dpfx}use_range")
+            _use_r_dlg = bool(ss.get(f"{_dpfx}use_range", False))
+            with _rcb:
+                st.number_input("開始", value=float(ss.get(f"{_dpfx}range_s", 0.0)),
+                                step=5.0, key=f"{_dpfx}range_s", disabled=not _use_r_dlg)
+            with _rcc:
+                st.number_input("終了", value=float(ss.get(f"{_dpfx}range_e", 200.0)),
+                                step=5.0, key=f"{_dpfx}range_e", disabled=not _use_r_dlg)
+            _vca, _vcb, _vcc = st.columns([1, 2, 2])
+            with _vca:
+                st.markdown("**🔍 v 検索範囲**")
+                st.checkbox("指定する", value=bool(ss.get(f"{_dpfx}use_vrange", False)),
+                            key=f"{_dpfx}use_vrange")
+            _use_vr_dlg = bool(ss.get(f"{_dpfx}use_vrange", False))
+            with _vcb:
+                st.number_input("v 下限", value=float(ss.get(f"{_dpfx}vrange_lo", 0.0)),
+                                step=0.1, key=f"{_dpfx}vrange_lo", disabled=not _use_vr_dlg)
+            with _vcc:
+                st.number_input("v 上限", value=float(ss.get(f"{_dpfx}vrange_hi", 1.0)),
+                                step=0.1, key=f"{_dpfx}vrange_hi", disabled=not _use_vr_dlg)
+            st.number_input("🎯 N番目（0=全て, 1=最初, -1=最後）",
+                            value=int(ss.get(f"{_dpfx}nth", 0)), step=1,
+                            key=f"{_dpfx}nth")
+
+        elif _r_dtype == "閾値超え検出":
+            _thc1, _thc2 = st.columns([2, 2])
+            with _thc1:
+                st.markdown("**閾値**")
+                st.number_input("閾値", value=float(ss.get(f"{_dpfx}tv", 1.0)),
+                                step=0.1, key=f"{_dpfx}tv")
+            with _thc2:
+                st.markdown("**方向**")
+                _tdir_opts = ["上昇 ↑", "下降 ↓", "両方"]
+                _cur_tdir  = ss.get(f"{_dpfx}tdir", "上昇 ↑")
+                _tdir_idx  = (_tdir_opts.index(_cur_tdir)
+                              if _cur_tdir in _tdir_opts else 0)
+                st.radio("方向", _tdir_opts, index=_tdir_idx,
+                         horizontal=True, key=f"{_dpfx}tdir")
+            st.number_input("🎯 N番目（0=全て, 1=最初, -1=最後）",
+                            value=int(ss.get(f"{_dpfx}nth", 1)), step=1,
+                            key=f"{_dpfx}nth")
+            _rc1, _rc2, _rc3 = st.columns([1, 2, 2])
+            with _rc1:
+                st.markdown("**🔍 t 検索範囲 [ms]**")
+                st.checkbox("指定する", value=bool(ss.get(f"{_dpfx}use_range", False)),
+                            key=f"{_dpfx}use_range")
+            _use_r_dlg = bool(ss.get(f"{_dpfx}use_range", False))
+            with _rc2:
+                st.number_input("開始", value=float(ss.get(f"{_dpfx}range_s", 0.0)),
+                                step=5.0, key=f"{_dpfx}range_s", disabled=not _use_r_dlg)
+            with _rc3:
+                st.number_input("終了", value=float(ss.get(f"{_dpfx}range_e", 200.0)),
+                                step=5.0, key=f"{_dpfx}range_e", disabled=not _use_r_dlg)
+            _vc1, _vc2, _vc3 = st.columns([1, 2, 2])
+            with _vc1:
+                st.markdown("**🔍 v 検索範囲**")
+                st.checkbox("指定する", value=bool(ss.get(f"{_dpfx}use_vrange", False)),
+                            key=f"{_dpfx}use_vrange")
+            _use_vr_dlg = bool(ss.get(f"{_dpfx}use_vrange", False))
+            with _vc2:
+                st.number_input("v 下限", value=float(ss.get(f"{_dpfx}vrange_lo", 0.0)),
+                                step=0.1, key=f"{_dpfx}vrange_lo", disabled=not _use_vr_dlg)
+            with _vc3:
+                st.number_input("v 上限", value=float(ss.get(f"{_dpfx}vrange_hi", 1.0)),
+                                step=0.1, key=f"{_dpfx}vrange_hi", disabled=not _use_vr_dlg)
+
+        elif _r_dtype in ["最大値点", "最小値点"]:
+            _rc1, _rc2, _rc3 = st.columns([1, 2, 2])
+            with _rc1:
+                st.markdown("**🔍 t 検索範囲 [ms]**")
+                st.checkbox("指定する", value=bool(ss.get(f"{_dpfx}use_range", False)),
+                            key=f"{_dpfx}use_range")
+            _use_r_dlg = bool(ss.get(f"{_dpfx}use_range", False))
+            with _rc2:
+                st.number_input("開始", value=float(ss.get(f"{_dpfx}range_s", 0.0)),
+                                step=5.0, key=f"{_dpfx}range_s", disabled=not _use_r_dlg)
+            with _rc3:
+                st.number_input("終了", value=float(ss.get(f"{_dpfx}range_e", 200.0)),
+                                step=5.0, key=f"{_dpfx}range_e", disabled=not _use_r_dlg)
+            _vc1, _vc2, _vc3 = st.columns([1, 2, 2])
+            with _vc1:
+                st.markdown("**🔍 v 検索範囲**")
+                st.checkbox("指定する", value=bool(ss.get(f"{_dpfx}use_vrange", False)),
+                            key=f"{_dpfx}use_vrange")
+            _use_vr_dlg = bool(ss.get(f"{_dpfx}use_vrange", False))
+            with _vc2:
+                st.number_input("v 下限", value=float(ss.get(f"{_dpfx}vrange_lo", 0.0)),
+                                step=0.1, key=f"{_dpfx}vrange_lo", disabled=not _use_vr_dlg)
+            with _vc3:
+                st.number_input("v 上限", value=float(ss.get(f"{_dpfx}vrange_hi", 1.0)),
+                                step=0.1, key=f"{_dpfx}vrange_hi", disabled=not _use_vr_dlg)
+
+        elif _r_dtype == "数式":
+            st.caption("参照点を p1t/p1v, p2t/p2v ... の形で数式を記述してください")
+            st.text_input("数式", value=ss.get(f"{_dpfx}expr", ""),
+                          key=f"{_dpfx}expr", placeholder="例: p1t - p2t")
+            _fmc1, _fmc2 = st.columns(2)
+            with _fmc1:
+                st.number_input("上限 NG（0=無効）",
+                                value=float(ss.get(f"{_dpfx}hi_limit", 0.0)),
+                                step=0.01, key=f"{_dpfx}hi_limit")
+            with _fmc2:
+                st.number_input("下限 NG（0=無効）",
+                                value=float(ss.get(f"{_dpfx}lo_limit", 0.0)),
+                                step=0.01, key=f"{_dpfx}lo_limit")
+        else:
+            st.info(f"「{_r_dtype}」の詳細設定はメインエリアの ⚙️ ポップオーバーから行ってください")
+
+        # ± Δ 判定（点取得系の場合のみ）
+        if _r_dtype in ["傾き変化点", "閾値超え検出", "最大値点", "最小値点"]:
+            st.markdown("**✅ OK/NG 判定（基準±Δ）**")
+            _pm1, _pm2, _pm3 = st.columns([1.5, 2, 2])
+            with _pm1:
+                st.checkbox("基準±Δで判定",
+                            value=bool(ss.get(f"{_dpfx}pm_on", False)),
+                            key=f"{_dpfx}pm_on")
+            _pm_on_d = bool(ss.get(f"{_dpfx}pm_on", False))
+            with _pm2:
+                st.number_input("t 許容差 [ms]（0=無効）", min_value=0.0,
+                                value=float(ss.get(f"{_dpfx}pm_dt", 0.0)), step=1.0,
+                                key=f"{_dpfx}pm_dt", disabled=not _pm_on_d)
+            with _pm3:
+                st.number_input("v 許容差（0=無効）", min_value=0.0,
+                                value=float(ss.get(f"{_dpfx}pm_dv", 0.0)), step=0.01,
+                                key=f"{_dpfx}pm_dv", disabled=not _pm_on_d)
+    else:
+        st.info("XY グラフの詳細設定はメインエリアの ⚙️ ポップオーバーから行ってください")
+
+    st.divider()
+
+    # ── 保存 / キャンセル ─────────────────────────────────────────
+    _btn1, _btn2 = st.columns(2)
+    with _btn1:
+        if st.button("💾 保存", use_container_width=True, type="primary",
+                     key=f"_dlg_save_{_dkey}"):
+            ss[f"{_r_svkey}_trigger"] = ss.get(f"{_vpfx}trigger", "")
+            ss[f"{_r_svkey}_edge"]    = ss.get(f"{_vpfx}edge", "RISE")
+            _dpfx_len = len(_dpfx)
+            for _dk in list(ss.keys()):
+                if isinstance(_dk, str) and _dk.startswith(_dpfx):
+                    _real_k = f"{_dkey}_{_dk[_dpfx_len:]}"
+                    if not _wi_skip_key(_real_k):
+                        ss[_real_k] = ss[_dk]
+            ss.pop("wi_edit_target", None)
+            ss.pop(_init_flag, None)
+            st.rerun()
+    with _btn2:
+        if st.button("✖ キャンセル", use_container_width=True,
+                     key=f"_dlg_cancel_{_dkey}"):
+            ss.pop("wi_edit_target", None)
+            ss.pop(_init_flag, None)
+            st.rerun()
+
+
+@st.dialog("検出点を追加", width="large")
+def _wi_add_dialog():
+    ss = st.session_state
+    st.caption("追加する検出点の設定を選択してください")
+
+    _DET_TYPES_ADD_T  = ["傾き変化点", "閾値超え検出", "最大値点", "最小値点",
+                         "上下判定比較", "最大値判定", "最小値判定", "検出点比較", "数式"]
+    _DET_TYPES_ADD_XY = ["傾き変化点", "閾値超え検出", "Y最大値点", "Y最小値点",
+                         "上下判定比較", "Y最大値判定", "Y最小値判定", "検出点比較", "数式"]
+
+    _ac1, _ac2, _ac3 = st.columns([3, 1.5, 2])
+    with _ac1:
+        _add_var = st.selectbox("波形変数", num_cols, key="_wi_add_var")
+    with _ac2:
+        _add_graph = st.radio("グラフ", ["時間軸", "XY"], key="_wi_add_graph")
+    with _ac3:
+        _det_types_a = (_DET_TYPES_ADD_T if _add_graph == "時間軸"
+                        else _DET_TYPES_ADD_XY)
+        _add_dtype = st.selectbox("検出点タイプ", _det_types_a, key="_wi_add_dtype")
+
+    st.divider()
+    _ab1, _ab2 = st.columns(2)
+    with _ab1:
+        if st.button("波形で設定 →", use_container_width=True,
+                     type="primary", key="_wi_add_confirm"):
+            _svkey = f"wvol___global_{_add_var}"
+            if _add_graph == "時間軸":
+                _list_k = f"{_svkey}_t_det_list"
+                _cnt_k  = f"{_svkey}_t_det_cnt"
+                _id_pfx = "td"
+            else:
+                _list_k = f"{_svkey}_xy_det_list"
+                _cnt_k  = f"{_svkey}_xy_det_cnt"
+                _id_pfx = "xyd"
+            _cnt     = ss.get(_cnt_k, 0)
+            _new_id  = f"{_id_pfx}{_cnt}"
+            _det_lst = list(ss.get(_list_k, []))
+            _det_lst.append({"id": _new_id, "type": _add_dtype})
+            ss[_list_k] = _det_lst
+            ss[_cnt_k]  = _cnt + 1
+            ss["wi_edit_target"] = {
+                "_svkey": _svkey, "_did": _new_id,
+                "_sv": _add_var, "_graph": _add_graph, "_dtype": _add_dtype,
+                "No": len(_det_lst), "変数": _add_var,
+                "グラフ": _add_graph, "タイプ": _add_dtype,
+                "名前": "", "有効": "−", "傾向解析": "−",
+            }
+            ss["wi_transition_to_edit"] = True
+            st.rerun()
+    with _ab2:
+        if st.button("キャンセル", use_container_width=True, key="_wi_add_cancel"):
+            st.rerun()
+
+
+# ═══════════════════════════════════════════════════════════════
 # 🔍 波形検査タブ（ステップ依存なしの独立波形監視）
 # ═══════════════════════════════════════════════════════════════
 
@@ -9546,15 +9925,29 @@ with _page_tabs[2]:
         # ══════════════════════════════════════════════════════════════
         # 📋 登録サマリー & 保存・読込
         # ══════════════════════════════════════════════════════════════
+        # ダイアログ遷移フラグ処理（追加→編集）
+        if st.session_state.get("wi_transition_to_edit") \
+                and "wi_edit_target" in st.session_state:
+            st.session_state.pop("wi_transition_to_edit", None)
+            _wi_edit_dialog()
+
         # 現在設定されている検出点を全変数から収集
         _wi_sum_items: list = []
         for _sv in num_cols:
-            _svkey = f"wvol___global_{_sv}"
+            _svkey   = f"wvol___global_{_sv}"
+            _sv_trig = st.session_state.get(
+                f"{_svkey}_trigger",
+                st.session_state.get("wi_trigger", bool_cols[0] if bool_cols else ""))
+            _sv_edge = st.session_state.get(
+                f"{_svkey}_edge",
+                st.session_state.get("wi_edge", "RISE"))
             for _si, _sdet in enumerate(
                     st.session_state.get(f"{_svkey}_t_det_list", [])):
                 _did = _sdet.get("id", "")
                 _wi_sum_items.append({
                     "変数":     _sv,
+                    "トリガー": _sv_trig,
+                    "エッジ":   _sv_edge,
                     "グラフ":   "時間軸",
                     "No":       _si + 1,
                     "タイプ":   _sdet.get("type", ""),
@@ -9565,12 +9958,17 @@ with _page_tabs[2]:
                                     f"{_svkey}_{_did}_trend_on", False) else "−",
                     "_svkey":   _svkey,
                     "_did":     _did,
+                    "_sv":      _sv,
+                    "_graph":   "時間軸",
+                    "_dtype":   _sdet.get("type", ""),
                 })
             for _si, _sdet in enumerate(
                     st.session_state.get(f"{_svkey}_xy_det_list", [])):
                 _did = _sdet.get("id", "")
                 _wi_sum_items.append({
                     "変数":     _sv,
+                    "トリガー": _sv_trig,
+                    "エッジ":   _sv_edge,
                     "グラフ":   "XY",
                     "No":       _si + 1,
                     "タイプ":   _sdet.get("type", ""),
@@ -9581,77 +9979,56 @@ with _page_tabs[2]:
                                     f"{_svkey}_{_did}_trend_on", False) else "−",
                     "_svkey":   _svkey,
                     "_did":     _did,
+                    "_sv":      _sv,
+                    "_graph":   "XY",
+                    "_dtype":   _sdet.get("type", ""),
                 })
 
-        _wi_trig_now = st.session_state.get("wi_trigger",
-                                            bool_cols[0] if bool_cols else "")
-        _wi_edge_now = st.session_state.get("wi_edge", "RISE")
-        _wi_n_dets   = len(_wi_sum_items)
-        _wi_n_trend  = sum(1 for r in _wi_sum_items if r["傾向解析"] == "📈")
+        _wi_n_dets  = len(_wi_sum_items)
+        _wi_n_trend = sum(1 for r in _wi_sum_items if r["傾向解析"] == "📈")
 
         with st.expander(
-            f"📋 登録サマリー　トリガー: **{_wi_trig_now}** / {_wi_edge_now}"
-            f"　検出点: **{_wi_n_dets}** 件　傾向解析送出: **{_wi_n_trend}** 件",
+            f"📋 登録サマリー　検出点: **{_wi_n_dets}** 件"
+            f"　傾向解析送出: **{_wi_n_trend}** 件",
             expanded=True,
         ):
-            if _wi_sum_items:
-                _DISP_COLS = ["変数", "グラフ", "No", "タイプ", "名前", "有効", "傾向解析"]
-                _wi_df_disp = pd.DataFrame(
-                    [{c: item[c] for c in _DISP_COLS} for item in _wi_sum_items]
-                )
-                _wi_sel = st.dataframe(
-                    _wi_df_disp,
-                    hide_index=True,
-                    use_container_width=True,
-                    selection_mode="single-row",
-                    on_select="rerun",
-                )
-                _wi_sel_rows = _wi_sel.selection.rows
-                if _wi_sel_rows:
-                    _edit_item = _wi_sum_items[_wi_sel_rows[0]]
-                    _r_svkey   = _edit_item["_svkey"]
-                    _r_did     = _edit_item["_did"]
-                    with st.container(border=True):
-                        st.caption(
-                            f"✏️ {_edit_item['変数']} / {_edit_item['グラフ']}"
-                            f" #{_edit_item['No']}  {_edit_item['タイプ']}"
-                        )
-                        _sum_name_key = f"_sumtab_{_r_svkey}_{_r_did}_name"
-                        _cur_name = st.session_state.get(
-                            f"{_r_svkey}_{_r_did}_name", "")
-                        _new_name = st.text_input(
-                            "名前", value=_cur_name,
-                            key=_sum_name_key,
-                            placeholder=f"例: {_edit_item['タイプ']}①",
-                        )
-                        if _new_name != _cur_name:
-                            st.session_state[f"{_r_svkey}_{_r_did}_name"] = _new_name
-                        _is_on    = bool(st.session_state.get(
-                            f"{_r_svkey}_{_r_did}_on", False))
-                        _is_trend = bool(st.session_state.get(
-                            f"{_r_svkey}_{_r_did}_trend_on", False))
-                        _ec1, _ec2 = st.columns(2)
-                        with _ec1:
-                            if st.button(
-                                "✅ 有効 ON" if _is_on else "⬜ 有効 OFF",
-                                key=f"_sumtab_{_r_svkey}_{_r_did}_on_btn",
-                                use_container_width=True,
-                            ):
-                                st.session_state[f"{_r_svkey}_{_r_did}_on"] = not _is_on
-                                st.rerun()
-                        with _ec2:
-                            if st.button(
-                                "📈 傾向解析 ON" if _is_trend else "📉 傾向解析 OFF",
-                                key=f"_sumtab_{_r_svkey}_{_r_did}_trend_btn",
-                                use_container_width=True,
-                            ):
-                                st.session_state[f"{_r_svkey}_{_r_did}_trend_on"] = \
-                                    not _is_trend
-                                st.rerun()
-            else:
+            # ── ヘッダー行 ─────────────────────────────────────────
+            _wh = st.columns([2, 1.8, 0.6, 0.8, 0.4, 1.6, 1.6, 0.5, 0.5, 0.6])
+            for _lbl, _col in zip(
+                ["変数", "トリガー", "エッジ", "グラフ", "No",
+                 "タイプ", "名前", "有効", "📈", ""],
+                _wh,
+            ):
+                _col.caption(_lbl)
+
+            # ── データ行 ──────────────────────────────────────────
+            for _wi_ri, _wi_row in enumerate(_wi_sum_items):
+                _wr = st.columns([2, 1.8, 0.6, 0.8, 0.4, 1.6, 1.6, 0.5, 0.5, 0.6])
+                _wr[0].markdown(f"**{_wi_row['変数']}**")
+                _wr[1].markdown(_wi_row["トリガー"])
+                _wr[2].markdown(_wi_row["エッジ"])
+                _wr[3].markdown(_wi_row["グラフ"])
+                _wr[4].markdown(str(_wi_row["No"]))
+                _wr[5].markdown(_wi_row["タイプ"])
+                _wr[6].markdown(_wi_row["名前"] or "−")
+                _wr[7].markdown(_wi_row["有効"])
+                _wr[8].markdown(_wi_row["傾向解析"])
+                with _wr[9]:
+                    if st.button("⚙️", key=f"_wisum_edit_{_wi_ri}",
+                                 help="波形を見ながら編集"):
+                        st.session_state["wi_edit_target"] = _wi_row
+                        _wi_edit_dialog()
+
+            # ── 行追加ボタン ────────────────────────────────────────
+            _wadd_c1, _wadd_c2 = st.columns([9.6, 0.6])
+            with _wadd_c2:
+                if st.button("＋", key="_wisum_add_btn", help="検出点を追加"):
+                    _wi_add_dialog()
+
+            if not _wi_sum_items:
                 st.info(
                     "検出点はまだ設定されていません。"
-                    "下のトリガー設定から変数を選んで検出点を追加してください。"
+                    "右の ＋ ボタンまたは下のトリガー設定から変数を選んで検出点を追加してください。"
                 )
 
             st.divider()
