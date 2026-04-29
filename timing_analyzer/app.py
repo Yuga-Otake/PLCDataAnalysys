@@ -1848,20 +1848,6 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
             _DET_COLORS       = ["darkorange", "deeppink", "limegreen", "dodgerblue",
                                  "gold", "orchid", "coral", "steelblue"]
 
-            _add_ca, _add_cb = st.columns([2, 4])
-            with _add_cb:
-                st.selectbox("検出点タイプ", _DET_TYPES_T, key=f"{_vkey}_t_det_type_sel",
-                             help="点取得系: 傾き変化点・閾値超え検出・最大値点・最小値点  |  判定系: それ以外")
-            with _add_ca:
-                st.markdown("<div style='padding-top:28px'></div>", unsafe_allow_html=True)
-                if st.button("＋ 検出点を追加", key=f"{_vkey}_t_det_add", type="secondary"):
-                    _cnt = st.session_state[_tdet_cnt_key]
-                    _new_type = st.session_state.get(f"{_vkey}_t_det_type_sel", "傾き変化点")
-                    _tdet_list.append({"id": f"td{_cnt}", "type": _new_type})
-                    st.session_state[_tdet_list_key] = _tdet_list
-                    st.session_state[_tdet_cnt_key] = _cnt + 1
-                    st.rerun()
-
             # 結果収集用
             all_inf_markers = []   # [{"t":[], "v":[], "label":str, "color":str}]
             peak_ng_flags   = [False] * len(step_waves)
@@ -2792,6 +2778,21 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                     "参照先の検出点タイプ（傾き変化点・閾値超え検出）を先に追加し有効にしてください。"
                                 )
 
+            # ── 検出点追加（リスト末尾） ────────────────────────────
+            _badd_c1, _badd_c2 = st.columns([5, 2])
+            with _badd_c1:
+                st.selectbox("", _DET_TYPES_T, key=f"{_vkey}_t_det_type_sel",
+                             label_visibility="collapsed",
+                             help="点取得系: 傾き変化点・閾値超え検出・最大値点・最小値点  |  判定系: それ以外")
+            with _badd_c2:
+                if st.button("＋ 追加", key=f"{_vkey}_t_det_add", use_container_width=True):
+                    _cnt = st.session_state[_tdet_cnt_key]
+                    _new_type = st.session_state.get(f"{_vkey}_t_det_type_sel", "傾き変化点")
+                    _tdet_list.append({"id": f"td{_cnt}", "type": _new_type})
+                    st.session_state[_tdet_list_key] = _tdet_list
+                    st.session_state[_tdet_cnt_key] = _cnt + 1
+                    st.rerun()
+
             if _t_del_idx is not None:
                 _tdet_list.pop(_t_del_idx)
                 st.session_state[_tdet_list_key] = _tdet_list
@@ -3197,23 +3198,6 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                     _DET_TYPES_XY  = _DET_TYPES_XY_POINT + _DET_TYPES_XY_JUDGE
                     _DET_COLORS_XY = ["darkorange", "deeppink", "limegreen", "dodgerblue",
                                       "gold", "orchid", "coral", "steelblue"]
-
-                    _xy_add_ca, _xy_add_cb = st.columns([2, 4])
-                    with _xy_add_cb:
-                        st.selectbox("検出点タイプ", _DET_TYPES_XY,
-                                     key=f"{_vkey}_xy_det_type_sel")
-                    with _xy_add_ca:
-                        st.markdown("<div style='padding-top:28px'></div>",
-                                    unsafe_allow_html=True)
-                        if st.button("＋ 検出点を追加", key=f"{_vkey}_xy_det_add",
-                                     type="secondary"):
-                            _xcnt = st.session_state[_xydet_cnt_key]
-                            _xnew_type = st.session_state.get(
-                                f"{_vkey}_xy_det_type_sel", "傾き変化点")
-                            _xydet_list.append({"id": f"xyd{_xcnt}", "type": _xnew_type})
-                            st.session_state[_xydet_list_key] = _xydet_list
-                            st.session_state[_xydet_cnt_key] = _xcnt + 1
-                            st.rerun()
 
                     # 結果収集用
                     all_xy_inf_markers = []
@@ -4231,6 +4215,22 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
                                             "参照先の検出点タイプ（傾き変化点・閾値超え検出）を"
                                             "先に追加し有効にしてください。"
                                         )
+
+                    # ── XY 検出点追加（リスト末尾） ──────────────────
+                    _xbadd_c1, _xbadd_c2 = st.columns([5, 2])
+                    with _xbadd_c1:
+                        st.selectbox("", _DET_TYPES_XY, key=f"{_vkey}_xy_det_type_sel",
+                                     label_visibility="collapsed")
+                    with _xbadd_c2:
+                        if st.button("＋ 追加", key=f"{_vkey}_xy_det_add",
+                                     use_container_width=True):
+                            _xcnt = st.session_state[_xydet_cnt_key]
+                            _xnew_type = st.session_state.get(
+                                f"{_vkey}_xy_det_type_sel", "傾き変化点")
+                            _xydet_list.append({"id": f"xyd{_xcnt}", "type": _xnew_type})
+                            st.session_state[_xydet_list_key] = _xydet_list
+                            st.session_state[_xydet_cnt_key] = _xcnt + 1
+                            st.rerun()
 
                     if _xy_del_idx is not None:
                         _xydet_list.pop(_xy_del_idx)
