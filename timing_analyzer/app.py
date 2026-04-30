@@ -136,10 +136,7 @@ def _wi_skip_key(k: str) -> bool:
 
 def _wi_save_config(ss, num_cols_list: list) -> None:
     """現在の波形検査設定を wi_current_config.json に保存する。"""
-    snap: dict = {
-        "wi_trigger": ss.get("wi_trigger", ""),
-        "wi_edge":    ss.get("wi_edge", "RISE"),
-    }
+    snap: dict = {}
     for _v in num_cols_list:
         _vk = f"wvol___global_{_v}"
         for _k, _val in ss.items():
@@ -1207,22 +1204,20 @@ def _detect_xy_point_for_trend(x_sw, y_sw, dtype, dkey, ss):
     return None
 
 
-def _compute_wi_det_stats_for_csv(df, trigger_col, edge, var_list, ss):
+def _compute_wi_det_stats_for_csv(df, var_list, ss, trigger_col="", edge="RISE"):
     """
     CSV 1 ファイル分の波形検査検出点を解析し、各検出点の統計 (平均・σ) を返す。
     df          : DataFrame (1 CSV)
-    trigger_col : トリガー列名 (wi_trigger)
-    edge        : "RISE" | "FALL"
     var_list    : アナログ変数名リスト
     ss          : st.session_state
+    trigger_col : グローバルフォールバックトリガー（省略可）
+    edge        : グローバルフォールバックエッジ（省略可）
     Returns     : dict[det_key -> {label, color, t_mean, t_std, v_mean, v_std, n}]
     """
     _POINT_TYPES = ["傾き変化点", "閾値超え検出", "最大値点", "最小値点"]
     _DET_COLORS  = ["darkorange", "deeppink", "limegreen", "dodgerblue",
                     "gold", "orchid", "coral", "steelblue"]
     stats = {}
-    if not trigger_col or trigger_col not in df.columns:
-        return stats
     for var in var_list:
         if var not in df.columns:
             continue
@@ -1238,8 +1233,13 @@ def _compute_wi_det_stats_for_csv(df, trigger_col, edge, var_list, ss):
             continue
         _wpre  = int(ss.get(f"{_vkey}_wpre",   50))
         _wpost = int(ss.get(f"{_vkey}_wpost", 300))
+        # 変数ごとのトリガー/エッジ（未設定ならフォールバック）
+        _var_trig = ss.get(f"{_vkey}_trigger", trigger_col) or trigger_col
+        _var_edge = ss.get(f"{_vkey}_edge", edge)
+        if not _var_trig or _var_trig not in df.columns:
+            continue
         try:
-            _waveforms = cached_waveforms(df, trigger_col, edge, (var,))
+            _waveforms = cached_waveforms(df, _var_trig, _var_edge, (var,))
         except Exception:
             continue
         step_waves = []
@@ -1295,9 +1295,13 @@ def _compute_wi_det_stats_for_csv(df, trigger_col, edge, var_list, ss):
             continue
         _wpre  = int(ss.get(f"{_vkey}_wpre",   50))
         _wpost = int(ss.get(f"{_vkey}_wpost", 300))
+        _var_trig_xy = ss.get(f"{_vkey}_trigger", trigger_col) or trigger_col
+        _var_edge_xy = ss.get(f"{_vkey}_edge", edge)
+        if not _var_trig_xy or _var_trig_xy not in df.columns:
+            continue
         try:
-            _wf_y = cached_waveforms(df, trigger_col, edge, (var,))
-            _wf_x = cached_waveforms(df, trigger_col, edge, (_xvar,))
+            _wf_y = cached_waveforms(df, _var_trig_xy, _var_edge_xy, (var,))
+            _wf_x = cached_waveforms(df, _var_trig_xy, _var_edge_xy, (_xvar,))
         except Exception:
             continue
         step_waves_xy = []
@@ -1356,8 +1360,12 @@ def _compute_wi_det_stats_for_csv(df, trigger_col, edge, var_list, ss):
             continue
         _wpre  = int(ss.get(f"{_vkey}_wpre",   50))
         _wpost = int(ss.get(f"{_vkey}_wpost", 300))
+        _var_trig_fm = ss.get(f"{_vkey}_trigger", trigger_col) or trigger_col
+        _var_edge_fm = ss.get(f"{_vkey}_edge", edge)
+        if not _var_trig_fm or _var_trig_fm not in df.columns:
+            continue
         try:
-            _wf_fm = cached_waveforms(df, trigger_col, edge, (var,))
+            _wf_fm = cached_waveforms(df, _var_trig_fm, _var_edge_fm, (var,))
         except Exception:
             continue
         _sw_fm = []
@@ -1757,15 +1765,15 @@ def _render_waveform_overlay(df: pd.DataFrame, trigger_col: str, edge: str,
         # スタンドアロン: wvol_{pname}_{var} / 通常: wvol_{pname}_{step}_{var}
         _vkey = f"wvol_{pname}_{var}" if _standalone else f"wvol_{pname}_{name}_{var}"
 
-        # スタンドアロン: 変数ごとにトリガーを持つ（未設定は global wi_trigger を引き継ぐ）
+        # スタンドアロン: 変数ごとにトリガーを持つ（未設定は trigger_col にフォールバック）
         if _standalone:
             _var_trig = st.session_state.get(
                 f"{_vkey}_trigger",
-                st.session_state.get("wi_trigger", trigger_col),
+                trigger_col,
             )
             _var_edge = st.session_state.get(
                 f"{_vkey}_edge",
-                st.session_state.get("wi_edge", edge),
+                edge,
             )
             try:
                 _var_n_cyc = len(cached_detect_cycles(df, _var_trig, _var_edge))
@@ -8537,10 +8545,6 @@ with _page_tabs[1]:
 
                 # ── 波形検査 設定確認パネル ─────────────────────────────
                 # ※ 傾向解析対象は時間軸検出点のみ（XY は今後対応）
-                _wi_trig_pre = st.session_state.get(
-                    "wi_trigger", bool_cols[0] if bool_cols else "（未設定）"
-                )
-                _wi_edge_pre = st.session_state.get("wi_edge", "RISE")
                 _wi_pre_items: list = []    # {var, idx, type, id, warn}
                 for _pv in num_cols:
                     _pvkey = f"wvol___global_{_pv}"
@@ -8580,7 +8584,6 @@ with _page_tabs[1]:
                     1 for x in _wi_pre_items if not x["warn"])
                 with st.expander(
                     f"🔍 波形検査 設定確認　"
-                    f"トリガー: **{_wi_trig_pre}** / {_wi_edge_pre}　"
                     f"傾向送出: **{_wi_pre_ok}** 件"
                     + (f"（⚠️ {len(_wi_pre_items)-_wi_pre_ok} 件 閾値=0）"
                        if len(_wi_pre_items) > _wi_pre_ok else ""),
@@ -8641,14 +8644,8 @@ with _page_tabs[1]:
                             _wi_det_stats_tr: dict = {}
                             _wi_err_msg: str = ""
                             try:
-                                _wi_trig = st.session_state.get(
-                                    "wi_trigger",
-                                    bool_cols[0] if bool_cols else "",
-                                )
                                 _wi_det_stats_tr = _compute_wi_det_stats_for_csv(
                                     _tdf,
-                                    _wi_trig,
-                                    st.session_state.get("wi_edge", "RISE"),
                                     [c for c in num_cols if c in _tdf.columns],
                                     st.session_state,
                                 )
@@ -9230,7 +9227,6 @@ with _page_tabs[1]:
                                 }
                     if not _wi_det_keys:
                         # 設定状況を診断して案内
-                        _wi_trig_cur = st.session_state.get("wi_trigger", "")
                         _wi_trend_configured = False
                         for _nc in num_cols:
                             _vk = f"wvol___global_{_nc}"
@@ -9248,13 +9244,13 @@ with _page_tabs[1]:
                             )
                         else:
                             st.warning(
-                                f"⚠️ 波形検査 検出点は設定済みですが、いずれのCSVでも検出点が見つかりませんでした。"
-                                f"（波形検査トリガー: **{_wi_trig_cur}**）\n\n"
+                                "⚠️ 波形検査 検出点は設定済みですが、いずれのCSVでも検出点が見つかりませんでした。\n\n"
                                 "考えられる原因:\n"
-                                "- トリガー変数が比較CSVに存在しない\n"
+                                "- 変数ごとのトリガー変数が比較CSVに存在しない\n"
                                 "- 傾き変化点の「閾値」が 0\n"
                                 "- 閾値超え検出の「閾値」が波形に合っていない\n"
-                                "- 検索範囲が狭すぎてどのサイクルでも検出できない"
+                                "- 検索範囲が狭すぎてどのサイクルでも検出できない\n"
+                                "- 波形検査タブで各変数のトリガー変数が未設定"
                             )
                     if _wi_det_keys:
                         st.caption(
@@ -9596,9 +9592,8 @@ def _wi_edit_dialog():
                 ss[f"_dlg_{_rk}"] = _rv
         ss[f"{_vpfx}trigger"] = ss.get(
             f"{_r_svkey}_trigger",
-            ss.get("wi_trigger", bool_cols[0] if bool_cols else ""))
-        ss[f"{_vpfx}edge"] = ss.get(
-            f"{_r_svkey}_edge", ss.get("wi_edge", "RISE"))
+            bool_cols[0] if bool_cols else "")
+        ss[f"{_vpfx}edge"] = ss.get(f"{_r_svkey}_edge", "RISE")
         ss[_init_flag] = True
 
     st.caption(
@@ -9937,10 +9932,8 @@ with _page_tabs[2]:
             _svkey   = f"wvol___global_{_sv}"
             _sv_trig = st.session_state.get(
                 f"{_svkey}_trigger",
-                st.session_state.get("wi_trigger", bool_cols[0] if bool_cols else ""))
-            _sv_edge = st.session_state.get(
-                f"{_svkey}_edge",
-                st.session_state.get("wi_edge", "RISE"))
+                bool_cols[0] if bool_cols else "")
+            _sv_edge = st.session_state.get(f"{_svkey}_edge", "RISE")
             for _si, _sdet in enumerate(
                     st.session_state.get(f"{_svkey}_t_det_list", [])):
                 _did = _sdet.get("id", "")
@@ -10054,10 +10047,7 @@ with _page_tabs[2]:
                         st.warning("設定名を入力してください")
                     else:
                         # 現在の全 wave inspection 関連キーをスナップショット
-                        _snap: dict = {
-                            "wi_trigger": st.session_state.get("wi_trigger", ""),
-                            "wi_edge":    st.session_state.get("wi_edge", "RISE"),
-                        }
+                        _snap: dict = {}
                         for _sv2 in num_cols:
                             _svk2 = f"wvol___global_{_sv2}"
                             for _ss_k, _ss_v in st.session_state.items():
@@ -10070,8 +10060,6 @@ with _page_tabs[2]:
                             "name":       _wi_save_name.strip(),
                             "created_at": __import__("datetime").datetime.now()
                                           .strftime("%Y-%m-%d %H:%M"),
-                            "trigger":    st.session_state.get("wi_trigger", ""),
-                            "edge":       st.session_state.get("wi_edge", "RISE"),
                             "n_dets":     _wi_n_dets,
                             "n_trend":    _wi_n_trend,
                             "snapshot":   _snap,
@@ -10097,8 +10085,6 @@ with _page_tabs[2]:
                     with _wsc2:
                         st.caption(
                             f"📅 {_wse.get('created_at', '')}　"
-                            f"トリガー: {_wse.get('trigger', '')} / "
-                            f"{_wse.get('edge', '')}　"
                             f"検出点: {_wse.get('n_dets', 0)} 件　"
                             f"傾向: {_wse.get('n_trend', 0)} 件"
                         )
@@ -10130,25 +10116,15 @@ with _page_tabs[2]:
                     st.rerun()
 
         st.divider()
-        # ── トリガー設定 ──────────────────────────────────────────────
-        _wi_col1, _wi_col2 = st.columns([2, 2])
-        with _wi_col1:
-            _wi_trigger_default = bool_cols[0] if bool_cols else ""
-            _wi_trigger = st.selectbox(
-                "トリガー変数", bool_cols,
-                index=bool_cols.index(_wi_trigger_default) if _wi_trigger_default in bool_cols else 0,
-                key="wi_trigger",
-            )
-        with _wi_col2:
-            _wi_edge = st.radio("エッジ", ["RISE", "FALL"],
-                                horizontal=True, key="wi_edge")
-
         # 常に __global を使用（工程に依存しない独立モード）
         _wi_pname = "__global"
+        # サイクル表示用デフォルトトリガー（変数ごとのトリガーは編集ダイアログで設定）
+        _wi_trigger = bool_cols[0] if bool_cols else ""
+        _wi_edge    = "RISE"
 
         # ── サイクル検出 ────────────────────────────────────────────
         if not _wi_trigger:
-            st.warning("トリガー変数を選択してください")
+            st.warning("Bool変数がありません。サイクルを検出できません")
         else:
             try:
                 _wi_cs = cached_detect_cycles(df, _wi_trigger, _wi_edge)
