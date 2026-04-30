@@ -8522,26 +8522,85 @@ with _page_tabs[1]:
                 # ── CSV 並び順変更 ────────────────────────────────────
                 if len(_tr_sel_list) > 1:
                     with st.expander("↕️ CSV の並び順を変更", expanded=False):
-                        for _oi in range(len(_tr_sel_list)):
-                            _ok = _tr_sel_list[_oi]
-                            _oc1, _oc2, _oc3 = st.columns([6, 1, 1])
-                            _lbl_d = _tr_csv_store.get(_ok, {}).get(
-                                "label", os.path.basename(_ok) if os.sep in _ok else _ok
+                        # ── ソートボタン ──────────────────────────────
+                        _sbc1, _sbc2, _sbc3, _sbc4 = st.columns([3, 1.2, 1.2, 1.2])
+                        with _sbc1:
+                            st.caption("ラベル名で並び替え")
+                        with _sbc2:
+                            if st.button("A→Z ↑", key=f"tr_sort_asc_{_tr_pname}",
+                                         use_container_width=True):
+                                _lbls = st.session_state.get(_tr_labels_key, {})
+                                st.session_state[_tr_order_key] = sorted(
+                                    _tr_sel_list,
+                                    key=lambda k: _lbls.get(k, k).lower()
+                                )
+                                st.session_state.pop(
+                                    f"tr_order_editor_{_tr_pname}", None)
+                                st.rerun()
+                        with _sbc3:
+                            if st.button("Z→A ↓", key=f"tr_sort_desc_{_tr_pname}",
+                                         use_container_width=True):
+                                _lbls = st.session_state.get(_tr_labels_key, {})
+                                st.session_state[_tr_order_key] = sorted(
+                                    _tr_sel_list,
+                                    key=lambda k: _lbls.get(k, k).lower(),
+                                    reverse=True
+                                )
+                                st.session_state.pop(
+                                    f"tr_order_editor_{_tr_pname}", None)
+                                st.rerun()
+                        with _sbc4:
+                            if st.button("↺ リセット", key=f"tr_sort_reset_{_tr_pname}",
+                                         use_container_width=True):
+                                st.session_state.pop(_tr_order_key, None)
+                                st.session_state.pop(
+                                    f"tr_order_editor_{_tr_pname}", None)
+                                st.rerun()
+
+                        # ── 順番エディタ（数値を変えると自動並び替え）───
+                        st.caption(
+                            "💡 「順番」列の数値を変更すると並び替えられます")
+                        _lbls_now = st.session_state.get(_tr_labels_key, {})
+                        _ord_df = pd.DataFrame({
+                            "順番": list(range(1, len(_tr_sel_list) + 1)),
+                            "ラベル": [
+                                _lbls_now.get(k, _tr_csv_store.get(
+                                    k, {}).get("label", os.path.basename(k)
+                                               if os.sep in k else k))
+                                for k in _tr_sel_list
+                            ],
+                        })
+                        _edited_ord = st.data_editor(
+                            _ord_df,
+                            column_config={
+                                "順番": st.column_config.NumberColumn(
+                                    "順番",
+                                    min_value=1,
+                                    max_value=len(_tr_sel_list),
+                                    step=1,
+                                    help="数値を変更 → 自動で並び替え",
+                                ),
+                                "ラベル": st.column_config.TextColumn(
+                                    "ラベル", disabled=True),
+                            },
+                            hide_index=True,
+                            use_container_width=True,
+                            key=f"tr_order_editor_{_tr_pname}",
+                        )
+                        # 順番が変化したら即適用
+                        _new_nums = _edited_ord["順番"].tolist()
+                        if _new_nums != list(range(1, len(_tr_sel_list) + 1)):
+                            _pairs = sorted(
+                                zip(_new_nums,
+                                    range(len(_tr_sel_list)),
+                                    _tr_sel_list)
                             )
-                            with _oc1:
-                                st.write(f"**{_oi + 1}.** {_lbl_d}")
-                            with _oc2:
-                                if _oi > 0:
-                                    if st.button("↑", key=f"tr_up_{_tr_pname}_{_oi}"):
-                                        _ord = st.session_state[_tr_order_key]
-                                        _ord[_oi - 1], _ord[_oi] = _ord[_oi], _ord[_oi - 1]
-                                        st.rerun()
-                            with _oc3:
-                                if _oi < len(_tr_sel_list) - 1:
-                                    if st.button("↓", key=f"tr_dn_{_tr_pname}_{_oi}"):
-                                        _ord = st.session_state[_tr_order_key]
-                                        _ord[_oi], _ord[_oi + 1] = _ord[_oi + 1], _ord[_oi]
-                                        st.rerun()
+                            _reordered = [k for _, _, k in _pairs]
+                            if _reordered != _tr_sel_list:
+                                st.session_state[_tr_order_key] = _reordered
+                                st.session_state.pop(
+                                    f"tr_order_editor_{_tr_pname}", None)
+                                st.rerun()
 
                 # ── 波形検査 設定確認パネル ─────────────────────────────
                 # ※ 傾向解析対象は時間軸検出点のみ（XY は今後対応）
