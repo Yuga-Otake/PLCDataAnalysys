@@ -9594,6 +9594,8 @@ def _wi_edit_dialog():
             f"{_r_svkey}_trigger",
             bool_cols[0] if bool_cols else "")
         ss[f"{_vpfx}edge"] = ss.get(f"{_r_svkey}_edge", "RISE")
+        if _r_graph == "XY":
+            ss[f"{_vpfx}xy_xvar"] = ss.get(f"{_r_svkey}_xy_xvar", "")
         ss[_init_flag] = True
 
     st.caption(
@@ -9818,7 +9820,159 @@ def _wi_edit_dialog():
                                 value=float(ss.get(f"{_dpfx}pm_dv", 0.0)), step=0.01,
                                 key=f"{_dpfx}pm_dv", disabled=not _pm_on_d)
     else:
-        st.info("XY グラフの詳細設定はメインエリアの ⚙️ ポップオーバーから行ってください")
+        # ── XY グラフ設定 ─────────────────────────────────────────
+        _xy_xvar_opts = [c for c in num_cols if c != _r_sv]
+        if not _xy_xvar_opts:
+            st.warning("X軸に使える変数がありません")
+        else:
+            _xy_xvar_cur = ss.get(f"{_vpfx}xy_xvar",
+                                  _xy_xvar_opts[0])
+            _xvidx = (_xy_xvar_opts.index(_xy_xvar_cur)
+                      if _xy_xvar_cur in _xy_xvar_opts else 0)
+            st.selectbox("X軸変数", _xy_xvar_opts, index=_xvidx,
+                         key=f"{_vpfx}xy_xvar")
+
+            if _r_dtype == "傾き変化点":
+                _xa, _xb, _xc, _xd = st.columns([2, 2, 2, 3])
+                with _xa:
+                    st.markdown("**① 平滑化幅**")
+                    st.number_input("サンプル数", min_value=1, max_value=50,
+                                    value=int(ss.get(f"{_dpfx}smooth", 5)),
+                                    step=1, key=f"{_dpfx}smooth")
+                with _xb:
+                    st.markdown("**n_L（左）**")
+                    st.number_input("左へ何サンプル", min_value=1, max_value=100,
+                                    value=int(ss.get(f"{_dpfx}nleft", 3)),
+                                    step=1, key=f"{_dpfx}nleft")
+                with _xc:
+                    st.markdown("**n_R（右）**")
+                    st.number_input("右へ何サンプル", min_value=1, max_value=100,
+                                    value=int(ss.get(f"{_dpfx}nright", 3)),
+                                    step=1, key=f"{_dpfx}nright")
+                with _xd:
+                    st.markdown("**③ 閾値 |R − L|**")
+                    st.number_input("閾値", min_value=0.0,
+                                    value=float(ss.get(f"{_dpfx}thresh", 0.0)),
+                                    step=0.0001, format="%.4f",
+                                    key=f"{_dpfx}thresh")
+                _xdc1, _xdc2 = st.columns(2)
+                with _xdc1:
+                    st.checkbox("📈 増加方向を検出 (R > L)",
+                                value=bool(ss.get(f"{_dpfx}dir_inc", True)),
+                                key=f"{_dpfx}dir_inc")
+                with _xdc2:
+                    st.checkbox("📉 減少方向を検出 (L > R)",
+                                value=bool(ss.get(f"{_dpfx}dir_dec", True)),
+                                key=f"{_dpfx}dir_dec")
+                _xrca, _xrcb, _xrcc = st.columns([1, 2, 2])
+                with _xrca:
+                    st.markdown("**🔍 X 検索範囲**")
+                    st.checkbox("指定する",
+                                value=bool(ss.get(f"{_dpfx}use_range", False)),
+                                key=f"{_dpfx}use_range")
+                _xuse_r = bool(ss.get(f"{_dpfx}use_range", False))
+                with _xrcb:
+                    st.number_input("X 開始",
+                                    value=float(ss.get(f"{_dpfx}range_s", 0.0)),
+                                    step=0.5, key=f"{_dpfx}range_s",
+                                    disabled=not _xuse_r)
+                with _xrcc:
+                    st.number_input("X 終了",
+                                    value=float(ss.get(f"{_dpfx}range_e", 0.0)),
+                                    step=0.5, key=f"{_dpfx}range_e",
+                                    disabled=not _xuse_r)
+
+            elif _r_dtype == "閾値超え検出":
+                _xt1, _xt2, _xt3 = st.columns([2, 2, 2])
+                with _xt1:
+                    st.number_input("Y 閾値",
+                                    value=float(ss.get(f"{_dpfx}tv", 0.0)),
+                                    step=0.01, key=f"{_dpfx}tv")
+                with _xt2:
+                    _tdir_c = ss.get(f"{_dpfx}tdir", "RISE")
+                    _tdir_i = (["RISE", "FALL"].index(_tdir_c)
+                               if _tdir_c in ["RISE", "FALL"] else 0)
+                    st.radio("方向", ["RISE", "FALL"], index=_tdir_i,
+                             horizontal=True, key=f"{_dpfx}tdir")
+                with _xt3:
+                    st.number_input("N番目を検出", min_value=1,
+                                    value=int(ss.get(f"{_dpfx}nth", 1)),
+                                    step=1, key=f"{_dpfx}nth")
+                _xrca, _xrcb, _xrcc = st.columns([1, 2, 2])
+                with _xrca:
+                    st.markdown("**🔍 X 検索範囲**")
+                    st.checkbox("指定する",
+                                value=bool(ss.get(f"{_dpfx}use_range", False)),
+                                key=f"{_dpfx}use_range")
+                _xuse_r = bool(ss.get(f"{_dpfx}use_range", False))
+                with _xrcb:
+                    st.number_input("X 開始",
+                                    value=float(ss.get(f"{_dpfx}range_s", 0.0)),
+                                    step=0.5, key=f"{_dpfx}range_s",
+                                    disabled=not _xuse_r)
+                with _xrcc:
+                    st.number_input("X 終了",
+                                    value=float(ss.get(f"{_dpfx}range_e", 0.0)),
+                                    step=0.5, key=f"{_dpfx}range_e",
+                                    disabled=not _xuse_r)
+
+            elif _r_dtype in ["Y最大値点", "Y最小値点"]:
+                _xrca, _xrcb, _xrcc = st.columns([1, 2, 2])
+                with _xrca:
+                    st.markdown("**🔍 X 検索範囲**")
+                    st.checkbox("指定する",
+                                value=bool(ss.get(f"{_dpfx}use_range", False)),
+                                key=f"{_dpfx}use_range")
+                _xuse_r = bool(ss.get(f"{_dpfx}use_range", False))
+                with _xrcb:
+                    st.number_input("X 開始",
+                                    value=float(ss.get(f"{_dpfx}range_s", 0.0)),
+                                    step=0.5, key=f"{_dpfx}range_s",
+                                    disabled=not _xuse_r)
+                with _xrcc:
+                    st.number_input("X 終了",
+                                    value=float(ss.get(f"{_dpfx}range_e", 0.0)),
+                                    step=0.5, key=f"{_dpfx}range_e",
+                                    disabled=not _xuse_r)
+
+            elif _r_dtype == "数式":
+                st.text_input("数式 (例: p1v - p2v)",
+                              value=ss.get(f"{_dpfx}expr", ""),
+                              key=f"{_dpfx}expr",
+                              placeholder="例: p1v - p2v")
+                _fxc1, _fxc2 = st.columns(2)
+                with _fxc1:
+                    st.number_input("上限 NG（0=無効）",
+                                    value=float(ss.get(f"{_dpfx}hi_limit", 0.0)),
+                                    step=0.01, key=f"{_dpfx}hi_limit")
+                with _fxc2:
+                    st.number_input("下限 NG（0=無効）",
+                                    value=float(ss.get(f"{_dpfx}lo_limit", 0.0)),
+                                    step=0.01, key=f"{_dpfx}lo_limit")
+
+            else:
+                st.info(
+                    f"「{_r_dtype}」はメインエリアの ⚙️ ポップオーバーから設定してください")
+
+            # ±Δ判定（XY 点取得系）
+            if _r_dtype in ["傾き変化点", "閾値超え検出", "Y最大値点", "Y最小値点"]:
+                st.markdown("**✅ OK/NG 判定（基準±Δ）**")
+                _xpm1, _xpm2, _xpm3 = st.columns([1.5, 2, 2])
+                with _xpm1:
+                    st.checkbox("基準±Δで判定",
+                                value=bool(ss.get(f"{_dpfx}pm_on", False)),
+                                key=f"{_dpfx}pm_on")
+                _xpm_on = bool(ss.get(f"{_dpfx}pm_on", False))
+                with _xpm2:
+                    st.number_input("X 許容差（0=無効）", min_value=0.0,
+                                    value=float(ss.get(f"{_dpfx}pm_dt", 0.0)),
+                                    step=0.5, key=f"{_dpfx}pm_dt",
+                                    disabled=not _xpm_on)
+                with _xpm3:
+                    st.number_input("Y 許容差（0=無効）", min_value=0.0,
+                                    value=float(ss.get(f"{_dpfx}pm_dv", 0.0)),
+                                    step=0.01, key=f"{_dpfx}pm_dv",
+                                    disabled=not _xpm_on)
 
     st.divider()
 
@@ -9829,6 +9983,10 @@ def _wi_edit_dialog():
                      key=f"_dlg_save_{_dkey}"):
             ss[f"{_r_svkey}_trigger"] = ss.get(f"{_vpfx}trigger", "")
             ss[f"{_r_svkey}_edge"]    = ss.get(f"{_vpfx}edge", "RISE")
+            if _r_graph == "XY":
+                _xy_xvar_val = ss.get(f"{_vpfx}xy_xvar", "")
+                if _xy_xvar_val:
+                    ss[f"{_r_svkey}_xy_xvar"] = _xy_xvar_val
             _dpfx_len = len(_dpfx)
             for _dk in list(ss.keys()):
                 if isinstance(_dk, str) and _dk.startswith(_dpfx):
