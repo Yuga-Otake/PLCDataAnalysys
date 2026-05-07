@@ -14,6 +14,11 @@ build/
 # Streamlit
 .streamlit/secrets.toml
 
+# Runtime / auto-generated files
+timing_analyzer/streamlit_log.txt
+timing_analyzer/wi_current_config.json
+timing_analyzer/wi_saved_setups.json
+
 # Windows artifacts
 nul
 Thumbs.db
