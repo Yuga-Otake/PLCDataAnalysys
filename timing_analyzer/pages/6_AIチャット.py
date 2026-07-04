@@ -49,15 +49,14 @@ with st.sidebar:
     st.page_link("app.py", label="← メイン画面に戻る")
     st.divider()
 
-    if not api_key:
-        st.markdown("**🔑 Google API キー設定**")
+    with st.expander("🔑 Google API キー設定", expanded=not bool(api_key)):
         st.text_input(
             "API Key",
             type="password",
             key="ai_api_key_input",
             help="GOOGLE_API_KEY 環境変数または .streamlit/secrets.toml でも設定できます",
         )
-        api_key = get_api_key()
+    api_key = get_api_key()
 
     if st.button("🗑️ 会話履歴をクリア", use_container_width=True):
         st.session_state["ai_chat_history"] = []
