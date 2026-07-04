@@ -7110,6 +7110,7 @@ with st.sidebar:
     st.divider()
     st.page_link("pages/4_ロガー設定ナビ.py",   label="📋 ロガー設定ナビ")
     st.page_link("pages/0_このツールについて.py", label="ℹ️ このツールについて")
+    st.page_link("pages/6_AIチャット.py",        label="🤖 AI チャット")
 
 
 # ═══════════════════════════════════════════════════════════════
