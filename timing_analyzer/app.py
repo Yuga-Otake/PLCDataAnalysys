@@ -177,6 +177,63 @@ def _default_color(idx: int) -> str:
     return STEP_COLORS[idx % len(STEP_COLORS)]
 
 
+# ── 変数名プレフィックス（「供給工程.投入要求」の「供給工程」）─────────
+_TRIGGER_KEYWORDS = ["サイクル開始", "開始", "start", "begin", "trigger", "trig"]
+
+
+def var_prefix(var: str) -> str:
+    """'工程名.信号名' 形式ならプレフィックスを返す。なければ空文字。"""
+    return var.split(".", 1)[0] if "." in var else ""
+
+
+def short_var(var: str, prefix: str = "") -> str:
+    """表示用の短縮名。prefix と一致するプレフィックスのみ省略する。"""
+    if prefix and var.startswith(prefix + "."):
+        return var[len(prefix) + 1:]
+    return var
+
+
+def process_prefix(pname: str) -> str:
+    """工程のトリガー変数から、その工程に属する変数のプレフィックスを返す。"""
+    return var_prefix(st.session_state.get(pk(pname, "trigger"), "") or "")
+
+
+def auto_detect_processes(bool_cols: list) -> dict:
+    """Bool列から工程を自動推定する。
+
+    「工程名.信号名」形式ならプレフィックスでグループ化し、各グループの
+    「サイクル開始」等を基準変数にする。該当なしなら従来通り英語キーワードで判定。
+    """
+    def _trigger_rank(name: str) -> int:
+        low = name.lower()
+        for i, kw in enumerate(_TRIGGER_KEYWORDS):
+            if kw in low:
+                return i
+        return len(_TRIGGER_KEYWORDS)
+
+    procs: dict = {}
+    groups: dict = {}
+    for c in bool_cols:
+        if var_prefix(c):
+            groups.setdefault(var_prefix(c), []).append(c)
+    for prefix, cols in groups.items():
+        best = min(cols, key=lambda c: _trigger_rank(short_var(c, prefix)))
+        if _trigger_rank(short_var(best, prefix)) < len(_TRIGGER_KEYWORDS):
+            procs[prefix] = {"trigger_col": best, "edge": "RISE",
+                             "takt_target_ms": 0, "steps": []}
+    if procs:
+        return procs
+
+    starts = [c for c in bool_cols if _trigger_rank(c) < len(_TRIGGER_KEYWORDS)] or bool_cols[:1]
+    for var in starts:
+        pname_auto = var
+        for sfx in ["_Start", "_start", "_Begin", "_begin", "_Trigger", "_trigger"]:
+            pname_auto = pname_auto.replace(sfx, "")
+        procs[pname_auto] = {"trigger_col": var, "edge": "RISE",
+                             "takt_target_ms": 0, "steps": []}
+    return procs
+
+
 def init_proc_widgets(pname: str, pinfo: dict, bool_cols: list):
     def _set(key, val):
         if key not in st.session_state:
@@ -5266,7 +5323,7 @@ def _render_numeric_detail(df, trigger_col, edge, step_stat, step, pname, result
 
 # ── ① サイクル設定（最小限）──────────────────────────────────
 
-@st.dialog("⚙️ サイクル設定", width="small")
+@st.dialog("⚙️ サイクル設定", width="small", on_dismiss="rerun")
 def cycle_settings_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
     st.markdown(f"**{pname}**")
 
@@ -5282,23 +5339,31 @@ def cycle_settings_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
     _cur_t = st.session_state.get(pk(pname, "trigger"), bool_cols[0])
     if _cur_t not in bool_cols:
         _cur_t = bool_cols[0]
+    # ウィジェットキーを pk() と分ける: ダイアログを閉じた後の rerun で
+    # ウィジェット状態が破棄されても、設定値は pk() キーに残るようにする
     trigger_col = st.selectbox(
         "基準変数", bool_cols, index=bool_cols.index(_cur_t),
-        key=pk(pname, "trigger"),
+        key=f"_cyc_trigger_{pname}",
     )
     _cur_e = st.session_state.get(pk(pname, "edge"), "RISE")
     if _cur_e not in ["RISE", "FALL"]:
         _cur_e = "RISE"
-    st.radio(
+    _cur_e = st.radio(
         "エッジ", ["RISE", "FALL"], index=["RISE", "FALL"].index(_cur_e),
         format_func=lambda x: "↑ 立ち上がり" if x == "RISE" else "↓ 立ち下がり",
-        key=pk(pname, "edge"), horizontal=True,
+        key=f"_cyc_edge_{pname}", horizontal=True,
     )
-    st.number_input(
+    _takt = st.number_input(
         "タクト目標 [ms]", min_value=0,
-        value=st.session_state.get(pk(pname, "takt"), 0),
-        step=10, key=pk(pname, "takt"),
+        value=int(st.session_state.get(pk(pname, "takt"), 0)),
+        step=10, key=f"_cyc_takt_{pname}",
     )
+    st.session_state[pk(pname, "trigger")] = trigger_col
+    st.session_state[pk(pname, "edge")]    = _cur_e
+    st.session_state[pk(pname, "takt")]    = int(_takt)
+    _pinfo = st.session_state["processes"].get(pname)
+    if _pinfo is not None:
+        _pinfo.update(trigger_col=trigger_col, edge=_cur_e, takt_target_ms=int(_takt))
     try:
         cs = cached_detect_cycles(df, trigger_col, _cur_e)
         n  = len(cs)
@@ -5441,84 +5506,118 @@ def auto_step_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
         st.caption("💡 エッジを RISE/FALL で切り替えるとサイクルが検出される場合があります。")
         return
 
+    # 「工程名.信号名」形式なら、この工程の変数とそれ以外に分ける
+    _prefix  = var_prefix(trigger_col)
+    _own_ev  = [e for e in _all_ev if not _prefix or var_prefix(e[0]) == _prefix]
+    _other_ev = [e for e in _all_ev if e not in _own_ev]
+
     st.caption(
-        f"**{len(_all_ev)} 変数**を検出しました　"
-        f"🟢 RISE: {len(_rise_times)} 件　"
-        f"🔵 ON開始: {len(_on_at_st)} 件　"
-        f"🔴 FALL: {len(_fall_times)} 件"
+        f"**{len(_own_ev)} 変数**を検出しました"
+        + (f"（{_prefix} の変数）" if _prefix else "") + "　"
+        f"🟢 RISE: {sum(k == 'RISE' for _, _, k in _own_ev)} 件　"
+        f"🔵 ON開始: {sum(k == 'ON開始' for _, _, k in _own_ev)} 件　"
+        f"🔴 FALL: {sum(k == 'FALL' for _, _, k in _own_ev)} 件"
     )
 
-    # チェックボックス一覧
+    # チェックボックス一覧（初期値: この工程の RISE のみ選択）
     _sel_key = f"_auto_sel_{pname}"
     if _sel_key not in st.session_state:
-        # RISE のみデフォルト選択
         st.session_state[_sel_key] = {
             v: (v not in added_vars and kind == "RISE")
-            for v, _, kind in _all_ev
+            for v, _, kind in _own_ev
         }
+
+    # 追加操作はリストの上に置く（候補が多いとスクロールしないと押せないため）
+    _action_box = st.container(border=True)
 
     _sel_all, _clr_all = st.columns(2)
     with _sel_all:
         if st.button("全選択", key=f"_asel_all_{pname}", width="stretch"):
-            st.session_state[_sel_key] = {v: (v not in added_vars) for v, _, _ in _all_ev}
+            st.session_state[_sel_key] = {v: (v not in added_vars) for v, _, _ in _own_ev}
+            for _vi, (v, _, _) in enumerate(_all_ev):
+                st.session_state.pop(f"_asel_{pname}_{_vi}", None)
     with _clr_all:
         if st.button("全解除", key=f"_asel_none_{pname}", width="stretch"):
             st.session_state[_sel_key] = {v: False for v, _, _ in _all_ev}
+            for _vi, (v, _, _) in enumerate(_all_ev):
+                st.session_state.pop(f"_asel_{pname}_{_vi}", None)
 
-    st.divider()
     _checks: dict = {}
-    for _vi, (var, t_ms, kind) in enumerate(_all_ev):
+
+    def _ev_row(_vi, var, t_ms, kind):
         _already = var in added_vars
+        _lbl = f"`{short_var(var, _prefix)}`"
         _col_chk, _col_lbl = st.columns([1, 9])
         with _col_chk:
-            _default = st.session_state[_sel_key].get(
-                var, not _already and kind == "RISE")
+            _default = st.session_state[_sel_key].get(var, False)
             _checks[var] = st.checkbox(
                 " ", value=_default, key=f"_asel_{pname}_{_vi}",
-                disabled=_already,
+                disabled=_already, help=var,
             )
         with _col_lbl:
             if _already:
-                st.markdown(f"`{var}` ✅ 追加済")
+                st.markdown(f"{_lbl} ✅ 追加済")
             elif kind == "RISE":
-                st.markdown(f"`{var}` &nbsp; 🟢 RISE &nbsp; **{t_ms:.1f} ms**")
+                st.markdown(f"{_lbl} &nbsp; 🟢 RISE &nbsp; **{t_ms:.1f} ms**")
             elif kind == "ON開始":
-                st.markdown(f"`{var}` &nbsp; 🔵 ON開始 &nbsp; 持続 **{t_ms:.1f} ms**")
+                st.markdown(f"{_lbl} &nbsp; 🔵 ON開始 &nbsp; 持続 **{t_ms:.1f} ms**")
             else:
-                st.markdown(f"`{var}` &nbsp; 🔴 FALL &nbsp; **{t_ms:.1f} ms**")
+                st.markdown(f"{_lbl} &nbsp; 🔴 FALL &nbsp; **{t_ms:.1f} ms**")
 
-    st.divider()
-    _add_mode = st.radio(
-        "追加モード",
-        ["RISE 時刻（単一変数）", "ON 期間（1 の間）"],
-        index=1,
-        horizontal=True,
-        key=f"_auto_mode_{pname}",
-    )
-    _mode_val = "single" if "RISE" in _add_mode else "on_period"
+    _vi_of = {e[0]: i for i, e in enumerate(_all_ev)}
+    for var, t_ms, kind in _own_ev:
+        _ev_row(_vi_of[var], var, t_ms, kind)
+    if _other_ev:
+        with st.expander(f"他工程・共通の変数（{len(_other_ev)} 件）"):
+            for var, t_ms, kind in _other_ev:
+                _ev_row(_vi_of[var], var, t_ms, kind)
 
     # sort key: RISE→ rise_times, ON開始→ on_at_st, FALL→ fall_times
     _ev_t_map = {v: t for v, t, _ in _all_ev}
     _to_add = [v for v, chk in _checks.items() if chk and v not in added_vars]
-    if st.button(
-        f"＋ {len(_to_add)} 件を一括追加" if _to_add else "＋ 追加（未選択）",
-        disabled=not _to_add,
-        type="primary",
-        width="stretch",
-        key=f"_auto_add_{pname}",
-    ):
-        _sorted_to_add = sorted(_to_add, key=lambda v: _ev_t_map.get(v, float("inf")))
-        for v in _sorted_to_add:
+
+    with _action_box:
+        _am_col, _btn_col = st.columns([3, 2], vertical_alignment="bottom")
+        with _am_col:
+            _add_mode = st.radio(
+                "追加モード",
+                ["RISE 時刻（単一変数）", "ON 期間（1 の間）"],
+                index=1,
+                horizontal=True,
+                key=f"_auto_mode_{pname}",
+            )
+        _mode_val = "single" if "RISE" in _add_mode else "on_period"
+        with _btn_col:
+            _do_add = st.button(
+                f"＋ {len(_to_add)} 件を一括追加" if _to_add else "＋ 追加（未選択）",
+                disabled=not _to_add,
+                type="primary",
+                width="stretch",
+                key=f"_auto_add_{pname}",
+            )
+
+    if _do_add:
+        _names = {s.get("name") for s in steps}
+        for v in _to_add:
+            _nm = short_var(v, _prefix)
+            if _nm in _names:          # 短縮名が衝突する場合はフル名
+                _nm = v
+            _names.add(_nm)
             steps.append({
-                "name":     v,
+                "name":     _nm,
                 "color":    _default_color(len(steps)),
                 "mode":     _mode_val,
                 "variable": v,
                 "edge":     "RISE",
             })
+        # 既存ステップも含めて時刻が分かるなら全体を時系列順に並べる
+        def _step_t(s):
+            return _ev_t_map.get(s.get("variable") or s.get("start_var", ""))
+        if all(_step_t(s) is not None for s in steps):
+            steps.sort(key=_step_t)
         st.session_state[pk(pname, "steps_list")] = steps
         st.session_state.pop(_sel_key, None)
-        st.toast(f"✅ {len(_sorted_to_add)} ステップを追加しました（RISE 順）")
+        st.toast(f"✅ {len(_to_add)} ステップを追加しました（時系列順）")
         st.rerun()
 
 
@@ -5559,7 +5658,10 @@ def add_step_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
         p = var_periods.get(v)
         return abs(p - proc_cycle_ms) if p else float("inf")
 
-    cand_sorted = sorted(cand_vars, key=_period_key)
+    # この工程の変数（同じプレフィックス）を先頭に、その中で周期が近い順
+    _prefix = var_prefix(trigger_col)
+    cand_sorted = sorted(cand_vars, key=lambda v: (
+        bool(_prefix) and var_prefix(v) != _prefix, _period_key(v)))
 
     # 検索ボックス（キーバージョン方式でリセット）
     srch_ver = st.session_state.get(f"_srch_ver_{pname}", 0)
@@ -5585,7 +5687,7 @@ def add_step_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
         def _fmt(v):
             p = var_periods.get(v)
             tag = " [追加済]" if v in added_vars else (f"  {p:.0f}ms" if p else "")
-            return f"{v}{tag}"
+            return f"{short_var(v, _prefix)}{tag}"
 
         selected_vars = st.multiselect(
             "追加する変数を選択（複数選択可）",
@@ -5615,17 +5717,22 @@ def add_step_dialog(pname: str, bool_cols: list, df: pd.DataFrame):
             key=f"bulk_add_{pname}",
             width="stretch",
         ):
+            _names = {s.get("name") for s in steps}
             for v in _new:
+                _nm = short_var(v, _prefix)
+                if _nm in _names:
+                    _nm = v
+                _names.add(_nm)
                 if add_mode == "on_period":
                     steps.append({
-                        "name":     v,
+                        "name":     _nm,
                         "color":    _default_color(len(steps)),
                         "mode":     "on_period",
                         "variable": v,
                     })
                 else:
                     steps.append({
-                        "name":     v,
+                        "name":     _nm,
                         "color":    _default_color(len(steps)),
                         "mode":     "single",
                         "variable": v,
@@ -6483,33 +6590,6 @@ def _apply_settings_json(loaded: dict) -> str:
 with st.sidebar:
     st.header("📂 データ")
 
-    # ─── 表示モード切替 ──────────────────────────────────────────
-    _vm_labels = ["⚙️ 設定", "👁️ 監視", "📊 品質分析"]
-    view_mode = st.radio(
-        "表示モード",
-        _vm_labels,
-        horizontal=True,
-        key="view_mode",
-        label_visibility="collapsed",
-    )
-    # ウィザード開始ボタン（設定モード時のみ表示）
-    if view_mode == "⚙️ 設定" and st.session_state.get("processes"):
-        _wiz_pnames = list(st.session_state["processes"].keys())
-        if len(_wiz_pnames) == 1:
-            _wiz_target = _wiz_pnames[0]
-        else:
-            _wiz_target = st.selectbox(
-                "ウィザード対象工程", _wiz_pnames, key="_wiz_pname_sel",
-                label_visibility="collapsed",
-            )
-        if st.button("🚀 セットアップウィザード", width="stretch",
-                     help="ガイド付きで初期設定を進めます",
-                     key="_wiz_start_btn"):
-            st.session_state["wizard_step"]  = 1
-            st.session_state["wizard_pname"] = _wiz_target
-            st.rerun()
-    st.divider()
-
     if "csv_store" not in st.session_state:
         st.session_state["csv_store"]    = {}
     if "ref_csv_key"  not in st.session_state:
@@ -6533,7 +6613,6 @@ with st.sidebar:
         _sample_key = _ref_sample_name
         try:
             df, col_types = cached_load_sample(_ref_sample_path)
-            _n_ref_cyc = len(df) // 600  # 概算サイクル数
             _is_first_load = _sample_key not in st.session_state["csv_store"]
             st.session_state["csv_store"][_sample_key] = {
                 "df": df, "col_types": col_types,
@@ -6545,10 +6624,6 @@ with st.sidebar:
             if _is_first_load or _cur_active not in st.session_state["csv_store"]:
                 st.session_state["active_csv"] = _sample_key
             st.caption(f"📌 {_ref_sample_name}（{len(df):,}行）")
-            # 少サイクルならウィザード提案フラグ（初回のみ）
-            if _n_ref_cyc <= 10 and not st.session_state.get("_ref_sample_loaded"):
-                st.session_state["_suggest_wizard"] = True
-                st.session_state["_ref_sample_loaded"] = True
         except FileNotFoundError:
             st.error(f"{_ref_sample_name} が見つかりません")
             st.stop()
@@ -6586,18 +6661,6 @@ with st.sidebar:
                     st.session_state["ref_csv_key"] = _ref_key
                     st.session_state["active_csv"]  = _ref_key
                     st.toast(f"✅ 基準CSV: {_ref_up.name}")
-                    # 少サイクルならウィザード自動提案フラグ
-                    try:
-                        _rprocs = st.session_state.get("processes", {})
-                        _rtrig  = (list(_rprocs.values())[0].get("trigger_col", "")
-                                   if _rprocs else "")
-                        _rn = len(cached_detect_cycles(_rdf,
-                            st.session_state.get(list(_rprocs.keys())[0] + "__trigger", _rtrig) if _rprocs else "",
-                            "RISE")) if _rprocs else 0
-                    except Exception:
-                        _rn = 0
-                    if _rn <= 10:
-                        st.session_state["_suggest_wizard"] = True
                 except Exception as _re:
                     st.error(f"読み込みエラー: {_re}")
                     st.stop()
@@ -6997,53 +7060,11 @@ with st.sidebar:
     schema_hash = hashlib.md5(str(sorted(col_types.keys())).encode()).hexdigest()[:8]
     if st.session_state.get("_schema_hash") != schema_hash:
         st.session_state["_schema_hash"] = schema_hash
-        st.session_state["processes"]   = {}
-        st.session_state["_expand_new"] = None
-        starts = [c for c in bool_cols if any(
-            kw in c.lower() for kw in ["start", "begin", "trigger", "trig"]
-        )]
-        if not starts:
-            starts = bool_cols[:1]
-        for var in starts:
-            pname_auto = var
-            for sfx in ["_Start", "_start", "_Begin", "_begin", "_Trigger", "_trigger"]:
-                pname_auto = pname_auto.replace(sfx, "")
-            st.session_state["processes"][pname_auto] = {
-                "trigger_col": var, "edge": "RISE", "takt_target_ms": 0, "steps": [],
-            }
-        if st.session_state["processes"]:
-            st.session_state["_expand_new"] = list(st.session_state["processes"].keys())[0]
-            # 基準CSVが少サイクルならウィザード自動提案
-            try:
-                _auto_pname = list(st.session_state["processes"].keys())[0]
-                _auto_tr    = st.session_state["processes"][_auto_pname].get("trigger_col", bool_cols[0] if bool_cols else "")
-                _auto_n     = len(cached_detect_cycles(df, _auto_tr, "RISE")) if _auto_tr else 0
-                if _auto_n <= 10:
-                    st.session_state["_suggest_wizard"] = True
-                    st.session_state["_suggest_wizard_pname"] = _auto_pname
-            except Exception:
-                pass
+        st.session_state["processes"]   = auto_detect_processes(bool_cols)
+        st.session_state["_expand_new"] = next(iter(st.session_state["processes"]), None)
 
     for pname, pinfo in st.session_state["processes"].items():
         init_proc_widgets(pname, pinfo, bool_cols)
-
-    # ウィザード自動提案バナー
-    if st.session_state.pop("_suggest_wizard", False):
-        _sw_pname = st.session_state.get("_suggest_wizard_pname", "")
-        try:
-            _sw_n = len(cached_detect_cycles(df,
-                st.session_state.get(pk(_sw_pname, "trigger"), bool_cols[0] if bool_cols else ""),
-                "RISE"))
-        except Exception:
-            _sw_n = 0
-        if _sw_n <= 10 and _sw_pname:
-            st.info(f"🔰 **{_sw_n} サイクル**の基準CSVを検出しました。"
-                    "ウィザードでステップを自動設定しますか？")
-            if st.button("🚀 ウィザードを開始", key="_wiz_auto_start", width="stretch",
-                         type="primary"):
-                st.session_state["wizard_step"]  = 1
-                st.session_state["wizard_pname"] = _sw_pname
-                st.rerun()
 
     # ─── 設定ファイル 保存 / 読み込み ───────────────────────────
     st.divider()
@@ -7120,23 +7141,18 @@ with st.sidebar:
 st.title("🏭 APB タイミング解析")
 
 processes = st.session_state["processes"]
-view_mode = st.session_state.get("view_mode", "⚙️ 設定")
 
 _active_key   = st.session_state.get("active_csv", "")
 _active_label = (st.session_state.get("csv_store", {})
                  .get(_active_key, {}).get("label", _active_key))
 
-hc1, hc2 = st.columns([6, 1])
-with hc1:
-    _csv_badge = f"  |  📂 {_active_label}" if _active_label else ""
-    st.caption(f"登録済み工程: {len(processes)}件{_csv_badge}")
-with hc2:
-    if view_mode == "⚙️ 設定":
-        if st.button("＋ 工程を追加", type="primary", width="stretch"):
-            add_process_dialog(bool_cols)
+_csv_badge = f"  |  📂 {_active_label}" if _active_label else ""
+st.caption(f"登録済み工程: {len(processes)}件{_csv_badge}")
 
 if not processes:
-    st.info("「＋ 工程を追加」から工程を登録してください。")
+    st.info("工程を自動判定できませんでした。「＋ 工程を追加」から登録してください。")
+    if st.button("＋ 工程を追加", type="primary"):
+        add_process_dialog(bool_cols)
     st.stop()
 
 # ── セットアップウィザード優先表示 ─────────────────────────────
@@ -7150,9 +7166,30 @@ if _wizard_step > 0 and _wizard_pname in processes:
 # ページタブ
 # ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═
 
-_page_tabs = st.tabs(["⚙️ 画面設定", "📈 傾向解析", "🔍 波形検査"])
+_page_tabs = st.tabs(["⏱ タイミング", "📈 傾向解析", "🔍 波形検査"])
 
 with _page_tabs[0]:
+
+    # ── 表示モード（このタブ内だけに効くので、タブの中に置く）─────────
+    _VIEW_MODES = {
+        "⚙️ 設定":     "工程・ステップ・目標を設定",
+        "👁️ 監視":     "比較CSVとのタイミング差を確認",
+        "📊 品質分析": "工程横断の Cpk を一覧",
+    }
+    if st.session_state.get("view_mode") not in _VIEW_MODES:
+        st.session_state["view_mode"] = "⚙️ 設定"
+    _vm_c1, _vm_c2 = st.columns([5, 1], vertical_alignment="bottom")
+    with _vm_c1:
+        view_mode = st.segmented_control(
+            "表示モード", list(_VIEW_MODES), key="view_mode",
+            label_visibility="collapsed",
+            help="　／　".join(f"{k}: {v}" for k, v in _VIEW_MODES.items()),
+        ) or "⚙️ 設定"
+    with _vm_c2:
+        if view_mode == "⚙️ 設定":
+            if st.button("＋ 工程を追加", width="stretch"):
+                add_process_dialog(bool_cols)
+    st.caption(_VIEW_MODES[view_mode])
 
     # ═══════════════════════════════════════════════════════════════
     # 品質分析モード: 工程横断 Cpk サマリーテーブル
@@ -7471,43 +7508,73 @@ with _page_tabs[0]:
 
         step_lbl = f"{len(steps_list)}ステップ" if steps_list else "ステップ未設定"
         _is_new  = (pname == st.session_state.get("_expand_new"))
+        _pfx     = var_prefix(trigger_col)
+        _trig_s  = short_var(trigger_col, _pfx)
+        _has_bl  = bool(st.session_state.get(pk(pname, "baseline")))
+        _done_n  = sum([n_cyc > 0, bool(steps_list), takt_target > 0, _has_bl])
+        _prog    = "✅ 設定完了" if _done_n == 4 else f"設定 {_done_n}/4"
 
         with st.expander(
-            f"🏭  **{pname}**　　{trigger_col} {edge_s}　|　{n_cyc}サイクル　|　{step_lbl}",
+            f"🏭  **{pname}**　　{_trig_s} {edge_s}　|　{n_cyc}サイクル　|　{step_lbl}　|　{_prog}",
             expanded=_is_new,
         ):
-            # ── ヘッダ: 工程名変更 ＋ サイクル設定 ＋ ステップ追加 ──
+            # ── 設定チェックリスト ＋ 次にやること ──────────────────
             if view_mode == "⚙️ 設定":
-                # 1サイクル時は「🔍 自動検出」ボタンを追加
-                _is_setup_mode = n_cyc <= 10  # 少サイクルは初期セットアップと判断
-                if _is_setup_mode:
-                    st.info(f"🔰 **セットアップモード**: {n_cyc} サイクル検出。"
-                            "「🔍 ステップ自動検出」で変数を自動的に候補として表示できます。",
-                            icon=None)
-                    name_col, cyc_col, add_col, auto_col = st.columns([3, 1, 1.5, 1.5])
+                _chk = [
+                    (n_cyc > 0,          f"① 基準変数 `{_trig_s}` {edge_s}（{n_cyc}サイクル）"),
+                    (bool(steps_list),   f"② ステップ（{len(steps_list)}件）"),
+                    (takt_target > 0,    f"③ タクト目標（{takt_target} ms）" if takt_target else "③ タクト目標"),
+                    (_has_bl,            "④ 基準値"),
+                ]
+                st.markdown("　　".join(
+                    f"{'✅' if ok else '⬜'} {lbl}" for ok, lbl in _chk))
+
+                _nx_msg, _nx_col = st.columns([4, 1.5], vertical_alignment="center")
+                if n_cyc == 0:
+                    _nx_msg.warning("**次にやること:** サイクルが検出できません。基準変数とエッジを見直してください。")
+                    if _nx_col.button("⚙️ 基準変数を設定", key=f"next_{pname}",
+                                      type="primary", width="stretch"):
+                        cycle_settings_dialog(pname, bool_cols, df)
+                elif not steps_list:
+                    _nx_msg.info("**次にやること:** サイクル内で変化する信号を自動で探して、ステップとして登録します。")
+                    if _nx_col.button("🔍 ステップを自動検出", key=f"next_{pname}",
+                                      type="primary", width="stretch"):
+                        auto_step_dialog(pname, bool_cols, df)
+                elif takt_target <= 0:
+                    _nx_msg.info("**次にやること:** タクト目標を入れると、超過判定と Cpk が表示されます。")
+                    if _nx_col.button("⏱ タクト目標を設定", key=f"next_{pname}",
+                                      type="primary", width="stretch"):
+                        cycle_settings_dialog(pname, bool_cols, df)
+                elif not _has_bl:
+                    _nx_msg.info("**次にやること:** 今のデータを基準値として登録すると、比較CSVとの差分が見られます。")
+                    if _nx_col.button("📐 基準値を登録", key=f"next_{pname}",
+                                      type="primary", width="stretch"):
+                        st.session_state[f"_open_bl_{pname}"] = True
                 else:
-                    name_col, cyc_col, add_col = st.columns([4, 1, 1.5])
-                    auto_col = None
+                    _nx_msg.success("設定完了です。上の「👁️ 監視」で比較CSVとの差を確認できます。")
+
+                # ── 個別の編集操作 ──
+                name_col, cyc_col, add_col, auto_col = st.columns([3, 1.3, 1.5, 1.5])
                 with name_col:
                     new_name = st.text_input(
                         "工程名", value=pname,
                         key=f"rename_input_{pname}",
                         label_visibility="collapsed",
                         placeholder="工程名を変更",
+                        help="工程名（入力すると変更されます）",
                     )
                 with cyc_col:
-                    if st.button("⚙️", key=f"open_cyc_{pname}",
-                                 width="stretch", help="サイクル設定"):
+                    if st.button("⚙️ サイクル", key=f"open_cyc_{pname}",
+                                 width="stretch", help="基準変数・エッジ・タクト目標・工程の削除"):
                         cycle_settings_dialog(pname, bool_cols, df)
                 with add_col:
-                    if st.button("＋ ステップを追加", key=f"open_add_{pname}",
-                                 width="stretch", type="primary"):
+                    if st.button("＋ ステップ追加", key=f"open_add_{pname}",
+                                 width="stretch", help="変数を選んで手動で追加"):
                         add_step_dialog(pname, bool_cols, df)
-                if auto_col is not None:
-                    with auto_col:
-                        if st.button("🔍 自動検出", key=f"open_auto_{pname}",
-                                     width="stretch"):
-                            auto_step_dialog(pname, bool_cols, df)
+                with auto_col:
+                    if st.button("🔍 自動検出", key=f"open_auto_{pname}",
+                                 width="stretch", help="サイクル内で変化する信号から候補を表示"):
+                        auto_step_dialog(pname, bool_cols, df)
 
                 new_name_stripped = new_name.strip()
                 if (new_name_stripped and
@@ -7516,8 +7583,6 @@ with _page_tabs[0]:
                     rename_process(pname, new_name_stripped)
                     st.toast(f"✏️ 工程名を {pname} → {new_name_stripped} に変更しました")
                     st.rerun()
-            else:
-                st.caption(f"📌 {pname}　　{trigger_col} {edge_s}　|　{n_cyc}サイクル")
 
             # ── ステップチップ（クリックで編集ダイアログ）──────────
             # ボタン自体をステップ色のチップとして表示。
@@ -7557,10 +7622,10 @@ with _page_tabs[0]:
                             unsafe_allow_html=True,
                         )
                         if st.button(
-                            f"{icon} {lbl}",
+                            f"{icon} {short_var(lbl, _pfx)}",
                             key=f"chip_{pname}_{ci}",
                             width="stretch",
-                            help="クリックして編集",
+                            help=f"{lbl}（クリックして編集）",
                         ):
                             edit_step_dialog(pname, ci, bool_cols, df)
 
@@ -7568,9 +7633,7 @@ with _page_tabs[0]:
             result_df = pd.DataFrame()
 
             if not steps_list:
-                if view_mode == "⚙️ 設定":
-                    st.info("「＋ ステップを追加」からステップ変数を追加するとガントチャートが表示されます")
-                else:
+                if view_mode != "⚙️ 設定":   # 設定モードでは「次にやること」で案内済み
                     st.info("ステップが未設定です。設定モードでステップを追加してください。")
             else:
                 # ステップ JSON をキャッシュキーに使用
@@ -7950,7 +8013,7 @@ with _page_tabs[0]:
                             )
                         with _tbl_col:
                             st.dataframe(_stats_df, hide_index=True, width="stretch")
-                        if takt_target == 0:
+                        if takt_target == 0 and view_mode != "⚙️ 設定":
                             st.caption("💡 Cpk を表示するにはサイクル設定でタクト目標を設定してください")
 
                         # ── B-2: IQR外れ値検出 警告カード ───────────────
@@ -7987,7 +8050,8 @@ with _page_tabs[0]:
                                         width="stretch",
                                         disabled=not step_stats,
                                         help="現在のCSVの統計から基準値を登録",
-                                    ):
+                                    ) or (st.session_state.pop(f"_open_bl_{pname}", False)
+                                          and step_stats):
                                         baseline_dialog(pname, step_stats, result_df)
                                 with _bl_c2:
                                     _has_multi = len(st.session_state.get("csv_store", {})) > 1
