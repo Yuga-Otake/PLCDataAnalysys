@@ -6011,10 +6011,12 @@ def bulk_baseline_dialog(pname: str, steps_list: list):
         k: ("📌 " if csv_store[k].get("is_ref") else "📊 ") + csv_store[k].get("label", k)
         for k in _all_keys
     }
+    # 基準CSV（立ち上げ時の良品データ）があればそれを既定にし、比較CSVの混入を防ぐ
+    _ref_keys   = [k for k in _all_keys if csv_store[k].get("is_ref")]
     _selected = st.multiselect(
         "良品CSV を選択",
         _all_keys,
-        default=_all_keys,
+        default=_ref_keys or _all_keys,
         format_func=lambda k: _label_map[k],
         key="_bulk_bl_sel",
         label_visibility="collapsed",
@@ -6477,21 +6479,197 @@ def _apply_settings_json(loaded: dict) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
+# ワークフローガイド（進捗ステッパー ＋「次にやること」）
+# ═══════════════════════════════════════════════════════════════
+
+_VM_LABELS = ["⚙️ 設定", "👁️ 監視", "📊 品質分析"]
+_VM_HELP = {
+    "⚙️ 設定":     "工程・ステップ・基準値を編集します",
+    "👁️ 監視":     "基準値と比較CSVを突き合わせ、NG・遅れを確認します",
+    "📊 品質分析": "工程横断で Cpk・良品条件を一覧します",
+}
+_TAB_PROC  = "🏭 工程タイミング"
+_TAB_TREND = "📈 傾向解析"
+_TAB_WAVE  = "🔍 波形検査"
+_MAIN_TABS = [_TAB_PROC, _TAB_TREND, _TAB_WAVE]
+
+
+def _goto(view_mode: str | None = None, tab: str | None = None,
+          active_csv: str | None = None):
+    """on_click コールバック: 表示モード／メインタブ／表示中CSVを切り替える。"""
+    if active_csv:
+        st.session_state["active_csv"] = active_csv
+    if view_mode:
+        st.session_state["view_mode"] = view_mode
+    if tab:
+        st.session_state["main_tab"] = tab
+
+
+def _start_wizard(pname: str):
+    st.session_state["wizard_step"]  = 1
+    st.session_state["wizard_pname"] = pname
+
+
+_STAGE_HELP = [
+    "APBで記録したCSVを読み込みます（サンプルデータでも可）",
+    "1サイクルの区切りとなる『サイクル開始』のBool変数を工程として登録します",
+    "工程の中で、時間を測りたい動作（シリンダ前進・センサ検知など）を選びます",
+    "立ち上げ時など正常なときのタイミングを『ものさし』として記録します",
+    "今のデータを基準値と比べ、遅れ・NGのステップを見つけます",
+    "複数時期のデータを並べ、いつから・どのステップが悪化したかを追跡します",
+]
+
+
+def _render_intro_panel():
+    """初めて使う人向けの説明（閉じても『使い方・用語を表示』で再表示できる）。"""
+    with st.container(border=True):
+        st.markdown(
+            "#### 🔰 はじめての方へ\n"
+            "このツールは、APB で記録した PLC の CSV から **設備の各動作がサイクル開始から何 ms 後に"
+            "起きたか** を測り、**立ち上げ時（正常）と今を比べて、遅れ・ばらつきを見つけます。**"
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(
+                "**用語**\n"
+                "- **工程** … 1サイクルのまとまり。『サイクル開始』を示す Bool 変数で区切ります\n"
+                "- **ステップ** … 工程の中で時間を測りたい動作（例: シリンダ前進、センサ検知）\n"
+                "- **基準値** … 正常なときの各ステップのタイミング。比較の『ものさし』です"
+            )
+        with c2:
+            st.markdown(
+                "**データ（サイドバー）**\n"
+                "- **① 基準CSV** … 立ち上げ時など『正常なとき』のデータ\n"
+                "- **② 比較CSV** … 今の状態を確かめたいデータ。時期の違うものを複数入れると傾向解析できます\n"
+                "- 今は **サンプルデータ** が入っているので、そのまま最後まで体験できます"
+            )
+        st.markdown("**進め方:** 下の ①〜⑥ のガイドに表示される **「次にやること」のボタンを順に押すだけ** です。"
+                    "各ステップにマウスを乗せると説明が出ます。")
+        st.button("わかった、始める", type="primary", key="_wf_intro_close",
+                  on_click=lambda: st.session_state.update(_wf_intro_closed=True))
+
+
+def _render_workflow_guide(processes: dict, bool_cols: list, df: pd.DataFrame,
+                           view_mode: str):
+    """推奨ワークフロー①〜⑥の進捗と、次にやるべき操作を 1 クリックで提示する。"""
+    ss        = st.session_state
+    csv_store = ss.get("csv_store", {})
+    cmp_keys  = [k for k, v in csv_store.items() if not v.get("is_ref")]
+    n_cmp     = len(cmp_keys)
+    if view_mode == "👁️ 監視":
+        ss["_wf_seen_monitor"] = True
+    if ss.get("main_tab") == _TAB_TREND:
+        ss["_wf_seen_trend"] = True
+
+    no_steps = [p for p in processes if not ss.get(pk(p, "steps_list"))]
+    no_bl    = [p for p in processes
+                if ss.get(pk(p, "steps_list")) and not ss.get(pk(p, "baseline"))]
+
+    stages = [
+        ("データ読込", bool(csv_store)),
+        ("工程登録",   bool(processes)),
+        ("ステップ定義", bool(processes) and not no_steps),
+        ("基準値登録", bool(processes) and not no_steps and not no_bl),
+        ("監視・評価", n_cmp >= 1 and ss.get("_wf_seen_monitor", False)),
+        ("傾向解析",   n_cmp >= 2 and ss.get("_wf_seen_trend", False)),
+    ]
+    cur = next((i for i, (_, done) in enumerate(stages) if not done), len(stages))
+
+    if not ss.get("_wf_intro_closed", False):
+        _render_intro_panel()
+
+    with st.container(border=True):
+        _chips = []
+        for i, (label, done) in enumerate(stages):
+            if done:
+                _st = "background:#e8f5e9;color:#1b5e20;border:1px solid #a5d6a7"
+                _ic = "✓"
+            elif i == cur:
+                _st = "background:#e3f2fd;color:#0d47a1;border:2px solid #1e88e5;font-weight:700"
+                _ic = "●"
+            else:
+                _st = "background:transparent;color:#9e9e9e;border:1px dashed #bdbdbd"
+                _ic = "○"
+            _chips.append(
+                f"<span title='{_STAGE_HELP[i]}' style='{_st};padding:3px 10px;border-radius:14px;"
+                f"font-size:0.85rem;white-space:nowrap;cursor:help'>{_ic} {'①②③④⑤⑥'[i]} {label}</span>"
+            )
+        st.markdown(
+            "<div style='display:flex;flex-wrap:wrap;gap:6px;align-items:center'>"
+            + "<span style='color:#9e9e9e'>›</span>".join(_chips) + "</div>",
+            unsafe_allow_html=True,
+        )
+
+        # ウィザード実行中はウィザード側のナビゲーションに任せる
+        if ss.get("wizard_step", 0) > 0:
+            return
+        if ss.get("_wf_intro_closed", False):
+            st.button("🔰 使い方・用語を表示", key="_wf_intro_open", type="tertiary",
+                      on_click=lambda: ss.update(_wf_intro_closed=False))
+
+        msg_col, btn_col = st.columns([3, 1], vertical_alignment="center")
+        if cur == 0:
+            msg_col.markdown("**次にやること:** サイドバー「① 基準CSV」をアップロード"
+                             "（またはサンプルデータを使用）してください。")
+        elif cur == 1:
+            msg_col.markdown("**次にやること:** 解析する工程と、サイクル開始を示す基準変数を登録します。")
+            if btn_col.button("＋ 工程を追加", type="primary", width="stretch", key="_wf_add_proc"):
+                add_process_dialog(bool_cols)
+        elif cur == 2:
+            p = no_steps[0]
+            msg_col.markdown(f"**次にやること:** 「{p}」に計測するステップを定義します。"
+                             "ウィザードなら変数を自動検出してガントまで一気に設定できます。")
+            btn_col.button("🚀 ウィザードで設定", type="primary", width="stretch",
+                           key="_wf_wizard", on_click=_start_wizard, args=(p,))
+        elif cur == 3:
+            p = no_bl[0]
+            msg_col.markdown(f"**次にやること:** 「{p}」の基準値（立ち上げ時の良品タイミング）を登録します。"
+                             "以降の監視・傾向解析の比較軸になります。")
+            if btn_col.button("🎯 基準値を登録", type="primary", width="stretch", key="_wf_bl"):
+                bulk_baseline_dialog(p, ss.get(pk(p, "steps_list"), []))
+        elif cur == 4:
+            if n_cmp == 0:
+                msg_col.markdown("**次にやること:** サイドバー「② 比較CSV」に現在のデータをアップロードし、"
+                                 "基準と比較します。")
+            else:
+                msg_col.markdown(f"**次にやること:** 比較CSV {n_cmp} 件を基準値と突き合わせ、"
+                                 "NG・遅れの出ているステップを確認します。")
+                # 基準CSV自身を監視しても意味がないので、最新の比較CSVに切り替える
+                btn_col.button("👁️ 監視モードへ", type="primary", width="stretch",
+                               key="_wf_monitor", on_click=_goto,
+                               args=("👁️ 監視", _TAB_PROC, cmp_keys[-1]))
+        elif cur == 5:
+            if n_cmp < 2:
+                msg_col.markdown("**次にやること:** 異なる時期の比較CSVを 2 件以上読み込むと、"
+                                 "経時劣化を傾向解析で追跡できます。")
+            else:
+                msg_col.markdown(f"**次にやること:** 比較CSV {n_cmp} 件の時系列トレンドで"
+                                 "「いつから・どのステップが」悪化したかを確認します。")
+                btn_col.button("📈 傾向解析へ", type="primary", width="stretch",
+                               key="_wf_trend", on_click=_goto, args=(None, _TAB_TREND))
+        else:
+            msg_col.markdown("✅ **全ステップ完了。** サイドバー「💾 設定ファイル」で保存しておけば、"
+                             "次回は比較CSVを読み込むだけで⑤から運用できます。")
+            btn_col.button("📊 品質分析を見る", width="stretch", key="_wf_quality",
+                           on_click=_goto, args=("📊 品質分析", _TAB_PROC))
+
+
+# ═══════════════════════════════════════════════════════════════
 # サイドバー: データ読み込み
 # ═══════════════════════════════════════════════════════════════
 
 with st.sidebar:
+    # ─── ページナビゲーション ─────────────────────────────────
+    st.page_link("app.py",                       label="🏭 タイミング解析（メイン）")
+    st.page_link("pages/4_ロガー設定ナビ.py",   label="📋 ロガー設定ナビ")
+    st.page_link("pages/6_AIチャット.py",        label="🤖 AI チャット")
+    st.page_link("pages/0_このツールについて.py", label="ℹ️ このツールについて")
+    st.divider()
+
     st.header("📂 データ")
 
-    # ─── 表示モード切替 ──────────────────────────────────────────
-    _vm_labels = ["⚙️ 設定", "👁️ 監視", "📊 品質分析"]
-    view_mode = st.radio(
-        "表示モード",
-        _vm_labels,
-        horizontal=True,
-        key="view_mode",
-        label_visibility="collapsed",
-    )
+    # 表示モードはメイン「工程タイミング」タブ上部で切り替える
+    view_mode = st.session_state.get("view_mode", _VM_LABELS[0])
     # ウィザード開始ボタン（設定モード時のみ表示）
     if view_mode == "⚙️ 設定" and st.session_state.get("processes"):
         _wiz_pnames = list(st.session_state["processes"].keys())
@@ -6521,6 +6699,7 @@ with st.sidebar:
     # ① 基準CSV（2〜3サイクル程度の型定義用CSV）
     # ════════════════════════════════════════════════════════════
     st.markdown("##### 📌 ① 基準CSV（型定義用）")
+    st.caption("立ち上げ時など『正常なとき』のデータ。工程・ステップの設定と基準値の算出に使います")
 
     if use_sample:
         # ① 基準CSV: sample_baseline_3cyc.csv (3サイクル、ウィザード用)
@@ -6631,6 +6810,7 @@ with st.sidebar:
     # ② 比較CSV（複数・日常監視・傾向解析用）
     # ════════════════════════════════════════════════════════════
     st.markdown("##### 📊 ② 比較CSV（監視・傾向解析用）")
+    st.caption("今の状態を確かめたいデータ。時期の違うCSVを複数入れると傾向解析できます")
     _cmp_ups = st.file_uploader(
         "比較CSV（複数選択可）", type=["csv"],
         key="upload_cmp", accept_multiple_files=True,
@@ -7106,12 +7286,6 @@ with st.sidebar:
         except Exception as _imp_e:
             st.error(f"読み込みエラー: {_imp_e}")
 
-    # ─── ページナビゲーション ─────────────────────────────────
-    st.divider()
-    st.page_link("pages/4_ロガー設定ナビ.py",   label="📋 ロガー設定ナビ")
-    st.page_link("pages/0_このツールについて.py", label="ℹ️ このツールについて")
-    st.page_link("pages/6_AIチャット.py",        label="🤖 AI チャット")
-
 
 # ═══════════════════════════════════════════════════════════════
 # メインコンテンツ
@@ -7120,7 +7294,7 @@ with st.sidebar:
 st.title("🏭 APB タイミング解析")
 
 processes = st.session_state["processes"]
-view_mode = st.session_state.get("view_mode", "⚙️ 設定")
+view_mode = st.session_state.get("view_mode", _VM_LABELS[0])
 
 _active_key   = st.session_state.get("active_csv", "")
 _active_label = (st.session_state.get("csv_store", {})
@@ -7131,12 +7305,14 @@ with hc1:
     _csv_badge = f"  |  📂 {_active_label}" if _active_label else ""
     st.caption(f"登録済み工程: {len(processes)}件{_csv_badge}")
 with hc2:
-    if view_mode == "⚙️ 設定":
-        if st.button("＋ 工程を追加", type="primary", width="stretch"):
+    # 工程ゼロ件のときはワークフローガイド側のボタンに一本化
+    if processes and view_mode == "⚙️ 設定":
+        if st.button("＋ 工程を追加", width="stretch"):
             add_process_dialog(bool_cols)
 
+_render_workflow_guide(processes, bool_cols, df, view_mode)
+
 if not processes:
-    st.info("「＋ 工程を追加」から工程を登録してください。")
     st.stop()
 
 # ── セットアップウィザード優先表示 ─────────────────────────────
@@ -7150,9 +7326,22 @@ if _wizard_step > 0 and _wizard_pname in processes:
 # ページタブ
 # ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═# ═
 
-_page_tabs = st.tabs(["⚙️ 画面設定", "📈 傾向解析", "🔍 波形検査"])
+# key 付きタブにして「次にやること」ボタン等からプログラム的に切替可能にする。
+# 全タブの中身は毎回描画する（.open で間引くと非表示タブのウィジェット状態が消えるため）
+try:
+    _page_tabs = st.tabs(_MAIN_TABS, key="main_tab", on_change="rerun")
+except TypeError:  # 旧 Streamlit（tabs に key 非対応）
+    _page_tabs = st.tabs(_MAIN_TABS)
 
 with _page_tabs[0]:
+    _vm_c1, _vm_c2 = st.columns([2, 3], vertical_alignment="center")
+    with _vm_c1:
+        st.radio(
+            "表示モード", _VM_LABELS, horizontal=True,
+            key="view_mode", label_visibility="collapsed",
+        )
+    with _vm_c2:
+        st.caption(_VM_HELP.get(view_mode, ""))
 
     # ═══════════════════════════════════════════════════════════════
     # 品質分析モード: 工程横断 Cpk サマリーテーブル
@@ -8455,7 +8644,9 @@ with _page_tabs[1]:
     st.caption("複数時期のCSVを登録し、ステップ毎のタイミング傾向を可視化します")
 
     if not processes:
-        st.info("「⚙️ 画面設定」タブで工程を設定してください")
+        st.info("先に「🏭 工程タイミング」タブで工程を登録してください")
+        st.button("🏭 工程タイミングへ", key="_tr_goto_proc", on_click=_goto,
+                  args=("⚙️ 設定", _TAB_PROC))
     else:
         _tr_pname = st.selectbox(
             "工程を選択", list(processes.keys()), key="tr_page_proc"
@@ -8466,7 +8657,9 @@ with _page_tabs[1]:
         _tr_bl      = st.session_state.get(pk(_tr_pname, "baseline"), {})
 
         if not _tr_steps:
-            st.info("ステップが設定されていません。「⚙️ 画面設定」タブでステップを追加してください")
+            st.info("ステップが設定されていません。「🏭 工程タイミング」タブでステップを追加してください")
+            st.button("🚀 この工程をウィザードで設定", key="_tr_goto_wiz",
+                      on_click=_start_wizard, args=(_tr_pname,))
         else:
             # ── 解析対象CSV: サイドバーの csv_store から選択 ─────────
             _tr_csv_store = st.session_state.get("csv_store", {})
@@ -8474,6 +8667,12 @@ with _page_tabs[1]:
                 st.info("サイドバーの「② 比較CSV」にCSVをアップロードしてください")
             else:
                 _tr_all_keys = list(_tr_csv_store.keys())
+                # CSV が追加・削除されたら選択を「全件」に戻す（追加分が漏れないように）
+                _tr_sel_k  = f"tr_sel_{_tr_pname}"
+                _tr_seen_k = f"_tr_sel_seen_{_tr_pname}"
+                if st.session_state.get(_tr_seen_k) != _tr_all_keys:
+                    st.session_state[_tr_seen_k] = _tr_all_keys
+                    st.session_state[_tr_sel_k]  = _tr_all_keys
                 _tr_sel = st.multiselect(
                     "解析対象CSV（複数選択可）",
                     _tr_all_keys,
