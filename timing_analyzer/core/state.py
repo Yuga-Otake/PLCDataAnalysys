@@ -234,3 +234,39 @@ def workflow():
     target = (no_steps[0] if current == "steps" and no_steps
               else no_bl[0] if current == "baseline" and no_bl else None)
     return {"done": done, "current": current, "target": target, "rows": rows}
+
+
+# ═══════════════════════════════════════════════════════════════
+# 工程の追加・名前変更・削除
+# ═══════════════════════════════════════════════════════════════
+
+def add_process(name: str, trigger: str, edge: str = "RISE", takt_ms: int = 0):
+    ss = st.session_state
+    ss["processes"][name] = {"trigger_col": trigger, "edge": edge,
+                             "takt_target_ms": takt_ms, "steps": []}
+    ss[pk(name, "trigger")] = trigger
+    ss[pk(name, "edge")] = edge
+    ss[pk(name, "takt")] = int(takt_ms)
+    ss[pk(name, "steps_list")] = []
+    ss["_expand_new"] = name
+
+
+def rename_process(old: str, new: str):
+    """工程名を変え、工程に紐づく session_state キー（P_<工程>__*）をすべて移す"""
+    ss = st.session_state
+    ss["processes"] = {(new if k == old else k): v for k, v in ss["processes"].items()}
+    old_pfx, new_pfx = pk(old, ""), pk(new, "")
+    for key in [k for k in list(ss.keys()) if isinstance(k, str) and k.startswith(old_pfx)]:
+        ss[new_pfx + key[len(old_pfx):]] = ss.pop(key)
+    if ss.get("_expand_new") == old:
+        ss["_expand_new"] = new
+
+
+def delete_process(name: str):
+    ss = st.session_state
+    ss["processes"].pop(name, None)
+    pfx = pk(name, "")
+    for key in [k for k in list(ss.keys()) if isinstance(k, str) and k.startswith(pfx)]:
+        ss.pop(key, None)
+    if ss.get("_expand_new") == name:
+        ss["_expand_new"] = None

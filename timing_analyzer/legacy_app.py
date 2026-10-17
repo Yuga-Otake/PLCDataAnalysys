@@ -60,6 +60,7 @@ from analyzer import (
 )
 from comparator import compare_normal_abnormal, calc_diff_ranking, detect_anomalous_variables
 from core.project import build_settings_json, mark_saved, settings_file_name
+from core.data import apply_settings_json, parse_csv_label
 
 st.set_page_config(page_title="APB タイミング解析", page_icon="🏭", layout="wide")
 
@@ -6402,76 +6403,16 @@ def _render_wizard(pname: str, step: int, bool_cols: list, df: pd.DataFrame):
                 st.rerun()
 
 
-# ── CSVファイル名からラベルを自動パース ─────────────────────────
-import re as _re_label
-def _parse_csv_label(filename: str) -> str:
-    """ファイル名から自動ラベルを生成（例: 20260418_am_line1_good.csv → 2026-04-18 朝番 L1 良品）"""
-    stem = _re_label.sub(r"\.csv$", "", filename, flags=_re_label.IGNORECASE)
-    # 日付パターン
-    _d = _re_label.search(r"(\d{4})(\d{2})(\d{2})", stem)
-    date_str = f"{_d.group(1)}-{_d.group(2)}-{_d.group(3)}" if _d else ""
-    stem2 = _re_label.sub(r"\d{8}", "", stem)
-    # シフト
-    shift_map = {"am": "朝番", "pm": "夕番", "night": "夜番", "day": "日勤"}
-    shift_str = ""
-    for k, v in shift_map.items():
-        if _re_label.search(rf"\b{k}\b", stem2, _re_label.IGNORECASE):
-            shift_str = v; stem2 = _re_label.sub(rf"\b{k}\b", "", stem2, flags=_re_label.IGNORECASE); break
-    # ライン
-    _l = _re_label.search(r"line(\d+)", stem2, _re_label.IGNORECASE)
-    line_str = f"L{_l.group(1)}" if _l else ""
-    # 品質
-    qual_map = {"good": "良品", "ng": "NG", "ok": "良品", "fail": "NG"}
-    qual_str = ""
-    for k, v in qual_map.items():
-        if _re_label.search(rf"\b{k}\b", stem2, _re_label.IGNORECASE):
-            qual_str = v; break
-    parts = [p for p in [date_str, shift_str, line_str, qual_str] if p]
-    return " ".join(parts) if parts else stem
+# CSVファイル名からのラベル生成は core.data.parse_csv_label に移した
+_parse_csv_label = parse_csv_label
 
 
 # ═══════════════════════════════════════════════════════════════
 # 設定JSONヘルパー
 # ═══════════════════════════════════════════════════════════════
 
-def _apply_settings_json(loaded: dict) -> str:
-    """設定JSONをsession_stateに適用する。成功時はトースト用メッセージを返す。"""
-    if "processes" not in loaded:
-        raise ValueError("有効な設定JSONではありません（'processes'キーが見つかりません）")
-    _new_procs: dict = {}
-    for _ip, _ipd in loaded["processes"].items():
-        _new_procs[_ip] = {
-            "trigger_col":    _ipd.get("trigger", ""),
-            "edge":           _ipd.get("edge", "RISE"),
-            "takt_target_ms": _ipd.get("takt_target_ms", 0),
-            "steps":          _ipd.get("steps", []),
-        }
-        st.session_state[pk(_ip, "trigger")]    = _ipd.get("trigger", "")
-        st.session_state[pk(_ip, "edge")]       = _ipd.get("edge", "RISE")
-        st.session_state[pk(_ip, "takt")]       = int(_ipd.get("takt_target_ms", 0))
-        st.session_state[pk(_ip, "steps_list")] = _ipd.get("steps", [])
-        if _ipd.get("baseline"):
-            st.session_state[pk(_ip, "baseline")]      = _ipd["baseline"]
-        if _ipd.get("baseline_meta"):
-            st.session_state[pk(_ip, "baseline_meta")] = _ipd["baseline_meta"]
-        if _ipd.get("wv_baseline"):
-            st.session_state[pk(_ip, "wv_baseline")]   = _ipd["wv_baseline"]
-        if _ipd.get("wv_xy_baseline"):
-            st.session_state[pk(_ip, "wv_xy_baseline")] = _ipd["wv_xy_baseline"]
-        for _dc_k, _dc_v in _ipd.get("det_conditions", {}).items():
-            st.session_state[_dc_k] = _dc_v
-    st.session_state["processes"]   = _new_procs
-    st.session_state["_expand_new"] = next(iter(_new_procs), None)
-    # __global 波形検査条件を復元
-    _n_glob_det = 0
-    for _gc_k, _gc_v in loaded.get("global_det_conditions", {}).items():
-        st.session_state[_gc_k] = _gc_v
-        _n_glob_det += 1
-    _n_det = sum(len(v.get("det_conditions", {})) for v in loaded["processes"].values())
-    _msg = f"✅ 設定を読み込みました（工程 {len(_new_procs)} 件・波形検出条件 {_n_det} 件"
-    if _n_glob_det:
-        _msg += f"・波形検査独立条件 {_n_glob_det} 件"
-    return _msg + "）"
+# 設定JSONの読み込みは core.data.apply_settings_json に移した（新画面と共用）
+_apply_settings_json = apply_settings_json
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -6823,7 +6764,7 @@ with st.sidebar:
         for _ck in [k for k in list(st.session_state["csv_store"].keys())
                     if k not in _cmp_names
                     and not st.session_state["csv_store"][k].get("is_ref", False)
-                    and st.session_state["csv_store"][k].get("source") != "folder"]:
+                    and st.session_state["csv_store"][k].get("source") not in ("folder", "upload")]:
             del st.session_state["csv_store"][_ck]
 
     # ════════════════════════════════════════════════════════════

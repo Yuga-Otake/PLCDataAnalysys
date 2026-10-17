@@ -10,7 +10,7 @@ import streamlit as st
 
 from core.project import build_settings_json, mark_saved, settings_file_name
 from core.state import STAGES, compare_keys, ref_entry, workflow
-from core.ui import chip, open_legacy, page_header, stepper
+from core.ui import chip, page_header, stepper
 
 page_header(
     "ホーム",
@@ -53,19 +53,21 @@ with st.container(border=True):
                           "<p class='apb-next-body'>1 サイクルの始まりを示す Bool 変数（サイクル開始信号）を選び、"
                           "工程として登録します。</p>", unsafe_allow_html=True)
         if btn_col.button("工程を登録", type="primary", width="stretch"):
-            open_legacy(view_mode="⚙️ 設定", tab="🏭 工程タイミング", dialog=("add_process",))
+            st.switch_page("views/process.py")
     elif cur == "steps":
         text_col.markdown(f"<p class='apb-next-title'>「{target}」のステップを定義する</p>"
                           "<p class='apb-next-body'>時間を測りたい動作（シリンダ前進、センサ検知など）を選びます。"
-                          "候補は自動で検出され、チェックするだけで追加できます。</p>", unsafe_allow_html=True)
+                          "候補は自動で検出され、チェックして追加できます。</p>", unsafe_allow_html=True)
         if btn_col.button("ステップを定義", type="primary", width="stretch"):
-            open_legacy(view_mode="⚙️ 設定", tab="🏭 工程タイミング", wizard_for=target)
+            ss["sel_process"] = target
+            st.switch_page("views/process.py")
     elif cur == "baseline":
         text_col.markdown(f"<p class='apb-next-title'>「{target}」の基準値を登録する</p>"
                           "<p class='apb-next-body'>基準データの各ステップの平均タイミングを、正常時の値として記録します。"
                           "点検ではこの値との差を見ます。</p>", unsafe_allow_html=True)
         if btn_col.button("基準値を登録", type="primary", width="stretch"):
-            open_legacy(view_mode="⚙️ 設定", tab="🏭 工程タイミング", dialog=("bulk_baseline", target))
+            ss["sel_process"] = target
+            st.switch_page("views/baseline.py")
     elif cur == "save":
         text_col.markdown("<p class='apb-next-title'>設定を保存する</p>"
                           "<p class='apb-next-body'>工程・ステップ・基準値を設定ファイル（JSON）に保存します。"
