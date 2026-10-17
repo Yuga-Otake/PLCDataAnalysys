@@ -263,12 +263,12 @@ def execute_tool(tool_name: str, tool_input: dict, ss: dict) -> tuple[str, str |
         raw_mode = tool_input.get("mode", "設定")
         mode = _MODE_MAP.get(raw_mode, "⚙️ 設定")
         ss["view_mode"] = mode
-        return f"表示モードを「{mode}」に切り替えます。", "app.py"
+        return f"表示モードを「{mode}」に切り替えます。", "legacy_app.py"
 
     if tool_name == "expand_process":
         pname = tool_input.get("process_name", "")
         ss["_expand_new"] = pname
-        return f"工程「{pname}」を展開してメイン画面に移動します。", "app.py"
+        return f"工程「{pname}」を展開してメイン画面に移動します。", "legacy_app.py"
 
     if tool_name == "navigate_to_histogram":
         pname = tool_input.get("process_name", "")
@@ -290,7 +290,7 @@ def execute_tool(tool_name: str, tool_input: dict, ss: dict) -> tuple[str, str |
             if entry.get("label") == label:
                 ss["active_csv"] = key
                 ss["compare_mode"] = False
-                return f"CSVを「{label}」に切り替えます。", "app.py"
+                return f"CSVを「{label}」に切り替えます。", "legacy_app.py"
         labels = [e.get("label", k) for k, e in csv_store.items()]
         return f"「{label}」が見つかりません。読み込み済みCSV: {labels}", None
 

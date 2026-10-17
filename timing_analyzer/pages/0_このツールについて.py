@@ -10,12 +10,6 @@ st.set_page_config(
     layout="wide",
 )
 
-st.markdown("""
-<style>
-[data-testid="stSidebarNav"] { display: none !important; }
-</style>
-""", unsafe_allow_html=True)
-
 # ── 言語切り替え ─────────────────────────────────────────────────
 lang = st.radio(
     "言語 / Language",

@@ -37,7 +37,7 @@ step_cfg  = next((s for s in steps_list if s.get("name") == step_name), None)
 # ── ヘッダー ─────────────────────────────────────────────────────
 col_back, col_title = st.columns([1, 6])
 with col_back:
-    st.page_link("app.py", label="← メイン画面", icon="↩️")
+    st.page_link("legacy_app.py", label="旧画面に戻る", icon=":material/arrow_back:")
 with col_title:
     if step_name:
         st.title(f"📊 {step_name}")
@@ -53,7 +53,7 @@ if result_df is None or step_stat is None or step_cfg is None:
         "データが見つかりません。\n\n"
         "メイン画面でCSVを読み込み → 解析実行 → ガントチャートのバーをダブルクリックして遷移してください。"
     )
-    st.page_link("app.py", label="🏠 メイン画面に戻る")
+    st.page_link("legacy_app.py", label="旧画面に戻る")
     st.stop()
 
 # ── データ準備 ────────────────────────────────────────────────────
