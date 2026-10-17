@@ -241,7 +241,7 @@ timing_analyzer/
 ├── core/
 │   ├── state.py      # 全ページ共有のセッション状態・準備の進み具合判定
 │   ├── project.py    # 設定ファイル（JSON）の書き出し
-│   └── ui.py         # OMRON デザイン準拠の共通部品（見出し・状態チップ・段階表示）
+│   └── ui.py         # 共通部品（見出し・状態チップ・段階表示）とライト／ダーク別の色
 └── views/            # 新しい各画面
 ```
 
@@ -261,5 +261,6 @@ timing_analyzer/
   ページを移っても旧画面の設定値が消えないようにするため。新しい画面では各ウィジェットに明示する。
 - 新画面から旧画面の特定の状態を開くときは `core.ui.open_legacy()` を使う
   （表示モード・タブ・ウィザード・ダイアログを指定可能）。
-- 見た目は `.streamlit/config.toml` の `[theme]` と `core/ui.py` の CSS で OMRON IA Catalog Design System に合わせる。
-  新画面では絵文字を使わず、状態は色＋文字（`chip()`）で示す。
+- 見た目は `.streamlit/config.toml` の `[theme.light]` / `[theme.dark]` と `core/ui.py` の CSS で決める。
+  ダークは Sysmac Studio 風（濃灰＋青）、ライトは青と灰色のシンプルな配色。既定は OS 設定に追従し、
+  右上メニューの Settings で切り替えられる。新画面では絵文字を使わず、状態は色＋文字（`chip()`）で示す。

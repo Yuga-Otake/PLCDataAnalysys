@@ -7268,7 +7268,7 @@ with hc2:
         if st.button("＋ 工程を追加", width="stretch"):
             add_process_dialog(bool_cols)
 
-_render_workflow_guide(processes, bool_cols, df, view_mode)
+# 準備の進み具合・次にやることは新しいホーム画面（views/home.py）に移した
 
 # ホーム等の新画面から「このダイアログを開いた状態で」と渡された場合
 _legacy_open = st.session_state.pop("_legacy_open", None)
