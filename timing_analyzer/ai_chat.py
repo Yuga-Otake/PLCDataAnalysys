@@ -263,25 +263,24 @@ def execute_tool(tool_name: str, tool_input: dict, ss: dict) -> tuple[str, str |
         raw_mode = tool_input.get("mode", "設定")
         mode = _MODE_MAP.get(raw_mode, "⚙️ 設定")
         ss["view_mode"] = mode
-        return f"表示モードを「{mode}」に切り替えます。", "legacy_app.py"
+        page = {"⚙️ 設定": "views/process.py", "👁️ 監視": "views/evaluate.py",
+                "📊 品質分析": "views/capability.py"}.get(mode, "views/home.py")
+        return f"「{raw_mode}」の画面に移動します。", page
 
     if tool_name == "expand_process":
         pname = tool_input.get("process_name", "")
         ss["_expand_new"] = pname
-        return f"工程「{pname}」を展開してメイン画面に移動します。", "legacy_app.py"
+        if pname in ss.get("processes", {}):
+            ss["sel_process"] = pname
+        return f"工程「{pname}」の工程とステップ画面に移動します。", "views/process.py"
 
     if tool_name == "navigate_to_histogram":
         pname = tool_input.get("process_name", "")
         sname = tool_input.get("step_name", "")
-        if f"_hist_ctx_{pname}" in ss:
-            ss["_hist_nav_proc"] = pname
-            ss["_hist_nav_step"] = sname
-            return f"「{pname}」の「{sname}」ヒストグラムに移動します。", "pages/5_histogram.py"
-        return (
-            f"「{pname}」はまだ解析されていません。"
-            "メイン画面でガントチャートを表示してからお試しください。",
-            None,
-        )
+        if pname in ss.get("processes", {}):
+            ss["detail"] = {"proc": pname, "step": sname, "data": (ss.get("detail") or {}).get("data")}
+            return f"「{pname}」の「{sname}」のステップ詳細に移動します。", "views/step.py"
+        return f"工程「{pname}」が見つかりません。", None
 
     if tool_name == "switch_active_csv":
         label = tool_input.get("csv_label", "")
@@ -290,7 +289,10 @@ def execute_tool(tool_name: str, tool_input: dict, ss: dict) -> tuple[str, str |
             if entry.get("label") == label:
                 ss["active_csv"] = key
                 ss["compare_mode"] = False
-                return f"CSVを「{label}」に切り替えます。", "legacy_app.py"
+                if entry.get("is_ref"):
+                    return f"「{label}」は基準データです。工程とステップ画面で確認できます。", "views/process.py"
+                ss["eval_target"] = key
+                return f"「{label}」を評価する画面に移動します。", "views/evaluate.py"
         labels = [e.get("label", k) for k, e in csv_store.items()]
         return f"「{label}」が見つかりません。読み込み済みCSV: {labels}", None
 

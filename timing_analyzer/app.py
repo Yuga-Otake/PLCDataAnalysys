@@ -27,6 +27,8 @@ nav = st.navigation({
         st.Page("views/evaluate.py", title="最新データの評価", icon=":material/fact_check:"),
         st.Page("views/trend.py", title="推移", icon=":material/trending_up:"),
         st.Page("views/capability.py", title="工程能力", icon=":material/insights:"),
+        # 評価・推移から開く掘り下げ専用ページ（メニューには出さない）
+        st.Page("views/step.py", title="ステップ詳細", url_path="step", visibility="hidden"),
     ],
     "ツール": [
         st.Page("pages/4_ロガー設定ナビ.py", title="ロガー設定ナビ", icon=":material/tune:",

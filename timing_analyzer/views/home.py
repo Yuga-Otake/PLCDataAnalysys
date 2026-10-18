@@ -8,6 +8,7 @@ import html
 
 import streamlit as st
 
+from core.evaluate import STATUS, compare_keys_by_time, evaluate_process
 from core.project import build_settings_json, mark_saved, settings_file_name
 from core.state import STAGES, compare_keys, ref_entry, workflow
 from core.ui import chip, page_header, stepper
@@ -117,8 +118,20 @@ if not wf["done"]["baseline"]:
 elif not cmp_keys:
     st.caption("比較データがまだありません。データ画面から点検したい時期の CSV を追加してください。")
 else:
-    c1, c2 = st.columns([3, 1], vertical_alignment="center")
-    latest = ss["csv_store"][cmp_keys[-1]]["label"]
-    c1.markdown(f"比較データ {len(cmp_keys)} 件（最新：{latest}）を基準値と比べられます。")
-    if c2.button("最新データを評価", width="stretch", key="_home_eval"):
-        st.switch_page("views/evaluate.py")
+    latest_key = compare_keys_by_time()[-1]
+    latest = ss["csv_store"][latest_key]
+    with st.container(border=True):
+        c1, c2 = st.columns([3, 1], vertical_alignment="center")
+        c1.markdown(f"最新の比較データ **{html.escape(latest['label'])}** の判定"
+                    f"（比較データは全 {len(cmp_keys)} 件）")
+        if c2.button("最新データを評価", width="stretch", key="_home_eval"):
+            ss["eval_target"] = latest_key
+            st.switch_page("views/evaluate.py")
+        items = []
+        for p in [r["name"] for r in wf["rows"] if r["status"] == "ready"]:
+            ev = evaluate_process(latest["df"], p)
+            label, kind, _ = STATUS[ev["status"]]
+            items.append(f"<span>{html.escape(p)}　{chip(label, kind)}"
+                         f"<span class='apb-crumb'>　異常 {ev['n_ng_steps']}・注意 {ev['n_warn_steps']} ステップ</span></span>")
+        st.markdown("<div class='apb-kv' style='gap:8px 32px'>" + "".join(items) + "</div>",
+                    unsafe_allow_html=True)

@@ -7,6 +7,7 @@ core/ui.py — 画面共通の見た目と部品
 """
 import html
 
+import pandas as pd
 import streamlit as st
 
 LEGACY_PAGE = "legacy_app.py"
@@ -136,3 +137,60 @@ def planned_page(title: str, lead: str, will_have: list, legacy_where: str,
         if st.button("旧画面で開く", type="primary", key=f"_legacy_go_{title}",
                      icon=":material/open_in_new:"):
             open_legacy(**legacy_kwargs)
+
+
+# ── 点検画面の共通部品 ───────────────────────────────────────
+
+# 判定色（ライト・ダークどちらの背景でも読める中間色）
+STATUS_COLOR = {"ng": "#e5534b", "warn": "#d29922", "ok": "#3fb950", "nobase": "#8b949e", "missing": "#8b949e"}
+BAND_FILL = "rgba(84, 140, 255, 0.07)"
+REF_LINE = "#548cff"
+
+
+def status_cell_style(label: str) -> str:
+    """st.dataframe の判定列を色付けする（Styler.map 用）"""
+    return {
+        "異常": "background-color: rgba(229, 83, 75, 0.22)",
+        "注意": "background-color: rgba(210, 153, 34, 0.22)",
+        "正常": "background-color: rgba(63, 185, 80, 0.16)",
+    }.get(label, "")
+
+
+def rule_popover():
+    """判定ルールの表示と調整（評価・ステップ詳細・推移で共通）"""
+    from core.evaluate import DEFAULTS, rule_text
+
+    ss = st.session_state
+    with st.popover("判定ルール", icon=":material/rule:"):
+        st.caption(rule_text())
+        ss.setdefault("eval_nsig", DEFAULTS["nsig"])
+        ss.setdefault("eval_min_tol", DEFAULTS["min_tol"])
+        ss.setdefault("eval_ng_rate", DEFAULTS["ng_rate"])
+        st.number_input("許容幅の σ 倍数 N", min_value=1.0, max_value=6.0, step=0.5, key="eval_nsig")
+        st.number_input("最小許容幅 [ms]", min_value=0.0, max_value=100.0, step=1.0, key="eval_min_tol")
+        st.number_input("異常とする NG率 [%]", min_value=1.0, max_value=100.0, step=1.0, key="eval_ng_rate")
+
+
+def tolerance_band(fig, ref: float, tol: float, horizontal: bool = True, **rowcol):
+    """基準値（点線）と許容幅（薄い帯＋細い境界線）を図に描く"""
+    lo, hi = ref - tol, ref + tol
+    if horizontal:
+        fig.add_hrect(y0=lo, y1=hi, fillcolor=BAND_FILL, line_width=0, layer="below", **rowcol)
+        for y in (lo, hi):
+            fig.add_hline(y=y, line_color=REF_LINE, line_width=0.8, opacity=0.5, **rowcol)
+        fig.add_hline(y=ref, line_color=REF_LINE, line_dash="dot", annotation_text="基準",
+                      annotation_position="right", **rowcol)
+    else:
+        fig.add_vrect(x0=lo, x1=hi, fillcolor=BAND_FILL, line_width=0, layer="below", **rowcol)
+        for x in (lo, hi):
+            fig.add_vline(x=x, line_color=REF_LINE, line_width=0.8, opacity=0.5, **rowcol)
+        fig.add_vline(x=ref, line_color=REF_LINE, line_dash="dot", annotation_text="基準",
+                      annotation_position="top", **rowcol)
+
+
+def numeric(df, cols: list):
+    """None を NaN にして数値列にそろえる（表示で「—」になるように）"""
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
