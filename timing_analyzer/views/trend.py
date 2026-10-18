@@ -183,7 +183,7 @@ for k, lbl in zip(keys, labels):
     for dk, dv in stats.items():
         if dk.startswith("__"):
             continue
-        det_series.setdefault(dk, {"info": dv, "rows": []})["rows"].append({"label": lbl, **dv})
+        det_series.setdefault(dk, {"info": dv, "rows": []})["rows"].append({**dv, "label": lbl})
 for e in det_errors:
     st.error(f"検出点を計算できませんでした（{e}）")
 configured = any(v is True and k.startswith("wvol___global_") and k.endswith("_trend_on")
@@ -203,7 +203,11 @@ else:
         info, rows = d["info"], d["rows"]
         xs = [r["label"] for r in rows]
         panels = [("t_mean", "t_std", info.get("x_label", "時刻 [ms]"))]
-        if not info.get("is_formula"):
+        # 閾値超え検出の値はしきい値そのもので変わらないので、値の図は出さない
+        vm = [r["v_mean"] for r in rows]
+        eps = 1e-6 * max(1.0, max(abs(x) for x in vm))
+        v_const = max(vm) - min(vm) <= eps and all(r.get("v_std", 0) <= eps for r in rows)
+        if not info.get("is_formula") and not v_const:
             panels.append(("v_mean", "v_std", info.get("y_label", "値")))
         st.markdown(f"**{info.get('label', dk)}**")
         cols = st.columns(len(panels))
@@ -213,6 +217,7 @@ else:
                 error_y=dict(type="data", array=[r.get(sk_, 0) for r in rows], color="#8b949e", thickness=1),
                 marker=dict(size=9, color=REF_LINE), line=dict(color="#8b949e"), showlegend=False,
                 hovertemplate="%{x}<br>%{y:.2f}<extra></extra>"))
-            fig.update_layout(height=240, margin=dict(l=0, r=8, t=10, b=40), yaxis_title=title)
+            fig.update_layout(height=240, margin=dict(l=0, r=8, t=10, b=40), yaxis_title=title,
+                              xaxis=xaxis_short, yaxis_tickformat=".4~g")
             col.plotly_chart(fig, width="stretch", config={"displayModeBar": False}, key=f"_trend_det_{dk}_{mk}")
 

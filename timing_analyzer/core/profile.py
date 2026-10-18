@@ -287,3 +287,234 @@ def sequence_hypothesis(df: pd.DataFrame, trigger: str, edge: str, candidates: t
                      "confidence": conf, "mode": mode, "edge": sedge,
                      "include": conf != "低" and n_cyc >= 1})
     return rows
+
+
+# ═══════════════════════════════════════════════════════════════
+# アナログ波形の検出点の仮説（波形検査条件の候補）
+# ═══════════════════════════════════════════════════════════════
+
+WAVE_POINT_TYPES = ["最大値点", "最小値点", "閾値超え検出", "傾き変化点"]
+
+
+def _nice(x: float) -> float:
+    """しきい値などを 3 桁に丸める（人が読み直しやすいように）"""
+    if not np.isfinite(x) or x == 0:
+        return 0.0
+    return float(np.round(x, 2 - int(np.floor(np.log10(abs(x))))))
+
+
+def _conf(det: float, spread_pct: float) -> str:
+    if det >= 0.95 and spread_pct <= 10:
+        return "高"
+    if det >= 0.8 and spread_pct <= 25:
+        return "中"
+    return "低"
+
+
+@st.cache_data(show_spinner=False)
+def wave_hypotheses_all(df: pd.DataFrame, pairs: tuple) -> dict:
+    """wave_hypotheses を (変数, トリガー, エッジ) の組ごとにまとめて計算する（df のハッシュは 1 回だけ）"""
+    from analyzer import detect_cycles, get_cycle_waveforms
+    cycles, out = {}, {}
+    for var, trigger, edge in pairs:
+        if (trigger, edge) not in cycles:
+            try:
+                cycles[(trigger, edge)] = pd.Index(list(detect_cycles(df, trigger, edge)))
+            except Exception:
+                cycles[(trigger, edge)] = None
+        idx = cycles[(trigger, edge)]
+        try:
+            waves = get_cycle_waveforms(df, idx, [var]) if idx is not None and var in df.columns else []
+        except Exception:
+            waves = []
+        out[var] = wave_hypotheses(waves, var)
+    return out
+
+
+def wave_hypotheses(waves: list, var: str) -> dict:
+    """1 つのアナログ変数について、波形の形と検出点の候補を出す。waves はサイクルごとの波形（get_cycle_waveforms）
+
+    サイクルごとの波形（トリガー基準）を重ねた平均の形から、
+      山形 → 最大値点、谷形 → 最小値点、
+      台形（上がって保持して戻る）→ 閾値超え検出（立ち上がり・立ち下がり）、
+      途中で傾きが急に変わる → 傾き変化点
+    を候補にする。検出は波形検査と同じ関数で全サイクルに試し、検出できた割合とサイクル間のばらつきで
+    確からしさ（高・中・低）を付ける。設定値（しきい値・平滑化など）は、そのまま検出点に入れられる形で返す。
+    返り値: {"shape", "cycle_ms", "wpost", "spark", "cands": [{"dtype", "name", "params", "t_ms", "v",
+             "det_rate", "confidence", "include", "note"}], "defaults": {dtype: params}}
+    """
+    from core.wave_inspect import (_detect_inflections, _detect_threshold_crossings, _select_nth_pts,
+                                   _slope_diff_t)
+    empty = {"shape": "", "cands": [], "defaults": {}, "spark": [], "cycle_ms": 0.0, "wpost": 300}
+    if len(waves) > 2:
+        waves = waves[:-1]          # 最後のサイクルは途中で切れている
+    sw = []
+    for c in waves[:60]:
+        if var not in c.columns:
+            continue
+        t = c["time_offset_ms"].to_numpy(dtype=float)
+        v = c[var].to_numpy(dtype=float)
+        ok = np.isfinite(v)
+        if ok.sum() >= 10:
+            sw.append((t[ok], v[ok]))
+    if len(sw) < 2:
+        return empty
+    allv = np.concatenate([v for _, v in sw])
+    p1, p99 = np.percentile(allv, [1, 99])
+    rng = float(p99 - p1)
+    if not np.isfinite(rng) or rng <= 0:
+        return empty
+    cyc_ms = float(np.median([t[-1] for t, _ in sw]))
+    dt = float(np.median(np.concatenate([np.diff(t) for t, _ in sw]))) or 1.0
+    grid = np.linspace(0, cyc_ms, 200)
+    mat = np.array([np.where(grid <= t[-1], np.interp(grid, t, v), np.nan) for t, v in sw])
+    mean = np.nanmean(mat, axis=0)
+    # 形はサイクルごとに判定して多数決（タイミングがずれると平均の形が崩れるため）
+    votes = []
+    for _, v in sw:
+        r = (v - p1) / rng
+        k = max(3, len(r) // 30)
+        st_, en_ = float(np.mean(r[:k])), float(np.mean(r[-k:]))
+        if r.max() >= 0.7 and st_ < 0.3 and en_ < 0.3 and np.mean(r > 0.9) < 0.08:
+            votes.append("山形")
+        elif r.min() <= 0.3 and st_ > 0.7 and en_ > 0.7 and np.mean(r < 0.1) < 0.08:
+            votes.append("谷形")
+        elif st_ < 0.3 and np.mean(r > 0.8) >= 0.08:
+            votes.append("台形")
+        elif st_ > 0.7 and np.mean(r < 0.2) >= 0.08:
+            votes.append("くぼみ")
+        else:
+            votes.append("その他")
+    kinds, counts = np.unique(votes, return_counts=True)
+    shape = str(kinds[np.argmax(counts)])
+    if counts.max() < 0.6 * len(sw):
+        shape = "その他"
+    n = len(sw)
+    wpost = int(min(2000, max(300, np.ceil(cyc_ms * 1.05 / 50) * 50)))
+
+    def summarize(pts):
+        got = [p for p in pts if p is not None]
+        det = len(got) / n
+        if not got:
+            return det, np.nan, np.nan, 100.0
+        ts = np.array([p[0] for p in got])
+        q75, q25 = np.percentile(ts, [75, 25])
+        return det, float(np.median(ts)), float(np.median([p[1] for p in got])), float((q75 - q25) / cyc_ms * 100)
+
+    # 波形検査の各タイプの設定値（タイプを変えても使えるように全タイプ分を作る）
+    level = _nice(p1 + 0.5 * rng)
+    sm = int(min(50, max(3, round(5 / dt))))
+    nlr = int(min(100, max(3, round(15 / dt))))
+    defaults = {
+        "最大値点": {},
+        "最小値点": {},
+        "閾値超え検出": {"tv": level, "tdir": "下降 ↓" if shape in ("谷形", "くぼみ") else "上昇 ↑", "nth": 1},
+        "傾き変化点": {"smooth": sm, "nleft": nlr, "nright": nlr, "thresh": 0.0, "nth": 1,
+                     "dir_inc": True, "dir_dec": False, "use_vrange": True,
+                     "vrange_lo": _nice(p1 + 0.1 * rng), "vrange_hi": _nice(p1 + 0.9 * rng)},
+    }
+    cands = []
+
+    def add(dtype, name, params, pts, note, conf=None):
+        det, tm, vm, spread = summarize(pts)
+        c = conf or _conf(det, spread)
+        cands.append({"dtype": dtype, "name": name, "params": params, "t_ms": tm, "v": vm,
+                      "det_rate": det, "confidence": c, "include": c != "低", "note": note})
+
+    # 山形・谷形
+    if shape in ("山形", "谷形"):
+        peak = shape == "山形"
+        pts, prom = [], []
+        for t, v in sw:
+            i = int(np.argmax(v) if peak else np.argmin(v))
+            pts.append((float(t[i]), float(v[i])))
+            prom.append(abs(v[i] - np.median(v[: max(3, len(v) // 20)])) >= 0.5 * rng)
+        share = float(np.mean(prom))
+        conf = "高" if share >= 0.95 else "中" if share >= 0.8 else "低"
+        add("最大値点" if peak else "最小値点", "ピーク" if peak else "谷", {}, pts,
+            "山形の波形。ピークの値と時刻を追います" if peak else "谷形の波形。谷の値と時刻を追います", conf)
+    elif shape in ("台形", "くぼみ"):
+        up = shape == "台形"
+        for d, nm in (("上昇 ↑", "立ち上がり" if up else "復帰"), ("下降 ↓", "立ち下がり" if up else "低下")):
+            pts = []
+            for t, v in sw:
+                cr = _detect_threshold_crossings(t, v, level, direction="rise" if "上昇" in d else "fall")
+                sel = _select_nth_pts(cr, 1)
+                pts.append(sel[0] if sel else None)
+            add("閾値超え検出", nm, {"tv": level, "tdir": d, "nth": 1}, pts,
+                f"値が {level:g} を{'上回る' if '上昇' in d else '下回る'}時刻を追います")
+        if not up:
+            cands.reverse()
+
+    # 途中で傾きが急に変わる点（立ち上がり・立ち下がりの途中の折れ曲がり。始まりと頂上は除く）
+    if shape in ("山形", "台形", "谷形", "くぼみ"):
+        rising = shape in ("山形", "台形")
+        lo_v, hi_v = p1 + 0.15 * rng, p1 + 0.85 * rng
+        peaks, noise, signs = [], [], []
+        for t, v in sw:
+            w = max(1, min(sm, len(v) // 2))
+            vs = np.convolve(v, np.ones(w) / w, mode="same")
+            # 最初に 15% を越えてから 85% に届くまで（谷形は逆向き）を 1 本の変化区間とみる
+            a_ = np.argmax(vs >= lo_v) if rising else np.argmax(vs <= hi_v)
+            b_ = (a_ + np.argmax(vs[a_:] >= hi_v)) if rising else (a_ + np.argmax(vs[a_:] <= lo_v))
+            if b_ - a_ < 6 * nlr:
+                continue
+            tm_, _, _, d_ = _slope_diff_t(t, vs, nlr, nlr)
+            seg = d_[max(0, a_ + nlr):max(0, b_ - 3 * nlr)]
+            if len(seg) < 5:
+                continue
+            k = int(np.argmax(np.abs(seg)))
+            peaks.append(abs(float(seg[k])))
+            signs.append(np.sign(seg[k]))
+            noise.append(float(np.median(np.abs(seg))) + 1e-12)
+        if len(peaks) >= 0.8 * n and np.median(np.array(peaks) / np.array(noise)) >= 6:
+            inc = bool(np.median(signs) > 0)
+            th = _nice(0.5 * float(np.median(peaks)))
+            params = dict(defaults["傾き変化点"], thresh=th, dir_inc=inc, dir_dec=not inc,
+                          vrange_lo=_nice(lo_v), vrange_hi=_nice(hi_v))
+            defaults["傾き変化点"] = params
+            pts = []
+            for t, v in sw:
+                ts = _detect_inflections(t, v, smooth_w=sm, n_left=nlr, n_right=nlr, threshold=th,
+                                         detect_increase=inc, detect_decrease=not inc)
+                pp = [(float(x), float(np.interp(x, t, v))) for x in ts]
+                pp = [q for q in pp if lo_v <= q[1] <= hi_v]
+                sel = _select_nth_pts(pp, 1)
+                pts.append(sel[0] if sel else None)
+            add("傾き変化点", "傾き変化", params, pts,
+                "変化の途中で傾きが急に" + ("大きくなる" if inc else "小さくなる") + "点（接触・切り替わりなど）を追います")
+
+    spark = [float(x) for x in mean[:: max(1, len(mean) // 40)] if np.isfinite(x)]
+    return {"shape": shape, "cycle_ms": cyc_ms, "wpost": wpost, "spark": spark, "cands": cands,
+            "defaults": defaults}
+
+
+def analog_vars(entry: dict) -> list:
+    """変化のあるアナログ変数（状態番号・カウンタ・一定の変数は外す）"""
+    prof = variable_profile(entry["df"], tuple(entry["col_types"].items()))
+    return [v for v in prof.index if prof.loc[v, "kind"] == "analog"]
+
+
+def trigger_for_var(var: str, processes: dict) -> tuple:
+    """変数の工程を名前の先頭で推定し、(工程名, トリガー, エッジ) を返す。分からなければ最初の工程"""
+    for name, p in processes.items():
+        if var.startswith(name) and p.get("trigger_col"):
+            return name, p["trigger_col"], p.get("edge", "RISE")
+    for name, p in processes.items():
+        if p.get("trigger_col"):
+            return name, p["trigger_col"], p.get("edge", "RISE")
+    return "", "", "RISE"
+
+
+def wave_candidates(entry: dict, processes: dict) -> dict:
+    """基準データのアナログ変数ごとに、工程のサイクル開始信号を基準にした波形の仮説を返す。
+    processes: {工程名: {"trigger_col", "edge"}}。返り値: {変数: {"process", "trigger", "edge", **wave_hypotheses}}
+    """
+    pairs, owner = [], {}
+    for v in analog_vars(entry):
+        pname, trig, edge = trigger_for_var(v, processes)
+        if trig:
+            pairs.append((v, trig, edge))
+            owner[v] = pname
+    res = wave_hypotheses_all(entry["df"], tuple(pairs))
+    return {v: dict(res[v], process=owner[v], trigger=t, edge=e) for v, t, e in pairs}

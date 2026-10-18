@@ -25,6 +25,37 @@ def set_columns(bools: list, nums: list):
     global bool_cols, num_cols
     bool_cols, num_cols = list(bools), list(nums)
 
+
+# ── 事前解析の候補（core/profile.wave_hypotheses）を検出点として登録する ─────────────
+
+def registered_points(var: str) -> set:
+    """変数に登録済みの時間軸検出点 {(タイプ, 名前)}"""
+    ss = st.session_state
+    vkey = f"wvol___global_{var}"
+    return {(d.get("type", ""), ss.get(f"{vkey}_{d.get('id', '')}_name", ""))
+            for d in ss.get(f"{vkey}_t_det_list", [])}
+
+
+def adopt_point(var: str, dtype: str, name: str, params: dict, trigger: str, edge: str,
+                wpost: int, trend: bool):
+    """時間軸の検出点を 1 件追加し、ダイアログと同じキーに設定値を入れる（有効・傾向解析はオン）"""
+    ss = st.session_state
+    vkey = f"wvol___global_{var}"
+    ss[f"{vkey}_trigger"], ss[f"{vkey}_edge"] = trigger, edge
+    ss[f"{vkey}_wpost"] = int(max(int(ss.get(f"{vkey}_wpost", 300)), wpost))
+    cnt = int(ss.get(f"{vkey}_t_det_cnt", len(ss.get(f"{vkey}_t_det_list", []))))
+    did = f"td{cnt}"
+    ss[f"{vkey}_t_det_list"] = list(ss.get(f"{vkey}_t_det_list", [])) + [{"id": did, "type": dtype}]
+    ss[f"{vkey}_t_det_cnt"] = cnt + 1
+    dkey = f"{vkey}_{did}"
+    ss[f"{dkey}_on"], ss[f"{dkey}_name"], ss[f"{dkey}_trend_on"] = True, name, bool(trend)
+    for k, v in params.items():
+        ss[f"{dkey}_{k}"] = v
+    sel = list(ss.get("wi_sel___global") or [])
+    if var not in sel:
+        ss["wi_sel___global"] = sel + [var]
+
+
 _WI_SAVE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "wi_saved_setups.json")
 _WI_CONFIG_FILE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "wi_current_config.json"
