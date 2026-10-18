@@ -42,3 +42,7 @@ chartCategoricalColors = ["#4fa3ff", "#9da5b4", "#2bb3ff", "#c8c8c8", "#d7ba7d",
 backgroundColor = "#252526"
 secondaryBackgroundColor = "#333337"
 borderColor = "#3f3f46"
+
+[client]
+# 開発者向けボタン（Deploy など）を出さない。テーマの切り替えは右上メニューに残る
+toolbarMode = "viewer"
