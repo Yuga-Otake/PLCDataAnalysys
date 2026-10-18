@@ -11,6 +11,7 @@ import streamlit as st
 
 from core.data import (add_uploaded, apply_settings_json, df_summary, remove_csv,
                        save_to_folder, scan_folder, set_use_sample, store)
+from core.bundle import bundle_file_name, bundle_maker, is_bundle, load_bundle
 from core.project import build_settings_json, mark_saved, settings_file_name
 from core.profile import KIND_LABELS, compare_consistency, sampling_profile, variable_profile
 from core.state import compare_keys, pk, ref_entry
@@ -143,30 +144,40 @@ with st.container(border=True):
                 remove_csv(k)
             _rerun_with(f"比較データを {len(to_remove)} 件外しました")
 
-# ── 設定ファイル ─────────────────────────────────────────────
-st.subheader("設定ファイル", anchor=False)
-st.caption("工程・ステップ・基準値・波形検査条件をまとめた JSON です。")
+# ── 保存・読み込み ───────────────────────────────────────────
+st.subheader("保存・読み込み", anchor=False)
+st.caption("設定ファイル（JSON）は工程・ステップ・基準値・波形検査条件だけ、"
+           "プロジェクトファイル（ZIP）は基準データ（必要なら比較データも）と設定をまとめた 1 つのファイルです。"
+           "プロジェクトファイルを読み込めば、データを探し直さずにそのまま点検を再開できます。")
 with st.container(border=True):
     save_col, load_col = st.columns(2)
     with save_col:
         st.markdown("**保存**")
         if ss.get("processes"):
-            st.download_button("設定を保存", data=build_settings_json(), file_name=settings_file_name(),
+            with_cmp = st.checkbox("比較データも含める", key="_data_bundle_cmp",
+                                   help="オフのときは基準データと設定だけを入れます（ファイルが小さくなります）")
+            b1, b2 = st.columns(2)
+            b1.download_button("データごと保存（ZIP）", data=bundle_maker(with_cmp), file_name=bundle_file_name(),
+                               mime="application/zip", on_click=mark_saved, icon=":material/inventory_2:",
+                               type="primary", key="_data_save_bundle", width="stretch")
+            b2.download_button("設定だけ保存（JSON）", data=build_settings_json(), file_name=settings_file_name(),
                                mime="application/json", on_click=mark_saved, icon=":material/download:",
-                               key="_data_save_json")
+                               key="_data_save_json", width="stretch")
         else:
             st.caption("工程を登録すると保存できます。")
     with load_col:
         st.markdown("**読み込み**")
-        cfg_up = st.file_uploader("設定ファイル（JSON）", type=["json"], key="_data_cfg_up",
-                                  label_visibility="collapsed")
+        cfg_up = st.file_uploader("設定ファイル（JSON）またはプロジェクトファイル（ZIP）", type=["json", "zip"],
+                                  key="_data_cfg_up", label_visibility="collapsed")
+        st.caption("プロジェクトファイルを読み込むと、今のデータと設定はすべて置き換わります。")
         if cfg_up is not None and cfg_up.file_id != ss.get("_data_cfg_loaded"):
             try:
-                msg = apply_settings_json(json.load(cfg_up))
+                with st.spinner("読み込んでいます…"):
+                    msg = load_bundle(cfg_up) if is_bundle(cfg_up.name) else apply_settings_json(json.load(cfg_up))
                 ss["_data_cfg_loaded"] = cfg_up.file_id
                 _rerun_with(msg)
             except Exception as e:
-                st.error(f"設定ファイルを読み込めませんでした。（{e}）")
+                st.error(f"{cfg_up.name} を読み込めませんでした。（{e}）")
 
 # ── フォルダ ─────────────────────────────────────────────────
 with st.expander("フォルダから読み込む・フォルダに保存する（ローカルで実行している場合）"):

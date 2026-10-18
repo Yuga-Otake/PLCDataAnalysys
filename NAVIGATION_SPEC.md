@@ -264,6 +264,10 @@ timing_analyzer/
 - key 付きウィジェットは `persist_state="session"` を既定にしている（`core.state.enable_session_persistence`）。
   波形検査の設定値はウィジェットのキー（`wvol_*`）に持っているため、ページを移っても消えないようにしている。
 - 波形検査の設定は従来どおり `wi_current_config.json` に自動保存され、セッション開始時に復元される（`app.py`）。
+- プロジェクトファイル（`core/bundle.py`）：基準データ（必要なら比較データも）と設定を 1 つの ZIP にまとめる。
+  中身は `manifest.json`（CSV の役割・ラベル）・`settings.json`（設定ファイルと同じ）・`data/*.csv`（APB の CSV 形式）・`README.txt`。
+  データ画面で読み込むと、今のデータと設定を置き換えて復元する。ホーム・基準値・データ画面の保存は「データごと保存（ZIP）」が主、
+  「設定だけ保存（JSON）」も残す。ZIP は押したときに作る（download_button の遅延生成）
 - 見た目は `.streamlit/config.toml` の `[theme.light]` / `[theme.dark]` と `core/ui.py` の CSS で決める。
   ダークは Sysmac Studio 風（濃灰＋青）、ライトは青と灰色のシンプルな配色。既定は OS 設定に追従し、
   右上メニューの Settings で切り替えられる。新画面では絵文字を使わず、状態は色＋文字（`chip()`）で示す。

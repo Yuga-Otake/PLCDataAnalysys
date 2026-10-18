@@ -9,6 +9,7 @@ import streamlit as st
 
 from core.analysis import MODE_LABELS, baseline_meta, compute_baseline
 from core.profile import cycle_health, wave_candidates
+from core.bundle import bundle_file_name, bundle_maker
 from core.project import build_settings_json, mark_saved, settings_file_name
 from core.state import pk
 from core.ui import chip, page_header
@@ -195,11 +196,15 @@ if current:
                 if st.button("波形検査の候補を見る", key="_bl_wave", icon=":material/show_chart:"):
                     st.switch_page("views/wave.py")
     others = [n for n in names if not ss.get(pk(n, "baseline"))]
-    n1, n2, _ = st.columns([1.2, 1.2, 2])
-    n1.download_button("設定を保存", data=build_settings_json(), file_name=settings_file_name(),
-                       mime="application/json", on_click=mark_saved, type="primary",
-                       icon=":material/download:", key="_bl_dl")
-    if n2.button("ホームへ戻る", key="_bl_home"):
+    n1, n2, n3, _ = st.columns([1.3, 1.5, 1, 1.2])
+    n1.download_button("データごと保存", data=bundle_maker(False), file_name=bundle_file_name(),
+                       mime="application/zip", on_click=mark_saved, type="primary",
+                       icon=":material/inventory_2:", key="_bl_dl_zip", width="stretch",
+                       help="基準データと設定を 1 つのファイル（ZIP）にまとめます。読み込めばデータごと元に戻ります")
+    n2.download_button("設定だけ保存（JSON）", data=build_settings_json(), file_name=settings_file_name(),
+                       mime="application/json", on_click=mark_saved,
+                       icon=":material/download:", key="_bl_dl", width="stretch")
+    if n3.button("ホームへ戻る", key="_bl_home", width="stretch"):
         st.switch_page("views/home.py")
     if others:
         st.caption("基準値が未登録の工程: " + "、".join(others))
