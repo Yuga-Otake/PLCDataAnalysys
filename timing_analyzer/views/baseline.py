@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from core.analysis import MODE_LABELS, baseline_meta, compute_baseline
+from core.profile import cycle_health
 from core.project import build_settings_json, mark_saved, settings_file_name
 from core.state import pk
 from core.ui import chip, page_header
@@ -129,8 +130,19 @@ with st.container(border=True):
     if not chosen:
         st.caption("データを 1 件以上選んでください。")
     else:
+        # 事前診断で見つけた外れサイクル（停止など）を除く
+        excl = [set(cycle_health(store[k]["df"], trigger, edge)["outliers"]) for k in chosen]
+        n_excl = sum(len(e) for e in excl)
+        drop = st.checkbox(f"外れサイクル（停止など）を除いて算出する（{n_excl} サイクル）", value=True,
+                           key=f"_bl_drop_{pname}", disabled=n_excl == 0,
+                           help="サイクル長が他と大きく違うサイクルは、正常な動作を表していない可能性があります")
+        if n_excl and drop:
+            detail = "、".join(f"{store[k]['label']}: " + "・".join(f"#{c}" for c in sorted(e))
+                               for k, e in zip(chosen, excl) if e)
+            st.caption(f"除外するサイクル — {detail}")
         with st.spinner("算出中…"):
-            preview, n_cyc = compute_baseline([store[k]["df"] for k in chosen], trigger, edge, steps, method)
+            preview, n_cyc = compute_baseline([store[k]["df"] for k in chosen], trigger, edge, steps, method,
+                                              exclude=excl if drop else None)
         if not preview:
             st.warning("選んだデータではステップを検出できませんでした。サイクル開始信号とステップを確認してください。")
         else:
@@ -154,7 +166,8 @@ with st.container(border=True):
                 ss[pk(pname, "baseline")] = preview
                 src = "、".join(store[k]["label"] for k in chosen)
                 ss[pk(pname, "baseline_meta")] = baseline_meta(
-                    f"{src}の{'平均値' if method == 'mean' else '最小値'}", n_cyc)
+                    f"{src}の{'平均値' if method == 'mean' else '最小値'}"
+                    + (f"（外れ {n_excl} サイクル除外）" if n_excl and drop else ""), n_cyc)
                 ss["_bl_msgs"] = [f"「{pname}」の基準値を登録しました"]
                 st.rerun()
 

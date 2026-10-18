@@ -230,10 +230,12 @@ def trigger_candidates(df: pd.DataFrame, bool_cols: tuple) -> list:
 # 基準値
 # ═══════════════════════════════════════════════════════════════
 
-def compute_baseline(dfs: list, trigger_col: str, edge: str, steps: list, method: str = "mean"):
+def compute_baseline(dfs: list, trigger_col: str, edge: str, steps: list, method: str = "mean",
+                     exclude: list | None = None):
     """複数データからステップごとの基準値を算出する。
 
     method: "mean"（平均）/ "min"（最小）
+    exclude: dfs と同じ並びで、算出から外すサイクル番号（サイクル#）の集合のリスト
     返り値: (baseline dict, サイクル数)。baseline は設定ファイルと同じ形式
       時刻ステップ:  {"mode", "ref_ms", "std_ms"}
       期間ステップ:  {"mode", "ref_start_ms", "ref_dur_ms", "std_start_ms", "std_dur_ms"}
@@ -241,10 +243,12 @@ def compute_baseline(dfs: list, trigger_col: str, edge: str, steps: list, method
     agg = np.mean if method == "mean" else np.min
     acc = {s["name"]: ([], []) for s in steps}
     n_cyc = 0
-    for df in dfs:
+    for i, df in enumerate(dfs):
         rd = analyze(df, trigger_col, edge, steps)
         if rd is None or len(rd) == 0:
             continue
+        if exclude and exclude[i]:
+            rd = rd[~rd["サイクル#"].isin(exclude[i])]
         n_cyc += len(rd)
         for s in steps:
             st_, du = step_values(rd, s)

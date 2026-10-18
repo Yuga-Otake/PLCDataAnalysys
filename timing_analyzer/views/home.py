@@ -51,8 +51,8 @@ with st.container(border=True):
             st.switch_page("views/data.py")
     elif cur == "process":
         text_col.markdown("<p class='apb-next-title'>工程を登録する</p>"
-                          "<p class='apb-next-body'>1 サイクルの始まりを示す Bool 変数（サイクル開始信号）を選び、"
-                          "工程として登録します。</p>", unsafe_allow_html=True)
+                          "<p class='apb-next-body'>変数名のまとまりと、周期的に立ち上がる信号から工程を提案します。"
+                          "内容を確認して、ワンクリックで作成できます。</p>", unsafe_allow_html=True)
         if btn_col.button("工程を登録", type="primary", width="stretch"):
             st.switch_page("views/process.py")
     elif cur == "steps":
