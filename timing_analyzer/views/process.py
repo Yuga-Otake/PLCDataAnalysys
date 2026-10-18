@@ -14,7 +14,8 @@ from core.analysis import (MODE_LABELS, analyze, cycle_starts, default_color, de
 from core.profile import active_bool_vars, cycle_health, group_hypotheses, sequence_hypothesis
 from core.state import add_process, delete_process, pk, ref_entry, rename_process
 from core.ui import chip, page_header
-from core.wave_inspect import organized_points, point_label
+from core.wave_inspect import inspection_tree, point_label
+from core.wave_view import render_process
 
 ss = st.session_state
 page_header(
@@ -437,7 +438,8 @@ if not stats:
     st.warning("基準データではどのステップも検出できませんでした。変数やサイクル開始信号を確認してください。")
     st.stop()
 # この工程の波形検査点（サイクル開始信号がこの工程のもの）も同じ時間軸に重ねる
-wpoints = [p for p in organized_points(df) if p["process"] == pname]
+wnode = next((n for n in inspection_tree(df) if n["process"] == pname), None)
+wpoints = [p for w in (wnode["waves"] if wnode else []) for p in w["points"]]
 gpoints = [{"label": "◇ " + point_label(p), "t": p["t"],
             "hover": f"<b>{p['var']}</b><br>{p['type']}　{p['name']}<br>{p['t']:.1f} ms　値 {p['v']:.4g}"}
            for p in wpoints if p["t"] is not None]
@@ -459,12 +461,8 @@ st.dataframe(
     hide_index=True, width="stretch",
 )
 if wpoints:
-    with st.expander(f"この工程の波形検査点（{len(wpoints)} 点）"):
-        st.dataframe(pd.DataFrame([{
-            "変数": p["var"], "タイプ": p["type"], "名前": p["name"],
-            "時刻 [ms]": round(p["t"], 1) if p["t"] is not None else None,
-            "位置": p["where"], "推移に出す": p["trend"],
-        } for p in wpoints]), hide_index=True, width="stretch")
+    with st.expander(f"この工程の波形検査点（波形 {len(wnode['waves'])} 本・検査点 {len(wpoints)}）"):
+        render_process(wnode, editable=False)
         if st.button("波形検査条件で編集", key="_proc_to_wave", icon=":material/show_chart:"):
             st.switch_page("views/wave.py")
 takt = int(ss.get(pk(pname, "takt"), 0))

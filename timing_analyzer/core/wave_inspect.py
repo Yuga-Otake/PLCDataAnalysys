@@ -157,6 +157,11 @@ def organized_points(ref_df) -> list:
 
     並び順は工程の登録順 → 基準データでの時刻順（位置が分からない点は最後）。工程に紐づかない点は process=""。
     """
+    return _organize(ref_df)[0]
+
+
+def _organize(ref_df) -> tuple:
+    """organized_points の本体。(検査点, {工程: ステップ統計}, 工程定義) を返す"""
     from core.analysis import analyze, step_context, step_stats
     defs = process_defs()
     items = inspection_points({n: (d["trigger"], d["edge"]) for n, d in defs.items()})
@@ -179,7 +184,69 @@ def organized_points(ref_df) -> list:
     order = {n: i for i, n in enumerate(defs)}
     items.sort(key=lambda it: (order.get(it["process"], len(order)),
                                it["t"] if it["t"] is not None else float("inf"), it["var"], it["no"]))
-    return items
+    return items, stats, defs
+
+
+@st.cache_data(show_spinner=False)
+def _mean_waves(df: pd.DataFrame, specs: tuple) -> dict:
+    """(変数, 信号, エッジ, 前, 後) ごとに、基準データの平均波形と 5〜95% の幅 {spec: (t, 平均, 下, 上)}"""
+    cycles, out = {}, {}
+    for spec in specs:
+        var, trig, edge, wpre, wpost = spec
+        if var not in df.columns or trig not in df.columns:
+            continue
+        if (trig, edge) not in cycles:
+            try:
+                cycles[(trig, edge)] = pd.Index(list(detect_cycles(df, trig, edge)))
+            except Exception:
+                cycles[(trig, edge)] = pd.Index([])
+        idx = cycles[(trig, edge)]
+        waves = get_cycle_waveforms(df, idx, [var]) if len(idx) else []
+        if len(waves) > 2:
+            waves = waves[:-1]          # 最後のサイクルは途中で切れている
+        sw = [(c["time_offset_ms"].to_numpy(dtype=float), c[var].to_numpy(dtype=float))
+              for c in waves if var in c.columns and len(c) >= 2]
+        if not sw:
+            continue
+        t_end = min(float(wpost), float(np.median([t[-1] for t, _ in sw])))
+        grid = np.linspace(max(-float(wpre), 0.0), t_end, 300)
+        mat = np.array([np.where(grid <= t[-1], np.interp(grid, t, v), np.nan) for t, v in sw])
+        with np.errstate(all="ignore"):
+            out[spec] = (grid.tolist(), np.nanmean(mat, axis=0).tolist(),
+                         np.nanpercentile(mat, 5, axis=0).tolist(), np.nanpercentile(mat, 95, axis=0).tolist())
+    return out
+
+
+def inspection_tree(ref_df) -> list:
+    """工程 → 検査波形 → 検査点 の 3 段に整理する。
+
+    返り値: [{"process", "trigger", "edge", "stats", "waves": [{"var", "graph", "wave": (t, 平均, 下, 上) | None,
+              "points": [検査点…]}]}]。工程は登録順（検査点のない工程も含む）、工程に紐づかない点は最後に process=""。
+    波形は最初の検査点の時刻順、検査点は時刻順。
+    """
+    ss = st.session_state
+    items, stats, defs = _organize(ref_df)
+    specs = {}
+    for it in items:
+        specs[(it["var"], it["trigger"])] = (it["var"], it["trigger"], it["edge"],
+                                            int(ss.get(f"{it['vkey']}_wpre", 50)),
+                                            int(ss.get(f"{it['vkey']}_wpost", 300)))
+    waves = _mean_waves(ref_df, tuple(v for v in specs.values() if v[1])) if ref_df is not None and specs else {}
+    tree = []
+    for pname in list(defs) + ([""] if any(not it["process"] for it in items) else []):
+        mine = [it for it in items if it["process"] == pname]
+        by_var = {}
+        for it in mine:                 # items は時刻順なので、波形も最初の検査点の時刻順になる
+            by_var.setdefault(it["var"], []).append(it)
+        d = defs.get(pname, {})
+        tree.append({
+            "process": pname, "trigger": d.get("trigger", ""), "edge": d.get("edge", "RISE"),
+            "stats": stats.get(pname) or [],
+            "waves": [{"var": v, "graph": "XY" if all(p["graph"] == "XY" for p in pts) else "時間軸",
+                       "wave": waves.get(specs.get((v, pts[0]["trigger"]))), "points": pts}
+                      for v, pts in by_var.items()],
+        })
+    return tree
 
 
 def point_label(it: dict) -> str:

@@ -14,7 +14,8 @@ from core.ui import page_header
 from core.wave_inspect import (_render_waveform_overlay, _wi_add_dialog, _wi_edit_dialog,
                                _wi_load_from_file, _wi_restore_config, _wi_save_config,
                                _wi_save_to_file, adopt_point, cached_detect_cycles,
-                               organized_points, registered_points, set_columns)
+                               inspection_tree, registered_points, set_columns)
+from core.wave_view import process_header, render_process
 
 # 重ね表示の色（CSV ごと）
 _CMP_PALETTE = ["#3b82f6", "#f59e0b", "#10b981", "#ef4444", "#8b5cf6", "#ec4899", "#06b6d4", "#84cc16"]
@@ -147,61 +148,36 @@ else:
         st.session_state.pop("wi_transition_to_edit", None)
         _wi_edit_dialog()
 
-    # 登録済みの検出点を工程ごとに整理（変数のサイクル開始信号で工程に割り当て、基準データでの位置を付ける）
-    _wi_points = organized_points(ref["df"] if ref else None)
-    _wi_sum_items: list = [{
-        "変数": it["var"], "トリガー": it["trigger"], "エッジ": it["edge"], "グラフ": it["graph"],
-        "No": it["no"], "タイプ": it["type"], "名前": it["name"],
-        "有効": "✅" if it["on"] else "−", "傾向解析": "📈" if it["trend"] else "−",
-        "_svkey": it["vkey"], "_did": it["did"], "_sv": it["var"], "_graph": it["graph"], "_dtype": it["type"],
-        "_pt": it,
-    } for it in _wi_points]
+    # 登録済みの検出点を「工程 → 検査波形 → 検査点」に整理（工程は変数のサイクル開始信号で決まる）
+    _wi_tree = inspection_tree(ref["df"] if ref else None)
+    _wi_sum_items: list = [p for n in _wi_tree for w in n["waves"] for p in w["points"]]
     _wi_n_dets  = len(_wi_sum_items)
-    _wi_n_trend = sum(1 for r in _wi_sum_items if r["傾向解析"] == "📈")
-    _wi_procs = list(dict.fromkeys(r["_pt"]["process"] for r in _wi_sum_items))
+    _wi_n_trend = sum(1 for p in _wi_sum_items if p["trend"])
+    _wi_nodes = [n for n in _wi_tree if n["waves"]]
 
     with st.expander(
-        f"📋 登録サマリー　検出点: **{_wi_n_dets}** 件（{len([p for p in _wi_procs if p])} 工程）"
+        f"📋 登録サマリー（工程 → 検査波形 → 検査点）　検出点: **{_wi_n_dets}** 件"
         f"　傾向解析送出: **{_wi_n_trend}** 件",
         expanded=True,
     ):
-        st.caption("工程ごとに、基準データで検出した時刻の順に並べています。"
-                   "位置は工程のステップに対して、その検出点がどこで起きているかです。")
-        for _wi_proc in _wi_procs:
-            _rows = [r for r in _wi_sum_items if r["_pt"]["process"] == _wi_proc]
-            if _wi_proc:
-                st.markdown(f"**{_wi_proc}**　<span class='apb-lead'>サイクル開始 {_rows[0]['トリガー']}"
-                            f"（{'立ち上がり' if _rows[0]['エッジ'] == 'RISE' else '立ち下がり'}）・{len(_rows)} 点</span>",
-                            unsafe_allow_html=True)
-            else:
-                st.markdown("**工程に紐づいていない検出点**", unsafe_allow_html=True)
-                st.caption("サイクル開始信号がどの工程とも一致しません。⚙️ で工程のサイクル開始信号を選ぶと、その工程に入ります。")
-            # スマホでは列が縦に積まれて読めなくなるので、横並びのまま横スクロールさせる（core/ui.py の CSS）
-            with st.container(key=f"wisumgrid_{abs(hash(_wi_proc)) % 10**6}"):
-                _w = [2.2, 1.4, 1.4, 2.6, 0.5, 0.5, 0.6]
-                for _lbl, _col in zip(["変数", "タイプ", "名前", "位置（基準データ）", "有効", "📈", ""],
-                                      st.columns(_w)):
-                    _col.caption(_lbl)
-                for _wi_row in _rows:
-                    _pt = _wi_row["_pt"]
-                    _wr = st.columns(_w)
-                    _wr[0].markdown(f"**{_wi_row['変数']}**" + ("　<small>XY</small>" if _pt["graph"] == "XY" else ""),
-                                    unsafe_allow_html=True)
-                    _wr[1].markdown(_wi_row["タイプ"])
-                    _wr[2].markdown(_wi_row["名前"] or "−")
-                    if _pt["t"] is not None:
-                        _pos = f"{_pt['t']:.0f} ms" + (f"　{_pt['where']}" if _pt["where"] else "")
-                        if _pt["rate"] < 0.9:
-                            _pos += f"　<small>（検出 {_pt['rate'] * 100:.0f}% のサイクル）</small>"
-                    else:
-                        _pos = "<small>判定・XY・未検出のため位置なし</small>"
-                    _wr[3].markdown(_pos, unsafe_allow_html=True)
-                    _wr[4].markdown(_wi_row["有効"])
-                    _wr[5].markdown(_wi_row["傾向解析"])
-                    with _wr[6]:
-                        if st.button("⚙️", key=f"_wisum_edit_{_pt['dkey']}", help="波形を見ながら編集"):
-                            st.session_state["wi_edit_target"] = {k: v for k, v in _wi_row.items() if k != "_pt"}
-                            _wi_edit_dialog()
+        if _wi_nodes:
+            _wi_names = [n["process"] or "工程なし" for n in _wi_nodes]
+            _wi_pick = st.pills("工程で絞り込む", ["すべて"] + _wi_names, default="すべて",
+                                key="_wi_tree_filter", label_visibility="collapsed") or "すべて"
+            st.caption("図は基準データの平均波形（帯は 5〜95% のサイクル）、下の帯は工程のステップ（同じ時間軸）、"
+                       "◇ は各検査点を基準データで検出した位置です。")
+            for _wi_node, _wi_nm in zip(_wi_nodes, _wi_names):
+                if _wi_pick not in ("すべて", _wi_nm):
+                    continue
+                with st.container(border=True):
+                    st.markdown(f"<p class='apb-next-title'>{process_header(_wi_node)}</p>", unsafe_allow_html=True)
+                    if not _wi_node["process"]:
+                        st.caption("サイクル開始信号がどの工程とも一致しません。⚙️ で工程のサイクル開始信号を選ぶと、"
+                                   "その工程に入ります。")
+                    render_process(_wi_node, editable=True)
+            _wi_empty = [n["process"] for n in _wi_tree if n["process"] and not n["waves"]]
+            if _wi_empty:
+                st.caption("検査点のない工程: " + "、".join(_wi_empty))
 
         # ── 行追加ボタン ────────────────────────────────────────
         _wadd_c1, _wadd_c2 = st.columns([9.6, 0.6])

@@ -14,6 +14,7 @@ from core.evaluate import STATUS, compare_keys_by_time, control_limits, evaluate
 from core.state import pk
 from core.ui import REF_LINE, STATUS_COLOR, numeric, page_header, rule_popover, tolerance_band
 from core.wave_inspect import _compute_wi_det_stats_for_csv, inspection_points, process_defs
+from core.wave_view import short_var
 
 ss = st.session_state
 page_header(
@@ -172,8 +173,9 @@ st.dataframe(numeric(pd.DataFrame([{
 # ── 波形検査の検出点 ─────────────────────────────────────────
 st.subheader(f"「{pname}」の波形検査点の推移", anchor=False)
 # 検出点は、変数のサイクル開始信号が選んでいる工程のものだけを出す
-_owner = {it["dkey"]: it["process"]
-          for it in inspection_points({n: (d["trigger"], d["edge"]) for n, d in process_defs().items()})}
+_pts = {it["dkey"]: it
+        for it in inspection_points({n: (d["trigger"], d["edge"]) for n, d in process_defs().items()})}
+_owner = {k: it["process"] for k, it in _pts.items()}
 det_series, det_errors = {}, []
 for k, lbl in zip(keys, labels):
     d = store[k]["df"]
@@ -187,7 +189,8 @@ for k, lbl in zip(keys, labels):
         base_key = dk[:-3] if dk.endswith("_xy") else dk[:-8] if dk.endswith("_formula") else dk
         if dk.startswith("__") or _owner.get(base_key, "") != pname:
             continue
-        det_series.setdefault(dk, {"info": dv, "rows": []})["rows"].append({**dv, "label": lbl})
+        det_series.setdefault(dk, {"info": dv, "rows": [], "pt": _pts.get(base_key)})["rows"].append(
+            {**dv, "label": lbl})
 for e in det_errors:
     st.error(f"検出点を計算できませんでした（{e}）")
 configured = any(v is True and k.startswith("wvol___global_") and k.endswith("_trend_on")
@@ -208,8 +211,17 @@ elif not det_series:
 else:
     st.caption("波形検査条件で「傾向解析に出す」をオンにした、この工程の検出点の時期ごとの平均 ± σ です。"
                + (f"ほかの工程（{'、'.join(_others)}）の検査点は、上で工程を切り替えると表示されます。" if _others else ""))
-    for dk, d in det_series.items():
-        info, rows = d["info"], d["rows"]
+    # 検査波形（変数）ごとにまとめ、その下に検査点を並べる
+    _order = sorted(det_series, key=lambda k: (det_series[k]["pt"]["var"] if det_series[k]["pt"] else k,
+                                               det_series[k]["pt"]["no"] if det_series[k]["pt"] else 0))
+    _cur_var = None
+    for dk in _order:
+        d = det_series[dk]
+        info, rows, pt = d["info"], d["rows"], d["pt"]
+        if pt and pt["var"] != _cur_var:
+            _cur_var = pt["var"]
+            st.markdown(f"##### {short_var(_cur_var)}　<span class='apb-lead'>{_cur_var}</span>",
+                        unsafe_allow_html=True)
         xs = [r["label"] for r in rows]
         panels = [("t_mean", "t_std", info.get("x_label", "時刻 [ms]"))]
         # 閾値超え検出の値はしきい値そのもので変わらないので、値の図は出さない
@@ -218,7 +230,7 @@ else:
         v_const = max(vm) - min(vm) <= eps and all(r.get("v_std", 0) <= eps for r in rows)
         if not info.get("is_formula") and not v_const:
             panels.append(("v_mean", "v_std", info.get("y_label", "値")))
-        st.markdown(f"**{info.get('label', dk)}**")
+        st.markdown(f"**◇ {pt['name'] or pt['type']}**（{pt['type']}）" if pt else f"**{info.get('label', dk)}**")
         cols = st.columns(len(panels))
         for col, (mk, sk_, title) in zip(cols, panels):
             fig = go.Figure(go.Scatter(
