@@ -149,30 +149,47 @@ with st.expander(f"候補から追加（{len(cands)} 件）", expanded=not steps
     elif not cands:
         st.caption("追加できる候補はありません。")
     else:
-        st.caption("サイクルの中で状態が変わる Bool 変数を、早い順に並べています。"
-                   "立ち上がる変数には最初からチェックを入れています。")
+        st.caption("サイクルの中で状態が変わる Bool 変数が候補です。名前で検索し、下のプルダウンでまとめて選んでから追加します。"
+                   "検索を変えても、選んだ変数はプルダウンに残ります。")
         kind_label = {"RISE": "立ち上がる", "ON": "開始時点で ON", "FALL": "立ち下がる"}
-        cand_df = pd.DataFrame([{
-            "追加": c["kind"] == "RISE", "変数": c["var"], "変化": kind_label[c["kind"]],
-            "時刻 [ms]": round(c["t_ms"], 1), "検出サイクル": f"{c['cycles']}/{len(starts)}",
-        } for c in cands])
-        edited = st.data_editor(
-            cand_df, hide_index=True, width="stretch", key=f"_proc_cands_{pname}_{trigger}_{edge}_{len(steps)}",
-            disabled=["変数", "変化", "時刻 [ms]", "検出サイクル"],
-            column_config={
-                "追加": st.column_config.CheckboxColumn(width="small"),
-                "時刻 [ms]": st.column_config.NumberColumn(
-                    help="サイクル開始からの時刻（中央値）。開始時点で ON の変数は ON の継続時間"),
-            },
+        by_var = {c["var"]: c for c in cands}
+        order = {c["var"]: i for i, c in enumerate(cands)}
+        q1, q2 = st.columns([3, 2], vertical_alignment="bottom")
+        query = q1.text_input("変数名で検索", key=f"_proc_q_{pname}", placeholder="例: 圧入 プレス（スペース区切りで、すべて含むものに絞り込み）")
+        kinds = q2.pills("変化の種類", list(kind_label), selection_mode="multi", default=list(kind_label),
+                         format_func=kind_label.get, key=f"_proc_kinds_{pname}")
+        words = query.lower().split()
+        hits = [c["var"] for c in cands
+                if c["kind"] in (kinds or []) and all(w in c["var"].lower() for w in words)]
+
+        # 選択はプルダウン（multiselect）に持つ。検索で候補が絞られても、選んだものは選択肢に残す
+        pick_key = f"_proc_pick_{pname}_{trigger}_{edge}"
+        chosen = [v for v in ss.get(pick_key, []) if v in by_var]
+        ss[pick_key] = chosen
+
+        def _select_hits(chosen=chosen, hits=hits):
+            ss[pick_key] = sorted(set(chosen) | set(hits), key=order.get)
+
+        b1, b2, b3 = st.columns([2, 1.2, 3], vertical_alignment="center")
+        b1.button(f"検索結果 {len(hits)} 件をすべて選択", key=f"_proc_pick_all_{pname}", disabled=not hits,
+                  on_click=_select_hits, icon=":material/done_all:")
+        b2.button("選択をクリア", key=f"_proc_pick_clear_{pname}", disabled=not chosen,
+                  on_click=lambda: ss.update({pick_key: []}))
+        b3.caption(f"候補 {len(cands)} 件のうち {len(hits)} 件が一致")
+        options = chosen + [v for v in hits if v not in chosen]
+        picked = st.multiselect(
+            "追加する変数", options, key=pick_key,
+            format_func=lambda v: f"{v}｜{kind_label[by_var[v]['kind']]}  {by_var[v]['t_ms']:.0f} ms",
+            placeholder="クリックすると検索結果が一覧されます（ここに入力しても絞り込めます）",
+            help="時刻はサイクル開始からの中央値。開始時点で ON の変数は ON の継続時間です",
         )
-        picked = edited[edited["追加"]]["変数"].tolist()
         a1, a2 = st.columns([3, 1], vertical_alignment="bottom")
         add_as = a1.radio("測り方", ["on_period", "single"], horizontal=True, key="_proc_cand_mode",
                           format_func=lambda m: {"on_period": "ON の間の長さ（開始時刻と長さ）",
                                                  "single": "立ち上がる時刻だけ"}[m])
         if a2.button(f"{len(picked)} 件を追加", type="primary", disabled=not picked,
                      key=f"_proc_cand_add_{pname}"):
-            for v in picked:
+            for v in sorted(picked, key=order.get):
                 steps.append({"name": v, "color": default_color(len(steps)), "mode": add_as,
                               "variable": v, "edge": "RISE"})
             _save_steps(steps)
