@@ -11,7 +11,8 @@ import streamlit as st
 from core.analysis import MODE_LABELS
 from core.data import df_summary
 from core.evaluate import STATUS, compare_keys_by_time, evaluate_process
-from core.state import pk
+from core.profile import compare_consistency
+from core.state import pk, ref_entry
 from core.ui import STATUS_COLOR, chip, numeric, page_header, rule_popover, status_cell_style
 
 ss = st.session_state
@@ -48,6 +49,18 @@ entry = store[target]
 info = df_summary(entry)
 st.markdown(f"<div class='apb-kv'><span>期間 <b>{info['period']}</b></span>"
             f"<span>行数 <b class='apb-num'>{info['rows']:,}</b></span></div>", unsafe_allow_html=True)
+
+_, ref = ref_entry()
+if ref:
+    used = set()
+    for p in ready:
+        used.add(ss.get(pk(p, "trigger")))
+        for st_ in ss.get(pk(p, "steps_list"), []):
+            used.update(st_.get(x) for x in ("variable", "start_var", "end_var"))
+    cons = compare_consistency(ref, entry, used)
+    if cons["status"] != "ok":
+        st.markdown(chip("基準データとの違い", "ng" if cons["status"] == "ng" else "warn") + "　" + cons["message"],
+                    unsafe_allow_html=True)
 
 results = {p: evaluate_process(entry["df"], p) for p in ready}
 

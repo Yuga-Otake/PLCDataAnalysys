@@ -9,6 +9,7 @@ import html
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 _PALETTE = {
     "light": {
@@ -60,7 +61,50 @@ h3 {{ font-size: 15px !important; font-weight: 600 !important; }}
 [data-testid="stMarkdownContainer"] table.apb-table td {{ padding: 7px 12px; border: 0; border-bottom: 1px solid var(--apb-hair); vertical-align: top; color: var(--apb-ink); }}
 [data-testid="stMarkdownContainer"] table.apb-table .r {{ text-align: right; }}
 [data-testid="stMarkdownContainer"] table.apb-table .sub {{ display: block; font-size: 12px; color: var(--apb-label); }}
+.apb-scroll {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+[class*="wisumgrid"] {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+[class*="wisumgrid"] [data-testid="stHorizontalBlock"] {{ flex-wrap: nowrap !important; min-width: 760px; }}
+[class*="wisumgrid"] [data-testid="stColumn"] {{ min-width: 0 !important; }}
+/* スマホ（縦）: 余白と文字を詰め、横にはみ出すものは各部品の中でスクロールさせる */
+@media (max-width: 640px) {{
+  [data-testid="stMainBlockContainer"] {{ padding-top: 3.25rem !important; padding-left: 1rem !important;
+    padding-right: 1rem !important; padding-bottom: 4rem !important; }}
+  h1 {{ font-size: 20px !important; }}
+  h2 {{ font-size: 16px !important; }}
+  .apb-lead {{ font-size: 13px; }}
+  .apb-kv {{ gap: 2px 16px; font-size: 12px; }}
+  .apb-steps {{ gap: 4px; }}
+  .apb-steps span.s {{ font-size: 12px; padding: 3px 8px; }}
+  .apb-steps span.sep {{ display: none; }}
+  [data-testid="stMarkdownContainer"] table.apb-table {{ font-size: 12px; }}
+  [data-testid="stMarkdownContainer"] table.apb-table th,
+  [data-testid="stMarkdownContainer"] table.apb-table td {{ padding: 6px 8px; }}
+  [data-testid="stMarkdownContainer"] table.apb-table th {{ white-space: nowrap; }}
+  [data-testid="stMarkdownContainer"] table.apb-table .opt {{ display: none; }}
+}}
+/* 下のスクリプト用の高さ 0 の iframe が余白を作らないように */
+[data-testid="stElementContainer"]:has(> iframe[height="0"]),
+[data-testid="stElementContainer"]:has(iframe[title="apb_mobile"]) {{ display: none; }}
 </style>
+"""
+
+# スマホ・タブレット（幅 768px 未満）では、メニューを選んだ後もサイドバーが画面を覆ったままになるため閉じる
+_MOBILE_JS = """
+<script>
+(function () {
+  const w = window.parent, doc = w.document;
+  if (w.__apbMobileNav) return;
+  w.__apbMobileNav = true;
+  doc.addEventListener("click", function (e) {
+    if (!e.target.closest('[data-testid="stSidebarNavLink"]') || w.innerWidth >= 768) return;
+    setTimeout(function () {
+      const btn = doc.querySelector('[data-testid="stSidebarCollapseButton"] button');
+      const sb = doc.querySelector('[data-testid="stSidebar"]');
+      if (btn && sb && sb.getAttribute("data-collapsed") === "false") btn.click();
+    }, 200);
+  }, true);
+})();
+</script>
 """
 
 
@@ -75,6 +119,7 @@ def apply_theme():
     pal = _PALETTE[theme_type()]
     css_vars = " ".join(f"--apb-{k}: {v};" for k, v in pal.items())
     st.markdown(_CSS.format(vars=css_vars), unsafe_allow_html=True)
+    components.html(_MOBILE_JS, height=0)
 
 
 def page_header(title: str, lead: str = "", eyebrow: str = "", crumbs: list | None = None):

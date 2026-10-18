@@ -64,9 +64,9 @@ st.subheader("画面の構成" if JP else "Screens", anchor=False)
 if JP:
     rows = [
         ("", "ホーム", "準備の進み具合、次にやること、工程の一覧、最新データの判定"),
-        ("準備", "データ", "基準データ・比較データの読み込み、設定ファイルの保存・読み込み、フォルダ読み込み"),
-        ("準備", "工程とステップ", "サイクル開始信号・タクト目標、ステップ候補の自動検出、ステップの編集、タイミング図"),
-        ("準備", "基準値", "基準にするデータを選んで基準値を算出・登録、登録値の修正"),
+        ("準備", "データ", "基準データ・比較データの読み込みと事前診断（記録の抜け・一定の変数・比較データとの整合）、設定ファイル"),
+        ("準備", "工程とステップ", "工程の提案、動作シーケンスの仮説から登録、外れサイクルの検出、検索して追加、タイミング図"),
+        ("準備", "基準値", "外れサイクルを除いて基準値を算出・登録、登録値の修正"),
         ("準備", "波形検査条件", "アナログ波形の検出点・良品範囲の設定（詳細設定）"),
         ("点検", "最新データの評価", "工程ごとの状態、ステップの判定表、基準と今回のタイミング比較"),
         ("点検", "推移", "全ステップ×時期のヒートマップ、ステップの推移と管理図、波形検査の検出点の推移"),
@@ -78,9 +78,9 @@ if JP:
 else:
     rows = [
         ("", "Home", "Setup progress, next step, process list, verdict for the latest data"),
-        ("Setup", "Data", "Load reference/comparison CSVs, save/load settings, folder import"),
-        ("Setup", "Processes & Steps", "Cycle-start signal and takt target, step candidates, editing, timing chart"),
-        ("Setup", "Baseline", "Compute and register baselines from chosen data, edit registered values"),
+        ("Setup", "Data", "Load CSVs with a pre-check (recording gaps, constant variables, consistency), settings files"),
+        ("Setup", "Processes & Steps", "Process proposals, action-sequence hypothesis, abnormal cycles, search, timing chart"),
+        ("Setup", "Baseline", "Compute baselines excluding abnormal cycles, edit registered values"),
         ("Setup", "Waveform inspection", "Detection points and good ranges on analog waveforms (advanced)"),
         ("Inspection", "Evaluate latest data", "Status per process, step verdict table, baseline vs. current timing"),
         ("Inspection", "Trend", "Step × period heatmap, step trend and control chart, detection-point trend"),

@@ -12,7 +12,8 @@ import streamlit as st
 from core.data import (add_uploaded, apply_settings_json, df_summary, remove_csv,
                        save_to_folder, scan_folder, set_use_sample, store)
 from core.project import build_settings_json, mark_saved, settings_file_name
-from core.state import compare_keys, ref_entry
+from core.profile import KIND_LABELS, compare_consistency, sampling_profile, variable_profile
+from core.state import compare_keys, pk, ref_entry
 from core.ui import chip, page_header
 
 page_header(
@@ -47,6 +48,20 @@ with st.container(border=True):
             f"<span>期間 <b>{info['period']}</b></span>"
             f"<span>Bool 変数 <b class='apb-num'>{info['n_bool']}</b>"
             f"　アナログ変数 <b class='apb-num'>{info['n_num']}</b></span></div>",
+            unsafe_allow_html=True,
+        )
+        # 事前診断: 記録の質と、実際に動いている変数
+        sp = sampling_profile(ref["df"])
+        prof = variable_profile(ref["df"], tuple(ref["col_types"].items()))
+        n_const = int((prof["kind"] == "constant").sum())
+        kinds = prof["kind"].value_counts()
+        moving = "・".join(f"{KIND_LABELS[k]} {kinds[k]}" for k in ("bool", "state", "counter", "analog") if k in kinds)
+        st.markdown(
+            f"{chip('記録 ' + {'ok': '良好', 'warn': '注意', 'ng': '問題あり'}[sp['status']], {'ok': 'ok', 'warn': 'warn', 'ng': 'ng'}[sp['status']])}"
+            f"　<span class='apb-crumb'>{sp['message']}</span><br>"
+            f"{chip(f'動いている変数 {len(prof) - n_const}', 'blue')}"
+            f"　<span class='apb-crumb'>{moving}"
+            + (f"。ずっと一定の {n_const} 個はステップの候補・検索から外します" if n_const else "") + "</span>",
             unsafe_allow_html=True,
         )
     else:
@@ -99,15 +114,22 @@ with st.container(border=True):
         st.caption("比較データはまだありません。")
     else:
         rows = []
+        used = set()
+        for p in ss.get("processes", {}):
+            used.add(ss.get(pk(p, "trigger")))
+            for st_ in ss.get(pk(p, "steps_list"), []):
+                used.update(st_.get(x) for x in ("variable", "start_var", "end_var"))
         for k in cmp:
             e = store()[k]
             info = df_summary(e)
+            cons = compare_consistency(ref, e, used) if ref else {"status": "ok", "message": "—"}
             rows.append({"外す": False, "ラベル": e["label"], "ファイル": k.replace("\\", "/").split("/")[-1],
+                         "基準との整合": {"ok": "", "warn": "注意: ", "ng": "問題: "}[cons["status"]] + cons["message"],
                          "行数": info["rows"], "期間": info["period"],
                          "読み込み元": {"folder": "フォルダ", "upload": "アップロード"}.get(e.get("source"), "サンプル")})
         edited = st.data_editor(
             pd.DataFrame(rows), hide_index=True, width="stretch", key=f"_data_cmp_table_{len(cmp)}",
-            disabled=["ファイル", "行数", "期間", "読み込み元"],
+            disabled=["ファイル", "基準との整合", "行数", "期間", "読み込み元"],
             column_config={"外す": st.column_config.CheckboxColumn(width="small"),
                            "行数": st.column_config.NumberColumn(format="%d")},
         )

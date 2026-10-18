@@ -3,6 +3,7 @@ views/process.py — 工程とステップ
 
 旧画面のウィザード・自動検出・ステップ追加・ステップ編集・サイクル設定を 1 画面にまとめる。
 上から順に「1. サイクル開始信号 → 2. ステップ → 3. タイミングの確認」と進む一本道。
+CSV の事前診断（core/profile.py）から、工程・動作シーケンスの仮説を提案し、ワンクリックで採用できる。
 """
 import pandas as pd
 import streamlit as st
@@ -10,6 +11,7 @@ import streamlit as st
 from core.analysis import (MODE_LABELS, analyze, cycle_starts, default_color, describe_step,
                            gantt_figure, mean_cycle_ms, step_candidates, step_stats,
                            trigger_candidates)
+from core.profile import active_bool_vars, cycle_health, group_hypotheses, sequence_hypothesis
 from core.state import add_process, delete_process, pk, ref_entry, rename_process
 from core.ui import chip, page_header
 
@@ -61,8 +63,38 @@ with st.popover("工程を追加", icon=":material/add:"):
             ss["sel_process"] = name
             _rerun_with(f"工程「{name}」を登録しました")
 
+# ── 工程の提案（変数名のまとまりと、周期的に立ち上がる信号から推定）──────────
+active = active_bool_vars(ref)
+groups = group_hypotheses(df, tuple(active))
+taken = {ss.get(pk(p, "trigger")) for p in processes}
+proposals = [g for g in groups if g["trigger"] and g["trigger"] not in taken and g["name"] not in processes]
+
+
+def _adopt(gs: list):
+    for g in gs:
+        add_process(g["name"], g["trigger"])
+    ss["sel_process"] = gs[0]["name"]
+    ss["_proc_msgs"] = [f"工程を {len(gs)} 件作成しました。次にステップの仮説を確認してください"]
+
+
+if proposals:
+    with st.container(border=True):
+        h1, h2 = st.columns([4, 1.3], vertical_alignment="center")
+        h1.markdown("**工程の提案**　変数名のまとまりと、周期的に立ち上がる信号から推定しました。")
+        if len(proposals) > 1:
+            h2.button(f"{len(proposals)} 件すべて作成", type="primary", key="_proc_prop_all",
+                      on_click=_adopt, args=(proposals,), width="stretch")
+        for g in proposals:
+            c1, c2, c3, c4 = st.columns([1.6, 2.6, 2.2, 1], vertical_alignment="center")
+            c1.markdown(f"**{g['name']}**")
+            c2.markdown(f"<span class='apb-crumb'>サイクル開始信号</span><br>{g['trigger']}", unsafe_allow_html=True)
+            c3.markdown(f"<span class='apb-crumb'>{g['reason']}</span><br>"
+                        f"周期 {g['period_ms']:.0f} ms・{g['n_cycles']} サイクル・変数 {len(g['vars'])}",
+                        unsafe_allow_html=True)
+            c4.button("作成", key=f"_proc_prop_{g['name']}", on_click=_adopt, args=([g],), width="stretch")
+
 if not processes:
-    st.info("工程がまだありません。「工程を追加」から登録してください。")
+    st.info("工程がまだありません。上の提案から作成するか、「工程を追加」から登録してください。")
     st.stop()
 
 names = list(processes)
@@ -103,6 +135,18 @@ with st.container(border=True):
         st.warning("この信号ではサイクルが見つかりません。別の信号か、立ち下がりを試してください。")
     elif len(starts) == 1:
         st.caption("サイクルが 1 つしか見つかっていません。ばらつきを見るには 2 サイクル以上のデータが必要です。")
+    health = cycle_health(df, trigger, edge)
+    if health["n"] >= 3:
+        outl = health["outliers"]
+        line = (f"<span class='apb-kv'><span>周期 <b class='apb-num'>{health['median_ms']:.0f} ms</b></span>"
+                f"<span>ばらつき <b class='apb-num'>{health['cv_pct']:.1f}%</b></span></span>")
+        if outl:
+            listed = "、".join(f"#{c} {r}" for c, r in list(outl.items())[:3]) + ("…" if len(outl) > 3 else "")
+            clean = health["clean"]
+            line += (f"<br>{chip(f'外れサイクル {len(outl)}', 'warn')}　<span class='apb-crumb'>{listed}。"
+                     "基準値の算出では外して計算します"
+                     + (f"（きれいな範囲は #{clean[0]}〜#{clean[1]}）" if clean else "") + "</span>")
+        st.markdown(line, unsafe_allow_html=True)
 
     with st.expander("工程名の変更・削除"):
         # 選択中の工程（sel_process）を書き換えるので、ウィジェット描画前に走る on_click で処理する
@@ -140,39 +184,116 @@ def _save_steps(new_steps: list):
     ss[pk(pname, "steps_list")] = new_steps
 
 
-# 2-a. 候補から追加
+# 2-a. ステップの追加
 used_vars = {s.get("variable") for s in steps} | {s.get("start_var") for s in steps}
-cands = [c for c in step_candidates(df, tuple(bool_cols), trigger, edge) if c["var"] not in used_vars]
-with st.expander(f"候補から追加（{len(cands)} 件）", expanded=not steps):
+cands = [c for c in step_candidates(df, tuple(active), trigger, edge) if c["var"] not in used_vars]
+
+# 2-a-1. 動作シーケンスの仮説（知っている人が最小限の修正で直せるように、表で直してから登録する）
+grp = next((g for g in groups if trigger in g["vars"]), None)
+with st.expander("動作シーケンスの仮説から登録", expanded=not steps):
+    if not starts:
+        st.caption("サイクル開始信号を決めると、動作の順番の仮説が表示されます。")
+    else:
+        t1, t2 = st.columns([4, 2], vertical_alignment="center")
+        t1.caption("1 サイクルの中で変数が変化する順番を、全サイクルの中央値で並べた仮説です。"
+                   "違うものはチェックを外し、順番・名前・測り方を直してから登録してください。"
+                   "確からしさが「低」のものは、見つからないサイクルや、順番が入れ替わるサイクルがあります。")
+        widen = t2.toggle("他の工程の変数も含める", key=f"_proc_seq_all_{pname}", value=grp is None,
+                          help=f"オフのときは「{grp['name']}」の変数だけで仮説を作ります" if grp else None)
+        pool = active if (widen or grp is None) else grp["vars"]
+        seq = sequence_hypothesis(df, trigger, edge, tuple(v for v in pool if v not in used_vars),
+                                  "" if widen or grp is None else grp["name"])
+        if not seq:
+            st.caption("仮説にできる変化が見つかりませんでした。")
+        else:
+            how = {"on_period": "ON期間", "RISE": "立ち上がり時刻", "FALL": "立ち下がり時刻"}
+            kind_txt = {"RISE": "立ち上がる", "ON": "開始時点で ON→切れる", "FALL": "立ち下がる"}
+
+            def _why(r):
+                parts = []
+                if r["det_rate"] < 0.95:
+                    parts.append(f"{(1 - r['det_rate']) * 100:.0f}% のサイクルで見つからない")
+                if r["swap_rate"] > 0:
+                    parts.append(f"{r['swap_rate'] * 100:.0f}% のサイクルで次と順番が入れ替わる")
+                return "、".join(parts)
+
+            seq_df = pd.DataFrame([{
+                "採用": r["include"], "順番": i + 1, "ステップ名": r["label"],
+                "測り方": how["on_period"] if r["mode"] == "on_period" else how[r["edge"]],
+                "変数": r["var"], "変化": kind_txt[r["kind"]], "時刻 [ms]": round(r["t_ms"], 1),
+                "ばらつき [ms]": round(r["spread_ms"], 1), "確からしさ": r["confidence"], "理由": _why(r),
+            } for i, r in enumerate(seq)])
+            edited_seq = st.data_editor(
+                seq_df, hide_index=True, width="stretch", key=f"_proc_seq_{pname}_{trigger}_{edge}_{len(steps)}_{widen}",
+                disabled=["変数", "変化", "時刻 [ms]", "ばらつき [ms]", "確からしさ", "理由"],
+                column_config={
+                    "採用": st.column_config.CheckboxColumn(width="small"),
+                    "順番": st.column_config.NumberColumn(min_value=1, step=1, width="small"),
+                    "測り方": st.column_config.SelectboxColumn(options=list(how.values()), required=True),
+                    "時刻 [ms]": st.column_config.NumberColumn(help="サイクル開始からの時刻（中央値）"),
+                    "ばらつき [ms]": st.column_config.NumberColumn(help="時刻の四分位範囲（IQR）"),
+                },
+            )
+            adopt = edited_seq[edited_seq["採用"]].sort_values("順番", kind="stable")
+            if st.button(f"採用した {len(adopt)} 件をステップとして登録", type="primary", disabled=adopt.empty,
+                         key=f"_proc_seq_add_{pname}"):
+                inv = {v: k for k, v in how.items()}
+                for _, r in adopt.iterrows():
+                    m = inv[r["測り方"]]
+                    step = {"name": (r["ステップ名"] or r["変数"]).strip(), "color": default_color(len(steps)),
+                            "variable": r["変数"]}
+                    step.update({"mode": "on_period", "edge": "RISE"} if m == "on_period" else {"mode": "single", "edge": m})
+                    steps.append(step)
+                _save_steps(steps)
+                _rerun_with(f"仮説から {len(adopt)} 件のステップを登録しました")
+
+with st.expander(f"検索して追加（候補 {len(cands)} 件）", expanded=False):
     if not starts:
         st.caption("サイクル開始信号を決めると候補が表示されます。")
     elif not cands:
         st.caption("追加できる候補はありません。")
     else:
-        st.caption("サイクルの中で状態が変わる Bool 変数を、早い順に並べています。"
-                   "立ち上がる変数には最初からチェックを入れています。")
+        st.caption("サイクルの中で状態が変わる Bool 変数が候補です。名前で検索し、下のプルダウンでまとめて選んでから追加します。"
+                   "検索を変えても、選んだ変数はプルダウンに残ります。")
         kind_label = {"RISE": "立ち上がる", "ON": "開始時点で ON", "FALL": "立ち下がる"}
-        cand_df = pd.DataFrame([{
-            "追加": c["kind"] == "RISE", "変数": c["var"], "変化": kind_label[c["kind"]],
-            "時刻 [ms]": round(c["t_ms"], 1), "検出サイクル": f"{c['cycles']}/{len(starts)}",
-        } for c in cands])
-        edited = st.data_editor(
-            cand_df, hide_index=True, width="stretch", key=f"_proc_cands_{pname}_{trigger}_{edge}_{len(steps)}",
-            disabled=["変数", "変化", "時刻 [ms]", "検出サイクル"],
-            column_config={
-                "追加": st.column_config.CheckboxColumn(width="small"),
-                "時刻 [ms]": st.column_config.NumberColumn(
-                    help="サイクル開始からの時刻（中央値）。開始時点で ON の変数は ON の継続時間"),
-            },
+        by_var = {c["var"]: c for c in cands}
+        order = {c["var"]: i for i, c in enumerate(cands)}
+        q1, q2 = st.columns([3, 2], vertical_alignment="bottom")
+        query = q1.text_input("変数名で検索", key=f"_proc_q_{pname}", placeholder="例: 圧入 プレス（スペース区切りで、すべて含むものに絞り込み）")
+        kinds = q2.pills("変化の種類", list(kind_label), selection_mode="multi", default=list(kind_label),
+                         format_func=kind_label.get, key=f"_proc_kinds_{pname}")
+        words = query.lower().split()
+        hits = [c["var"] for c in cands
+                if c["kind"] in (kinds or []) and all(w in c["var"].lower() for w in words)]
+
+        # 選択はプルダウン（multiselect）に持つ。検索で候補が絞られても、選んだものは選択肢に残す
+        pick_key = f"_proc_pick_{pname}_{trigger}_{edge}"
+        chosen = [v for v in ss.get(pick_key, []) if v in by_var]
+        ss[pick_key] = chosen
+
+        def _select_hits(chosen=chosen, hits=hits):
+            ss[pick_key] = sorted(set(chosen) | set(hits), key=order.get)
+
+        b1, b2, b3 = st.columns([2, 1.2, 3], vertical_alignment="center")
+        b1.button(f"検索結果 {len(hits)} 件をすべて選択", key=f"_proc_pick_all_{pname}", disabled=not hits,
+                  on_click=_select_hits, icon=":material/done_all:")
+        b2.button("選択をクリア", key=f"_proc_pick_clear_{pname}", disabled=not chosen,
+                  on_click=lambda: ss.update({pick_key: []}))
+        b3.caption(f"候補 {len(cands)} 件のうち {len(hits)} 件が一致")
+        options = chosen + [v for v in hits if v not in chosen]
+        picked = st.multiselect(
+            "追加する変数", options, key=pick_key,
+            format_func=lambda v: f"{v}｜{kind_label[by_var[v]['kind']]}  {by_var[v]['t_ms']:.0f} ms",
+            placeholder="クリックすると検索結果が一覧されます（ここに入力しても絞り込めます）",
+            help="時刻はサイクル開始からの中央値。開始時点で ON の変数は ON の継続時間です",
         )
-        picked = edited[edited["追加"]]["変数"].tolist()
         a1, a2 = st.columns([3, 1], vertical_alignment="bottom")
         add_as = a1.radio("測り方", ["on_period", "single"], horizontal=True, key="_proc_cand_mode",
                           format_func=lambda m: {"on_period": "ON の間の長さ（開始時刻と長さ）",
                                                  "single": "立ち上がる時刻だけ"}[m])
         if a2.button(f"{len(picked)} 件を追加", type="primary", disabled=not picked,
                      key=f"_proc_cand_add_{pname}"):
-            for v in picked:
+            for v in sorted(picked, key=order.get):
                 steps.append({"name": v, "color": default_color(len(steps)), "mode": add_as,
                               "variable": v, "edge": "RISE"})
             _save_steps(steps)

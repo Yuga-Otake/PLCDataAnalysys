@@ -52,6 +52,9 @@ if len(keys) < 2:
 r = rule()
 evals = {k: evaluate_process(store[k]["df"], pname, r) for k in keys}
 labels = [store[k]["label"] for k in keys]
+# 軸の目盛りは短く切る（スマホで図が潰れないように）。全文はホバーで見える
+short = [lb if len(lb) <= 12 else lb[:11] + "…" for lb in labels]
+xaxis_short = dict(tickmode="array", tickvals=labels, ticktext=short)
 steps = ss.get(pk(pname, "steps_list"), [])
 names = [s["name"] for s in steps]
 
@@ -76,10 +79,12 @@ fig = go.Figure(go.Heatmap(
     zmin=-2, zmax=2, zmid=0,
     colorscale=[[0, "#548cff"], [0.25, "rgba(84,140,255,0.35)"], [0.5, "rgba(139,148,158,0.15)"],
                 [0.75, "rgba(229,83,75,0.45)"], [1, "#e5534b"]],
-    colorbar=dict(title="差 ÷ 許容幅", tickvals=[-2, -1, 0, 1, 2]),
+    # 色の凡例は上に横向きで置く（スマホで横幅を取らないように）
+    colorbar=dict(title=dict(text="差 ÷ 許容幅", side="top"), tickvals=[-2, -1, 0, 1, 2], tickangle=0, orientation="h",
+                  thickness=10, len=0.5, x=1, xanchor="right", y=1.02, yanchor="bottom"),
 ))
-fig.update_layout(height=max(260, len(names) * 28 + 90), margin=dict(l=0, r=8, t=10, b=40),
-                  yaxis=dict(autorange="reversed"))
+fig.update_layout(height=max(280, len(names) * 28 + 120), margin=dict(l=0, r=8, t=50, b=40),
+                  xaxis=xaxis_short, yaxis=dict(autorange="reversed"))
 st.plotly_chart(fig, width="stretch", config={"displayModeBar": False}, key=f"_trend_heat_{pname}")
 st.caption("数字は基準との差 [ms]。赤いほど基準より長く（遅く）、青いほど短く（早く）なっています。"
            "±1 を超えると許容幅の外です。")
@@ -116,7 +121,8 @@ with left:
         hovertemplate="%{x}<br>平均 %{y:.1f} ms<br>NG率 %{customdata:.1f}%<extra></extra>"))
     if ref is not None:
         tolerance_band(fig, ref, tol)
-    fig.update_layout(height=340, margin=dict(l=0, r=8, t=10, b=40), yaxis_title=f"{measure} [ms]")
+    fig.update_layout(height=340, margin=dict(l=0, r=8, t=10, b=40), yaxis_title=f"{measure} [ms]",
+                      xaxis=xaxis_short)
     st.plotly_chart(fig, width="stretch", config={"displayModeBar": False}, key=f"_trend_line_{pname}")
     st.caption("箱はサイクルのばらつき、点は平均（色は判定）、帯は許容幅です。")
 
@@ -144,6 +150,7 @@ with right:
                               line_color="#8b949e" if dash == "solid" else STATUS_COLOR["ng"], row=row, col=1)
         fig.update_yaxes(title_text="X̄ [ms]", row=1, col=1)
         fig.update_yaxes(title_text=f"{sub_name} [ms]", row=2, col=1)
+        fig.update_xaxes(**xaxis_short)
         fig.update_layout(height=340, margin=dict(l=0, r=8, t=10, b=40))
         st.plotly_chart(fig, width="stretch", config={"displayModeBar": False}, key=f"_trend_xbr_{pname}")
         n_out = sum(out_x) + sum(out_s)

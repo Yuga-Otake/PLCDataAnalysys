@@ -6,7 +6,6 @@ st.navigation によるマルチページ構成では、どのページから開
 （P_<工程>__*）で状態を初期化し、準備の進み具合（ワークフロー）もここで判定する。
 """
 import functools
-import hashlib
 import inspect
 import os
 
@@ -109,11 +108,7 @@ def ensure_session():
     ss["df"], ss["col_types"] = entry["df"], entry["col_types"]
 
     bool_cols = [c for c, t in entry["col_types"].items() if t == "bool"]
-    # 初回のみ工程を自動登録する
-    if "_schema_hash" not in ss:
-        ss["_schema_hash"] = hashlib.md5(
-            str(sorted(entry["col_types"].keys())).encode()).hexdigest()[:8]
-        _auto_register_processes(bool_cols)
+    # 工程は自動登録しない。工程とステップ画面が変数名と信号の周期から提案し、利用者が採用する
     for pname, pinfo in ss["processes"].items():
         _init_process_defaults(pname, pinfo, bool_cols)
 
@@ -134,21 +129,6 @@ def _load_samples():
                              "label": f"比較サンプル（{CMP_SAMPLE}）", "is_ref": False}
     # ユーザーが比較サンプルを外した後に復活させない
     ss["_cmp_sample_loaded"] = True
-
-
-def _auto_register_processes(bool_cols: list):
-    ss = st.session_state
-    if ss["processes"] or not bool_cols:
-        return
-    starts = [c for c in bool_cols
-              if any(kw in c.lower() for kw in ["start", "begin", "trigger", "trig"])]
-    for var in starts or bool_cols[:1]:
-        name = var
-        for sfx in ["_Start", "_start", "_Begin", "_begin", "_Trigger", "_trigger"]:
-            name = name.replace(sfx, "")
-        ss["processes"][name] = {"trigger_col": var, "edge": "RISE",
-                                 "takt_target_ms": 0, "steps": []}
-    ss["_expand_new"] = next(iter(ss["processes"]), None)
 
 
 def _init_process_defaults(pname: str, pinfo: dict, bool_cols: list):

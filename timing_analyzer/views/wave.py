@@ -127,32 +127,34 @@ else:
         f"　傾向解析送出: **{_wi_n_trend}** 件",
         expanded=True,
     ):
-        # ── ヘッダー行 ─────────────────────────────────────────
-        _wh = st.columns([2, 1.8, 0.6, 0.8, 0.4, 1.6, 1.6, 0.5, 0.5, 0.6])
-        for _lbl, _col in zip(
-            ["変数", "トリガー", "エッジ", "グラフ", "No",
-             "タイプ", "名前", "有効", "📈", ""],
-            _wh,
-        ):
-            _col.caption(_lbl)
+        # スマホでは列が縦に積まれて読めなくなるので、横並びのまま横スクロールさせる（core/ui.py の CSS）
+        with st.container(key="wisumgrid"):
+            # ── ヘッダー行 ─────────────────────────────────────────
+            _wh = st.columns([2, 1.8, 0.6, 0.8, 0.4, 1.6, 1.6, 0.5, 0.5, 0.6])
+            for _lbl, _col in zip(
+                ["変数", "トリガー", "エッジ", "グラフ", "No",
+                 "タイプ", "名前", "有効", "📈", ""],
+                _wh,
+            ):
+                _col.caption(_lbl)
 
-        # ── データ行 ──────────────────────────────────────────
-        for _wi_ri, _wi_row in enumerate(_wi_sum_items):
-            _wr = st.columns([2, 1.8, 0.6, 0.8, 0.4, 1.6, 1.6, 0.5, 0.5, 0.6])
-            _wr[0].markdown(f"**{_wi_row['変数']}**")
-            _wr[1].markdown(_wi_row["トリガー"])
-            _wr[2].markdown(_wi_row["エッジ"])
-            _wr[3].markdown(_wi_row["グラフ"])
-            _wr[4].markdown(str(_wi_row["No"]))
-            _wr[5].markdown(_wi_row["タイプ"])
-            _wr[6].markdown(_wi_row["名前"] or "−")
-            _wr[7].markdown(_wi_row["有効"])
-            _wr[8].markdown(_wi_row["傾向解析"])
-            with _wr[9]:
-                if st.button("⚙️", key=f"_wisum_edit_{_wi_ri}",
-                             help="波形を見ながら編集"):
-                    st.session_state["wi_edit_target"] = _wi_row
-                    _wi_edit_dialog()
+            # ── データ行 ──────────────────────────────────────────
+            for _wi_ri, _wi_row in enumerate(_wi_sum_items):
+                _wr = st.columns([2, 1.8, 0.6, 0.8, 0.4, 1.6, 1.6, 0.5, 0.5, 0.6])
+                _wr[0].markdown(f"**{_wi_row['変数']}**")
+                _wr[1].markdown(_wi_row["トリガー"])
+                _wr[2].markdown(_wi_row["エッジ"])
+                _wr[3].markdown(_wi_row["グラフ"])
+                _wr[4].markdown(str(_wi_row["No"]))
+                _wr[5].markdown(_wi_row["タイプ"])
+                _wr[6].markdown(_wi_row["名前"] or "−")
+                _wr[7].markdown(_wi_row["有効"])
+                _wr[8].markdown(_wi_row["傾向解析"])
+                with _wr[9]:
+                    if st.button("⚙️", key=f"_wisum_edit_{_wi_ri}",
+                                 help="波形を見ながら編集"):
+                        st.session_state["wi_edit_target"] = _wi_row
+                        _wi_edit_dialog()
 
         # ── 行追加ボタン ────────────────────────────────────────
         _wadd_c1, _wadd_c2 = st.columns([9.6, 0.6])

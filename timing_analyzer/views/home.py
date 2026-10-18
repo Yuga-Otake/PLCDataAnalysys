@@ -51,14 +51,14 @@ with st.container(border=True):
             st.switch_page("views/data.py")
     elif cur == "process":
         text_col.markdown("<p class='apb-next-title'>工程を登録する</p>"
-                          "<p class='apb-next-body'>1 サイクルの始まりを示す Bool 変数（サイクル開始信号）を選び、"
-                          "工程として登録します。</p>", unsafe_allow_html=True)
+                          "<p class='apb-next-body'>変数名のまとまりと、周期的に立ち上がる信号から工程を提案します。"
+                          "内容を確認して、ワンクリックで作成できます。</p>", unsafe_allow_html=True)
         if btn_col.button("工程を登録", type="primary", width="stretch"):
             st.switch_page("views/process.py")
     elif cur == "steps":
         text_col.markdown(f"<p class='apb-next-title'>「{target}」のステップを定義する</p>"
                           "<p class='apb-next-body'>時間を測りたい動作（シリンダ前進、センサ検知など）を選びます。"
-                          "候補は自動で検出され、チェックして追加できます。</p>", unsafe_allow_html=True)
+                          "変数が変化する順番の仮説から選ぶか、名前で検索して追加します。</p>", unsafe_allow_html=True)
         if btn_col.button("ステップを定義", type="primary", width="stretch"):
             ss["sel_process"] = target
             st.switch_page("views/process.py")
@@ -100,13 +100,13 @@ else:
         body.append(
             f"<tr><td><b>{html.escape(r['name'])}</b></td>"
             f"<td>{html.escape(r['trigger'])}<span class='sub'>{edge}</span></td>"
-            f"<td class='r apb-num'>{r['cycles']}</td><td class='r apb-num'>{r['steps']}</td>"
-            f"<td class='r apb-num'>{r['baseline']}</td><td>{chip(label, kind)}</td></tr>"
+            f"<td class='r apb-num opt'>{r['cycles']}</td><td class='r apb-num'>{r['steps']}</td>"
+            f"<td class='r apb-num opt'>{r['baseline']}</td><td>{chip(label, kind)}</td></tr>"
         )
     st.markdown(
-        "<table class='apb-table'><thead><tr><th>工程</th><th>サイクル開始信号</th>"
-        "<th class='r'>サイクル数</th><th class='r'>ステップ</th><th class='r'>基準値</th>"
-        "<th>状態</th></tr></thead><tbody>" + "".join(body) + "</tbody></table>",
+        "<div class='apb-scroll'><table class='apb-table'><thead><tr><th>工程</th><th>サイクル開始信号</th>"
+        "<th class='r opt'>サイクル数</th><th class='r'>ステップ</th><th class='r opt'>基準値</th>"
+        "<th>状態</th></tr></thead><tbody>" + "".join(body) + "</tbody></table></div>",
         unsafe_allow_html=True,
     )
     st.caption("サイクル数は基準データで検出した数です。")
