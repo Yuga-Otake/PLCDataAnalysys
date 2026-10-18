@@ -117,7 +117,9 @@ def _load_samples():
     ss = st.session_state
     store = ss["csv_store"]
     ref_path = os.path.join(APP_DIR, REF_SAMPLE)
-    if REF_SAMPLE not in store and os.path.exists(ref_path):
+    # 利用者が自分の基準データを読み込んだ後は、基準サンプルを戻さない（読み込んだデータが置き換わってしまうため）
+    has_ref = any(v.get("is_ref") for v in store.values())
+    if REF_SAMPLE not in store and not has_ref and os.path.exists(ref_path):
         df, ct = _load_csv_path(ref_path)
         store[REF_SAMPLE] = {"df": df, "col_types": ct,
                              "label": f"基準サンプル（{REF_SAMPLE}）", "is_ref": True}

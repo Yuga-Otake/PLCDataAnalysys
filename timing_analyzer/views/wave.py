@@ -14,8 +14,8 @@ from core.ui import page_header
 from core.wave_inspect import (_render_waveform_overlay, _wi_add_dialog, _wi_edit_dialog,
                                _wi_load_from_file, _wi_restore_config, _wi_save_config,
                                _wi_save_to_file, adopt_point, cached_detect_cycles,
-                               inspection_tree, registered_points, set_columns)
-from core.wave_view import process_header, render_process
+                               inspection_tree, process_defs, registered_points, set_columns)
+from core.wave_view import add_waveform_popover, process_header, render_process
 
 # 重ね表示の色（CSV ごと）
 _CMP_PALETTE = ["#3b82f6", "#f59e0b", "#10b981", "#ef4444", "#8b5cf6", "#ec4899", "#06b6d4", "#84cc16"]
@@ -79,6 +79,7 @@ def _candidate_panel():
                 continue
             hint = "—" if pd.isna(c["t_ms"]) else f"{c['t_ms']:.0f} ms／{c['v']:.4g}"
             rows.append({"採用": c["include"], "波形": h["spark"], "変数": var, "工程": h["process"],
+                         "工程の決め方": h.get("assoc", ""),
                          "形": h["shape"], "検出点タイプ": c["dtype"], "名前": c["name"], "目安": hint,
                          "確からしさ": c["confidence"], "傾向解析に出す": True, "説明": c["note"],
                          "_id": f"{var}|{i}"})
@@ -94,12 +95,16 @@ def _candidate_panel():
     edited = st.data_editor(
         df_rows.drop(columns="_id"), hide_index=True, width="stretch",
         key="_wave_cands_" + str(abs(hash(tuple(df_rows["_id"]))) % 10**8),
-        disabled=["波形", "変数", "工程", "形", "目安", "確からしさ", "説明"],
+        disabled=["波形", "変数", "工程の決め方", "形", "目安", "確からしさ", "説明"],
         column_config={
             "採用": st.column_config.CheckboxColumn(width="small"),
             "波形": st.column_config.LineChartColumn("波形（平均）", width="small"),
             "変数": st.column_config.TextColumn(width="medium"),
-            "工程": st.column_config.TextColumn(width="small"),
+            "工程": st.column_config.SelectboxColumn(options=list(processes), required=True, width="small",
+                                                   help="違う工程なら選び直してください（その工程のサイクル開始信号で検出します）"),
+            "工程の決め方": st.column_config.TextColumn(
+                width="small", help="波形のそろい方：その工程のサイクル開始信号で切ると毎サイクル同じ形になる工程を選んでいます。"
+                                    "「要確認」は工程を区別できなかったものです"),
             "形": st.column_config.TextColumn(width="small", help="山形・台形・谷形・くぼみ（サイクルごとの形の多数決）"),
             "検出点タイプ": st.column_config.SelectboxColumn(options=WAVE_POINT_TYPES, required=True),
             "目安": st.column_config.TextColumn("目安（時刻／値）", width="small",
@@ -116,9 +121,15 @@ def _candidate_panel():
             h = hyp[var]
             c = h["cands"][int(df_rows.loc[i, "_id"].split("|")[1])]
             dtype = r["検出点タイプ"]
-            params = c["params"] if dtype == c["dtype"] else h["defaults"].get(dtype, {})
-            adopt_point(var, dtype, str(r["名前"] or "").strip(), params, h["trigger"], h["edge"],
-                        h["wpost"], bool(r["傾向解析に出す"]), process=h["process"])
+            params = dict(c["params"] if dtype == c["dtype"] else h["defaults"].get(dtype, {}))
+            proc, trig, edge, how = h["process"], h["trigger"], h["edge"], h.get("assoc", "")
+            if r["工程"] != proc and r["工程"] in processes:
+                # 工程を選び直したときは、その工程の開始信号で検出する（時刻で区切った範囲は使わない）
+                proc, how = r["工程"], "手動"
+                trig, edge = processes[proc]["trigger_col"], processes[proc]["edge"]
+                params.pop("use_range", None)
+            adopt_point(var, dtype, str(r["名前"] or "").strip(), params, trig, edge,
+                        h["wpost"], bool(r["傾向解析に出す"]), process=proc, how=how)
         ss["_wave_msgs"] = [f"検出点を {len(picked)} 件登録しました。下の一覧で確認・調整できます。"]
         st.rerun()
 
@@ -160,35 +171,37 @@ else:
         f"　傾向解析送出: **{_wi_n_trend}** 件",
         expanded=True,
     ):
-        if _wi_nodes:
-            _wi_names = [n["process"] or "工程なし" for n in _wi_nodes]
+        # 検査点のない工程も並べて、そこから検査波形を追加できるようにする
+        _wi_show = [n for n in _wi_tree if n["waves"] or n["process"]]
+        _wi_defs = process_defs()
+        if _wi_show:
+            _wi_names = [n["process"] or "工程なし" for n in _wi_show]
             _wi_pick = st.pills("工程で絞り込む", ["すべて"] + _wi_names, default="すべて",
                                 key="_wi_tree_filter", label_visibility="collapsed") or "すべて"
             st.caption("図は基準データの平均波形（帯は 5〜95% のサイクル）、下の帯は工程のステップ（同じ時間軸）、"
-                       "◇ は各検査点を基準データで検出した位置です。")
-            for _wi_node, _wi_nm in zip(_wi_nodes, _wi_names):
+                       "◇ は各検査点を基準データで検出した位置です。波形の「工程」を選び直すと付け替えられます。")
+            for _wi_node, _wi_nm in zip(_wi_show, _wi_names):
                 if _wi_pick not in ("すべて", _wi_nm):
                     continue
                 with st.container(border=True):
-                    st.markdown(f"<p class='apb-next-title'>{process_header(_wi_node)}</p>", unsafe_allow_html=True)
+                    _h1, _h2 = st.columns([5, 1.6], vertical_alignment="center")
+                    _h1.markdown(f"<p class='apb-next-title'>{process_header(_wi_node)}</p>", unsafe_allow_html=True)
+                    with _h2:
+                        add_waveform_popover(_wi_node, ref)
                     if not _wi_node["process"]:
-                        st.caption("サイクル開始信号がどの工程とも一致しません。⚙️ で工程のサイクル開始信号を選ぶと、"
-                                   "その工程に入ります。")
-                    render_process(_wi_node, editable=True)
-            _wi_empty = [n["process"] for n in _wi_tree if n["process"] and not n["waves"]]
-            if _wi_empty:
-                st.caption("検査点のない工程: " + "、".join(_wi_empty))
-
+                        st.caption("サイクル開始信号がどの工程とも一致しません。波形の「工程」で工程を選ぶと、その工程に入ります。")
+                    elif not _wi_node["waves"]:
+                        st.caption("検査波形はまだありません。「＋ 検査波形を追加」から追加できます。")
+                    render_process(_wi_node, editable=True, procs=_wi_defs, ref_df=ref["df"] if ref else None)
         # ── 行追加ボタン ────────────────────────────────────────
-        _wadd_c1, _wadd_c2 = st.columns([9.6, 0.6])
-        with _wadd_c2:
-            if st.button("＋", key="_wisum_add_btn", help="検出点を追加"):
-                _wi_add_dialog()
+        if st.button("XY グラフなど、ほかの方法で検出点を追加", key="_wisum_add_btn", type="tertiary",
+                     icon=":material/add:", help="変数・グラフ（時間軸／XY）・タイプを選んで追加します"):
+            _wi_add_dialog()
 
         if not _wi_sum_items:
             st.info(
-                "検出点はまだ設定されていません。"
-                "右の ＋ ボタンまたは下のトリガー設定から変数を選んで検出点を追加してください。"
+                "検出点はまだ設定されていません。上の「検出点の候補」から選ぶか、"
+                "工程の「＋ 検査波形を追加」から追加してください。"
             )
 
         st.divider()
