@@ -37,13 +37,15 @@ def registered_points(var: str) -> set:
 
 
 def adopt_point(var: str, dtype: str, name: str, params: dict, trigger: str, edge: str,
-                wpost: int, trend: bool, process: str = ""):
+                wpost: int, trend: bool, process: str = "", how: str = ""):
     """時間軸の検出点を 1 件追加し、ダイアログと同じキーに設定値を入れる（有効・傾向解析はオン）"""
     ss = st.session_state
     vkey = f"wvol___global_{var}"
     ss[f"{vkey}_trigger"], ss[f"{vkey}_edge"] = trigger, edge
     if process:
         ss[f"{vkey}_process"] = process
+        if how:
+            ss[f"{vkey}_process_how"] = how
     ss[f"{vkey}_wpost"] = int(max(int(ss.get(f"{vkey}_wpost", 300)), wpost))
     cnt = int(ss.get(f"{vkey}_t_det_cnt", len(ss.get(f"{vkey}_t_det_list", []))))
     did = f"td{cnt}"
@@ -56,6 +58,24 @@ def adopt_point(var: str, dtype: str, name: str, params: dict, trigger: str, edg
     sel = list(ss.get("wi_sel___global") or [])
     if var not in sel:
         ss["wi_sel___global"] = sel + [var]
+    return did
+
+
+def delete_point(vkey: str, did: str, graph: str):
+    """検出点を 1 件削除し、その検出点の設定キーも消す"""
+    ss = st.session_state
+    lk = f"{vkey}_{'xy' if graph == 'XY' else 't'}_det_list"
+    ss[lk] = [d for d in ss.get(lk, []) if d.get("id") != did]
+    for k in [k for k in list(ss.keys()) if isinstance(k, str) and k.startswith(f"{vkey}_{did}_")]:
+        del ss[k]
+
+
+def assign_waveform(var: str, process: str, trigger: str, edge: str, how: str = "手動"):
+    """検査波形の工程（サイクル開始信号）を付け替える。検出点の設定（しきい値など）はそのまま"""
+    ss = st.session_state
+    vkey = _VPFX + var
+    ss[f"{vkey}_trigger"], ss[f"{vkey}_edge"] = trigger, edge
+    ss[f"{vkey}_process"], ss[f"{vkey}_process_how"] = process, how
 
 
 # ── 波形検査点を工程ごとに整理する ─────────────────────────────
@@ -243,7 +263,8 @@ def inspection_tree(ref_df) -> list:
             "process": pname, "trigger": d.get("trigger", ""), "edge": d.get("edge", "RISE"),
             "stats": stats.get(pname) or [],
             "waves": [{"var": v, "graph": "XY" if all(p["graph"] == "XY" for p in pts) else "時間軸",
-                       "wave": waves.get(specs.get((v, pts[0]["trigger"]))), "points": pts}
+                       "wave": waves.get(specs.get((v, pts[0]["trigger"]))), "points": pts,
+                       "how": ss.get(f"{_VPFX}{v}_process_how", "")}
                       for v, pts in by_var.items()],
         })
     return tree

@@ -182,10 +182,40 @@ def _separator(names: list) -> str | None:
     return None
 
 
+def _pulse_candidates(df: pd.DataFrame, vs: list, t: np.ndarray) -> list:
+    """周期的に立ち上がる信号の候補 [(順位の点数, 変数, 周期 ms, ばらつき, 回数)]（点数が小さいほど開始信号らしい）"""
+    out = []
+    for v in vs:
+        b = _bool_array(df[v])
+        idx = _rise_index(b, "RISE")
+        if len(idx) < 3:
+            continue
+        iv = np.diff(t[idx])
+        cv = float(np.std(iv) / np.mean(iv)) if np.mean(iv) > 0 else 9.9
+        # 周期のそろい方を第一に、名前（開始・start など）とパルスらしさで順位を付ける
+        score = cv - (0.05 if _START_WORDS.search(v) else 0) + 0.01 * float(b.mean())
+        out.append((score, v, float(np.median(iv)), cv, len(idx)))
+    return sorted(out)
+
+
+def _timing_spread(rises_t: np.ndarray, starts_t: np.ndarray, period: float) -> float:
+    """変数の立ち上がりが、開始信号から毎サイクル同じ時間後に起きているか（ずれ ÷ 周期。小さいほど同じ工程らしい）"""
+    if len(rises_t) < 3 or len(starts_t) < 3 or period <= 0:
+        return 9.9
+    j = np.searchsorted(starts_t, rises_t, side="right") - 1
+    ok = j >= 0
+    if ok.sum() < 3:
+        return 9.9
+    d = rises_t[ok] - starts_t[j[ok]]
+    return float(np.median(np.abs(d - np.median(d))) / period)
+
+
 @st.cache_data(show_spinner=False)
 def group_hypotheses(df: pd.DataFrame, bool_vars: tuple) -> list:
-    """変数名の接頭辞で工程候補をまとめ、各グループのサイクル開始信号を推定する。
+    """工程候補をまとめ、各工程のサイクル開始信号を推定する。
 
+    変数名に工程の接頭辞（「供給工程.」など）があればそれでまとめる。接頭辞がない名前（bCycStart など）は、
+    周期の違う開始信号ごとに工程を分け、各変数を「毎サイクル同じタイミングで変化する」開始信号の工程に入れる。
     返り値: [{"name", "vars", "trigger", "period_ms", "cv_pct", "n_cycles", "reason"}]
     """
     sep = _separator(list(bool_vars))
@@ -196,28 +226,48 @@ def group_hypotheses(df: pd.DataFrame, bool_vars: tuple) -> list:
     t = _ts_ms(df)
     out = []
     for name, vs in groups.items():
-        best = None
-        for v in vs:
-            b = _bool_array(df[v])
-            idx = _rise_index(b, "RISE")
-            if len(idx) < 3:
-                continue
-            iv = np.diff(t[idx])
-            cv = float(np.std(iv) / np.mean(iv)) if np.mean(iv) > 0 else 9.9
-            on_ratio = float(b.mean())
-            # 周期のそろい方を第一に、名前（開始・start など）とパルスらしさで順位を付ける
-            score = cv - (0.05 if _START_WORDS.search(v) else 0) + 0.01 * on_ratio
-            if best is None or score < best[0]:
-                best = (score, v, float(np.median(iv)), cv, len(idx))
-        if best is None:
+        cands = _pulse_candidates(df, vs, t)
+        if name == "（その他）" and cands:
+            out += _split_by_timing(df, vs, cands, t, len(groups) == 1)
+            continue
+        if not cands:
             out.append({"name": name, "vars": vs, "trigger": None, "period_ms": 0.0, "cv_pct": 0.0,
                         "n_cycles": 0, "reason": "周期的に立ち上がる信号が見つかりません"})
             continue
-        _, trig, period, cv, n = best
+        _, trig, period, cv, n = cands[0]
         reason = "名前と周期性から推定" if _START_WORDS.search(trig) else "周期性から推定"
         out.append({"name": name, "vars": vs, "trigger": trig, "period_ms": period, "cv_pct": cv * 100,
                     "n_cycles": n, "reason": reason})
     return sorted(out, key=lambda g: (g["trigger"] is None, g["name"]))
+
+
+def _split_by_timing(df, vs, cands, t, only_group: bool) -> list:
+    """接頭辞のない変数を、周期の違う開始信号ごとの工程に分ける"""
+    triggers = []
+    for c in cands:
+        if c[3] > 0.15:      # 周期がそろっていないものは開始信号にしない
+            continue
+        if all(abs(c[2] - o[2]) > 0.05 * o[2] for o in triggers):
+            triggers.append(c)
+    if not triggers:
+        return [{"name": "（その他）", "vars": vs, "trigger": None, "period_ms": 0.0, "cv_pct": 0.0,
+                 "n_cycles": 0, "reason": "周期的に立ち上がる信号が見つかりません"}]
+    members = {c[1]: [c[1]] for c in triggers}
+    rest = []
+    rises = {v: t[_rise_index(_bool_array(df[v]), "RISE")] for v in vs}
+    for v in vs:
+        if v in members:
+            continue
+        spread = {c[1]: _timing_spread(rises[v], rises[c[1]], c[2]) for c in triggers}
+        best = min(spread, key=spread.get)
+        (members[best] if spread[best] <= 0.05 else rest).append(v)
+    out = []
+    for i, c in enumerate(triggers, start=1):
+        name = f"工程{i}" if (len(triggers) > 1 or not only_group) else "工程1"
+        out.append({"name": name, "vars": members[c[1]] + (rest if i == 1 and not out else []),
+                    "trigger": c[1], "period_ms": c[2], "cv_pct": c[3] * 100, "n_cycles": c[4],
+                    "reason": "名前にまとまりがないため、周期と変化のタイミングから推定"})
+    return out
 
 
 @st.cache_data(show_spinner=False)
@@ -421,8 +471,29 @@ def wave_hypotheses(waves: list, var: str) -> dict:
         cands.append({"dtype": dtype, "name": name, "params": params, "t_ms": tm, "v": vm,
                       "det_rate": det, "confidence": c, "include": c != "低", "note": note})
 
+    # 山・谷が複数ある波形（1 サイクルに 2 回押すなど）は、山ごとに時間範囲を区切った最大値点・最小値点にする
+    rm = (mean - p1) / rng      # 平均波形を 0〜1 にしたもの
+    humps = _humps(grid, rm if shape != "谷形" else 1 - rm) if shape in ("山形", "谷形") else []
+    if len(humps) >= 2:
+        peak = shape == "山形"
+        for k, (r0, r1) in enumerate(humps, start=1):
+            pts, prom = [], []
+            for t, v in sw:
+                m = (t >= r0) & (t <= r1)
+                if not m.any():
+                    pts.append(None)
+                    continue
+                tt, vv = t[m], v[m]
+                i = int(np.argmax(vv) if peak else np.argmin(vv))
+                pts.append((float(tt[i]), float(vv[i])))
+                prom.append(abs(vv[i] - np.median(v[: max(3, len(v) // 20)])) >= 0.4 * rng)
+            share = float(np.mean(prom)) if prom else 0.0
+            add("最大値点" if peak else "最小値点", f"{'ピーク' if peak else '谷'}{k}",
+                {"use_range": True, "range_s": _nice(r0), "range_e": _nice(r1)}, pts,
+                f"{len(humps)} つある{'山' if peak else '谷'}の {k} つ目（{r0:.0f}〜{r1:.0f} ms の範囲）を追います",
+                "高" if share >= 0.95 else "中" if share >= 0.8 else "低")
     # 山形・谷形
-    if shape in ("山形", "谷形"):
+    elif shape in ("山形", "谷形"):
         peak = shape == "山形"
         pts, prom = [], []
         for t, v in sw:
@@ -447,7 +518,7 @@ def wave_hypotheses(waves: list, var: str) -> dict:
             cands.reverse()
 
     # 途中で傾きが急に変わる点（立ち上がり・立ち下がりの途中の折れ曲がり。始まりと頂上は除く）
-    if shape in ("山形", "台形", "谷形", "くぼみ"):
+    if shape in ("山形", "台形", "谷形", "くぼみ") and len(humps) < 2:
         rising = shape in ("山形", "台形")
         lo_v, hi_v = p1 + 0.15 * rng, p1 + 0.85 * rng
         peaks, noise, signs = [], [], []
@@ -489,6 +560,29 @@ def wave_hypotheses(waves: list, var: str) -> dict:
             "defaults": defaults}
 
 
+def _humps(grid: np.ndarray, r: np.ndarray) -> list:
+    """平均波形（0〜1 に正規化）の中で、高さ 0.6 以上の山が下がり切って分かれているものを [(開始 ms, 終了 ms)] で返す"""
+    above = np.nan_to_num(r) > 0.35
+    runs, i = [], 0
+    while i < len(above):
+        if above[i]:
+            j = i
+            while j + 1 < len(above) and above[j + 1]:
+                j += 1
+            if np.nanmax(r[i:j + 1]) >= 0.6:
+                runs.append((i, j))
+            i = j + 1
+        else:
+            i += 1
+    if len(runs) < 2:
+        return []
+    out = []
+    for i, j in runs:
+        w = max(2, (j - i) // 4)
+        out.append((float(grid[max(0, i - w)]), float(grid[min(len(grid) - 1, j + w)])))
+    return out
+
+
 def analog_vars(entry: dict) -> list:
     """変化のあるアナログ変数（状態番号・カウンタ・一定の変数は外す）"""
     prof = variable_profile(entry["df"], tuple(entry["col_types"].items()))
@@ -506,15 +600,77 @@ def trigger_for_var(var: str, processes: dict) -> tuple:
     return "", "", "RISE"
 
 
+@st.cache_data(show_spinner=False)
+def wave_repeatability(df: pd.DataFrame, vars_: tuple, triggers: tuple) -> dict:
+    """変数ごと・開始信号ごとに、サイクルの波形がどれだけそろうか（各サイクルと平均波形の相関の中央値、-1〜1）
+
+    その工程の動きに合わせて変わる波形は、その工程の開始信号で切ると毎サイクル同じ形になる。
+    返り値: {変数: {(信号, エッジ): 点数}}
+    """
+    out = {v: {} for v in vars_}
+    for trig, edge in triggers:
+        if trig not in df.columns:
+            continue
+        st_idx = _rise_index(_bool_array(df[trig]), edge)
+        if len(st_idx) < 4:
+            continue
+        L = int(np.median(np.diff(st_idx)))
+        segs = [(a, a + L) for a in st_idx[:-1][:40] if a + L <= len(df)]
+        if len(segs) < 3 or L < 5:
+            continue
+        step = max(1, L // 200)
+        for v in vars_:
+            x = df[v].to_numpy(dtype=float)
+            mat = np.array([x[a:b:step] for a, b in segs])
+            mean = np.nanmean(mat, axis=0)
+            mc = mean - np.nanmean(mean)
+            sd_m = np.sqrt(np.nansum(mc ** 2))
+            corr = []
+            for row in mat:
+                rc = row - np.nanmean(row)
+                den = sd_m * np.sqrt(np.nansum(rc ** 2))
+                corr.append(float(np.nansum(rc * mc) / den) if den > 0 else 0.0)
+            out[v][(trig, edge)] = float(np.median(corr))
+    return out
+
+
+def assign_process(var: str, processes: dict, scores: dict) -> tuple:
+    """波形のそろい方で工程を選ぶ（名前の先頭が工程名と一致し、点数がほぼ同じならそちらを優先）。
+
+    返り値: (工程名, 信号, エッジ, 決め方の説明, 点数)
+    """
+    cand = [(n, p["trigger_col"], p.get("edge", "RISE")) for n, p in processes.items() if p.get("trigger_col")]
+    if not cand:
+        return "", "", "RISE", "", 0.0
+    sc = {n: scores.get((t, e), -1.0) for n, t, e in cand}
+    best = max(cand, key=lambda c: sc[c[0]])
+    named = next((c for c in cand if var.startswith(c[0])), None)
+    if named and sc[named[0]] >= sc[best[0]] - 0.05:
+        return (*named, "名前と波形のそろい方", sc[named[0]])
+    ties = [c for c in cand if c != best and sc[c[0]] >= sc[best[0]] - 0.02]
+    if ties:
+        how = "要確認（" + "・".join([best[0]] + [c[0] for c in ties]) + " は同じタイミングで区別できない）"
+    elif sc[best[0]] < 0.5:
+        how = "要確認（どの工程ともそろいが弱い）"
+    else:
+        how = "波形のそろい方"
+    return (*best, how, sc[best[0]])
+
+
 def wave_candidates(entry: dict, processes: dict) -> dict:
     """基準データのアナログ変数ごとに、工程のサイクル開始信号を基準にした波形の仮説を返す。
     processes: {工程名: {"trigger_col", "edge"}}。返り値: {変数: {"process", "trigger", "edge", **wave_hypotheses}}
     """
+    avs = analog_vars(entry)
+    trig_set = tuple(sorted({(p["trigger_col"], p.get("edge", "RISE")) for p in processes.values()
+                             if p.get("trigger_col")}))
+    scores = wave_repeatability(entry["df"], tuple(avs), trig_set)
     pairs, owner = [], {}
-    for v in analog_vars(entry):
-        pname, trig, edge = trigger_for_var(v, processes)
+    for v in avs:
+        pname, trig, edge, how, score = assign_process(v, processes, scores.get(v, {}))
         if trig:
             pairs.append((v, trig, edge))
-            owner[v] = pname
+            owner[v] = (pname, how, score)
     res = wave_hypotheses_all(entry["df"], tuple(pairs))
-    return {v: dict(res[v], process=owner[v], trigger=t, edge=e) for v, t, e in pairs}
+    return {v: dict(res[v], process=owner[v][0], assoc=owner[v][1], assoc_score=owner[v][2], trigger=t, edge=e)
+            for v, t, e in pairs}
