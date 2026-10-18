@@ -3,11 +3,42 @@ app.py — APB タイミング解析 エントリーポイント（画面遷移�
 
 利用者の仕事を「準備」（立ち上げ時に 1 回）と「点検」（定期）に分けてメニューを構成する。
 """
+import os
+import sys
+import time
+
 import streamlit as st
 
-from core.state import enable_session_persistence, ensure_session
-from core.ui import apply_theme
-from core.wave_inspect import _wi_restore_config
+
+def _reload_updated_modules():
+    """更新されたアプリのモジュールを読み直す。
+
+    Streamlit Community Cloud はリポジトリの更新を取り込んでも、プロセス内に読み込み済みの自作モジュール
+    （core/*.py など）を古いまま使い続けることがあり、新しく追加した関数を import できずに止まる
+    （ページのスクリプトだけは毎回読み直される）。読み込んだ後にファイルが更新されていたら、
+    このアプリのモジュールをまとめて sys.modules から外し、次の import で読み直させる。
+    """
+    base = os.path.dirname(os.path.abspath(__file__)) + os.sep
+    loaded_at = getattr(sys, "_apb_modules_loaded_at", None)
+    if loaded_at is None:
+        try:   # 初回はプロセスの開始時刻（それより後に更新されたファイルは古いまま読まれている）
+            loaded_at = os.stat(f"/proc/{os.getpid()}").st_ctime
+        except OSError:
+            loaded_at = time.time()
+    mine = [n for n, m in list(sys.modules.items())
+            if n != "__main__" and (getattr(m, "__file__", None) or "").startswith(base)]
+    if any(os.path.getmtime(sys.modules[n].__file__) > loaded_at
+           for n in mine if os.path.exists(sys.modules[n].__file__)):
+        for n in mine:
+            sys.modules.pop(n, None)
+    sys._apb_modules_loaded_at = time.time()
+
+
+_reload_updated_modules()
+
+from core.state import enable_session_persistence, ensure_session  # noqa: E402
+from core.ui import apply_theme  # noqa: E402
+from core.wave_inspect import _wi_restore_config  # noqa: E402
 
 st.set_page_config(page_title="APB タイミング解析", page_icon=":material/timeline:", layout="wide")
 enable_session_persistence()
