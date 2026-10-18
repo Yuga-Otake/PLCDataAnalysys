@@ -123,10 +123,29 @@ def step_stats(result_df: pd.DataFrame, steps: list) -> list:
     return out
 
 
-def gantt_figure(stats: list, takt_ms: int = 0, height_per_row: int = 34):
-    """ステップのタイミング図。時刻ステップは点（ひげ＝最小〜最大）、期間ステップは棒。"""
+def step_context(t_ms: float, stats: list) -> str:
+    """サイクル開始から t_ms の時点が、どのステップの途中・あとかを言葉にする（波形検査点の位置の説明）"""
+    inside = [s for s in stats if s["mode"] != "single" and s["start_mean"] <= t_ms <= s["end_mean"]]
+    if inside:
+        return "「" + "」「".join(s["name"] for s in inside) + "」の途中"
+    before = [(s["end_mean"], s["name"]) for s in stats if s["end_mean"] <= t_ms]
+    if before:
+        return f"「{max(before)[1]}」のあと"
+    return "最初のステップの前"
+
+
+def gantt_figure(stats: list, takt_ms: int = 0, height_per_row: int = 34, points: list | None = None):
+    """ステップのタイミング図。時刻ステップは点（ひげ＝最小〜最大）、期間ステップは棒。
+    points: 波形検査点 [{"label", "t", "hover"}]。ステップの下に ◇ の行として重ねる"""
     fig = go.Figure()
-    names = [s["name"] for s in stats]
+    points = points or []
+    names = [s["name"] for s in stats] + [p["label"] for p in points]
+    for p in points:
+        fig.add_trace(go.Scatter(
+            x=[p["t"]], y=[p["label"]], mode="markers",
+            marker=dict(size=11, color="rgba(0,0,0,0)", symbol="diamond",
+                        line=dict(color="#8b949e", width=2)),
+            hovertemplate=p.get("hover", "") + "<extra></extra>", showlegend=False))
     for s in stats:
         if s["mode"] == "single":
             fig.add_trace(go.Scatter(
@@ -156,7 +175,7 @@ def gantt_figure(stats: list, takt_ms: int = 0, height_per_row: int = 34):
         fig.add_vline(x=takt_ms, line_dash="dash", line_color="#cf222e",
                       annotation_text=f"タクト目標 {takt_ms} ms", annotation_position="top")
     fig.update_layout(
-        barmode="overlay", height=max(220, len(stats) * height_per_row + 80),
+        barmode="overlay", height=max(220, len(names) * height_per_row + 80),
         margin=dict(l=0, r=16, t=28, b=40),
         xaxis=dict(title="サイクル開始からの時間 [ms]", rangemode="tozero"),
         yaxis=dict(categoryorder="array", categoryarray=names, autorange="reversed"),

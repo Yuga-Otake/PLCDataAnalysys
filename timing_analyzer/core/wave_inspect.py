@@ -37,11 +37,13 @@ def registered_points(var: str) -> set:
 
 
 def adopt_point(var: str, dtype: str, name: str, params: dict, trigger: str, edge: str,
-                wpost: int, trend: bool):
+                wpost: int, trend: bool, process: str = ""):
     """時間軸の検出点を 1 件追加し、ダイアログと同じキーに設定値を入れる（有効・傾向解析はオン）"""
     ss = st.session_state
     vkey = f"wvol___global_{var}"
     ss[f"{vkey}_trigger"], ss[f"{vkey}_edge"] = trigger, edge
+    if process:
+        ss[f"{vkey}_process"] = process
     ss[f"{vkey}_wpost"] = int(max(int(ss.get(f"{vkey}_wpost", 300)), wpost))
     cnt = int(ss.get(f"{vkey}_t_det_cnt", len(ss.get(f"{vkey}_t_det_list", []))))
     did = f"td{cnt}"
@@ -54,6 +56,203 @@ def adopt_point(var: str, dtype: str, name: str, params: dict, trigger: str, edg
     sel = list(ss.get("wi_sel___global") or [])
     if var not in sel:
         ss["wi_sel___global"] = sel + [var]
+
+
+# ── 波形検査点を工程ごとに整理する ─────────────────────────────
+
+POINT_TYPES_T = ("傾き変化点", "閾値超え検出", "最大値点", "最小値点")
+_VPFX = "wvol___global_"
+
+
+def inspection_points(processes: dict) -> list:
+    """登録済みの波形検査点を、変数のサイクル開始信号から工程に割り当てて返す。
+
+    processes: {工程名: (サイクル開始信号, エッジ)}。同じ信号の工程が複数あれば、登録時に記録した工程を優先。
+    返り値: [{"process"（該当なしは ""）, "var", "graph", "no", "type", "name", "on", "trend",
+              "vkey", "did", "dkey", "trigger", "edge"}]
+    """
+    ss = st.session_state
+    out = []
+    for key in [k for k in list(ss.keys()) if isinstance(k, str) and k.startswith(_VPFX)]:
+        for suffix, graph in (("_t_det_list", "時間軸"), ("_xy_det_list", "XY")):
+            if not key.endswith(suffix):
+                continue
+            var = key[len(_VPFX):-len(suffix)]
+            vkey = _VPFX + var
+            trig, edge = ss.get(f"{vkey}_trigger", ""), ss.get(f"{vkey}_edge", "RISE")
+            owners = [n for n, (t, e) in processes.items() if t == trig and e == edge] or \
+                     [n for n, (t, _) in processes.items() if t == trig]
+            hint = ss.get(f"{vkey}_process", "")
+            proc = hint if hint in owners else (owners[0] if owners else "")
+            for i, d in enumerate(ss.get(key, []) or []):
+                did = d.get("id", "")
+                dkey = f"{vkey}_{did}"
+                out.append({"process": proc, "var": var, "graph": graph, "no": i + 1,
+                            "type": d.get("type", ""), "name": ss.get(f"{dkey}_name", ""),
+                            "on": bool(ss.get(f"{dkey}_on", False)),
+                            "trend": bool(ss.get(f"{dkey}_trend_on", False)),
+                            "vkey": vkey, "did": did, "dkey": dkey, "trigger": trig, "edge": edge})
+    return out
+
+
+@st.cache_data(show_spinner=False)
+def _reference_positions(df: pd.DataFrame, specs: tuple) -> dict:
+    """検出点ごとに、基準データの全サイクルで検出した時刻・値の中央値と検出率 {dkey: (t, v, rate)}"""
+    cycles, out = {}, {}
+    for dkey, var, trig, edge, wpre, wpost, dtype, params in specs:
+        if var not in df.columns or trig not in df.columns:
+            continue
+        if (trig, edge) not in cycles:
+            try:
+                cycles[(trig, edge)] = pd.Index(list(detect_cycles(df, trig, edge)))
+            except Exception:
+                cycles[(trig, edge)] = pd.Index([])
+        idx = cycles[(trig, edge)]
+        if not len(idx):
+            continue
+        sw = []
+        for c in get_cycle_waveforms(df, idx, [var]):
+            if var not in c.columns:
+                continue
+            t, v = c["time_offset_ms"].to_numpy(dtype=float), c[var].to_numpy(dtype=float)
+            m = (t >= -wpre) & (t <= wpost)
+            if m.sum() >= 2:
+                sw.append((t[m], v[m]))
+        if not sw:
+            continue
+        pts = [p for p in _detect_point_for_trend(sw, dtype, dkey, dict(params)) if p is not None]
+        if pts:
+            out[dkey] = (float(np.median([p[0] for p in pts])), float(np.median([p[1] for p in pts])),
+                         len(pts) / len(sw))
+    return out
+
+
+def locate_points(df: pd.DataFrame, items: list) -> dict:
+    """時間軸の点検出タイプ（傾き変化点・閾値超え・最大／最小値点）について、基準データでの位置を求める"""
+    ss = st.session_state
+    specs = []
+    for it in items:
+        if it["graph"] != "時間軸" or it["type"] not in POINT_TYPES_T or not it["trigger"]:
+            continue
+        params = tuple(sorted((k, v) for k, v in ss.items()
+                              if isinstance(k, str) and k.startswith(it["dkey"] + "_")
+                              and isinstance(v, (bool, int, float, str))))
+        specs.append((it["dkey"], it["var"], it["trigger"], it["edge"],
+                      int(ss.get(f"{it['vkey']}_wpre", 50)), int(ss.get(f"{it['vkey']}_wpost", 300)),
+                      it["type"], params))
+    return _reference_positions(df, tuple(specs)) if specs else {}
+
+
+def process_defs() -> dict:
+    """登録済みの工程 {工程名: {"trigger", "edge", "steps"}}（画面の入力値を優先）"""
+    ss = st.session_state
+    return {n: {"trigger": ss.get(pk(n, "trigger"), p.get("trigger_col", "")),
+                "edge": ss.get(pk(n, "edge"), p.get("edge", "RISE")),
+                "steps": ss.get(pk(n, "steps_list"), p.get("steps", []))}
+            for n, p in ss.get("processes", {}).items()}
+
+
+def organized_points(ref_df) -> list:
+    """波形検査点を工程ごとに整理し、基準データでの位置（時刻・値・ステップとの関係）を付ける。
+
+    並び順は工程の登録順 → 基準データでの時刻順（位置が分からない点は最後）。工程に紐づかない点は process=""。
+    """
+    return _organize(ref_df)[0]
+
+
+def _organize(ref_df) -> tuple:
+    """organized_points の本体。(検査点, {工程: ステップ統計}, 工程定義) を返す"""
+    from core.analysis import analyze, step_context, step_stats
+    defs = process_defs()
+    items = inspection_points({n: (d["trigger"], d["edge"]) for n, d in defs.items()})
+    pos = locate_points(ref_df, items) if ref_df is not None else {}
+    stats = {}
+    for it in items:
+        p = pos.get(it["dkey"])
+        it["t"], it["v"], it["rate"] = p if p else (None, None, None)
+        it["where"] = ""
+        d = defs.get(it["process"])
+        if p and d and d["steps"] and ref_df is not None:
+            if it["process"] not in stats:
+                try:
+                    stats[it["process"]] = step_stats(analyze(ref_df, d["trigger"], d["edge"], d["steps"]),
+                                                      d["steps"])
+                except Exception:
+                    stats[it["process"]] = []
+            if stats[it["process"]]:
+                it["where"] = step_context(p[0], stats[it["process"]])
+    order = {n: i for i, n in enumerate(defs)}
+    items.sort(key=lambda it: (order.get(it["process"], len(order)),
+                               it["t"] if it["t"] is not None else float("inf"), it["var"], it["no"]))
+    return items, stats, defs
+
+
+@st.cache_data(show_spinner=False)
+def _mean_waves(df: pd.DataFrame, specs: tuple) -> dict:
+    """(変数, 信号, エッジ, 前, 後) ごとに、基準データの平均波形と 5〜95% の幅 {spec: (t, 平均, 下, 上)}"""
+    cycles, out = {}, {}
+    for spec in specs:
+        var, trig, edge, wpre, wpost = spec
+        if var not in df.columns or trig not in df.columns:
+            continue
+        if (trig, edge) not in cycles:
+            try:
+                cycles[(trig, edge)] = pd.Index(list(detect_cycles(df, trig, edge)))
+            except Exception:
+                cycles[(trig, edge)] = pd.Index([])
+        idx = cycles[(trig, edge)]
+        waves = get_cycle_waveforms(df, idx, [var]) if len(idx) else []
+        if len(waves) > 2:
+            waves = waves[:-1]          # 最後のサイクルは途中で切れている
+        sw = [(c["time_offset_ms"].to_numpy(dtype=float), c[var].to_numpy(dtype=float))
+              for c in waves if var in c.columns and len(c) >= 2]
+        if not sw:
+            continue
+        t_end = min(float(wpost), float(np.median([t[-1] for t, _ in sw])))
+        grid = np.linspace(max(-float(wpre), 0.0), t_end, 300)
+        mat = np.array([np.where(grid <= t[-1], np.interp(grid, t, v), np.nan) for t, v in sw])
+        with np.errstate(all="ignore"):
+            out[spec] = (grid.tolist(), np.nanmean(mat, axis=0).tolist(),
+                         np.nanpercentile(mat, 5, axis=0).tolist(), np.nanpercentile(mat, 95, axis=0).tolist())
+    return out
+
+
+def inspection_tree(ref_df) -> list:
+    """工程 → 検査波形 → 検査点 の 3 段に整理する。
+
+    返り値: [{"process", "trigger", "edge", "stats", "waves": [{"var", "graph", "wave": (t, 平均, 下, 上) | None,
+              "points": [検査点…]}]}]。工程は登録順（検査点のない工程も含む）、工程に紐づかない点は最後に process=""。
+    波形は最初の検査点の時刻順、検査点は時刻順。
+    """
+    ss = st.session_state
+    items, stats, defs = _organize(ref_df)
+    specs = {}
+    for it in items:
+        specs[(it["var"], it["trigger"])] = (it["var"], it["trigger"], it["edge"],
+                                            int(ss.get(f"{it['vkey']}_wpre", 50)),
+                                            int(ss.get(f"{it['vkey']}_wpost", 300)))
+    waves = _mean_waves(ref_df, tuple(v for v in specs.values() if v[1])) if ref_df is not None and specs else {}
+    tree = []
+    for pname in list(defs) + ([""] if any(not it["process"] for it in items) else []):
+        mine = [it for it in items if it["process"] == pname]
+        by_var = {}
+        for it in mine:                 # items は時刻順なので、波形も最初の検査点の時刻順になる
+            by_var.setdefault(it["var"], []).append(it)
+        d = defs.get(pname, {})
+        tree.append({
+            "process": pname, "trigger": d.get("trigger", ""), "edge": d.get("edge", "RISE"),
+            "stats": stats.get(pname) or [],
+            "waves": [{"var": v, "graph": "XY" if all(p["graph"] == "XY" for p in pts) else "時間軸",
+                       "wave": waves.get(specs.get((v, pts[0]["trigger"]))), "points": pts}
+                      for v, pts in by_var.items()],
+        })
+    return tree
+
+
+def point_label(it: dict) -> str:
+    """一覧・図で使う検出点の短い名前（変数名の工程部分は省く）"""
+    var = it["var"].split(".", 1)[1] if "." in it["var"] else it["var"]
+    return f"{var} {it['name'] or it['type']}"
 
 
 _WI_SAVE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "wi_saved_setups.json")

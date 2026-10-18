@@ -14,7 +14,8 @@ from core.ui import page_header
 from core.wave_inspect import (_render_waveform_overlay, _wi_add_dialog, _wi_edit_dialog,
                                _wi_load_from_file, _wi_restore_config, _wi_save_config,
                                _wi_save_to_file, adopt_point, cached_detect_cycles,
-                               registered_points, set_columns)
+                               inspection_tree, registered_points, set_columns)
+from core.wave_view import process_header, render_process
 
 # 重ね表示の色（CSV ごと）
 _CMP_PALETTE = ["#3b82f6", "#f59e0b", "#10b981", "#ef4444", "#8b5cf6", "#ec4899", "#06b6d4", "#84cc16"]
@@ -117,7 +118,7 @@ def _candidate_panel():
             dtype = r["検出点タイプ"]
             params = c["params"] if dtype == c["dtype"] else h["defaults"].get(dtype, {})
             adopt_point(var, dtype, str(r["名前"] or "").strip(), params, h["trigger"], h["edge"],
-                        h["wpost"], bool(r["傾向解析に出す"]))
+                        h["wpost"], bool(r["傾向解析に出す"]), process=h["process"])
         ss["_wave_msgs"] = [f"検出点を {len(picked)} 件登録しました。下の一覧で確認・調整できます。"]
         st.rerun()
 
@@ -147,93 +148,36 @@ else:
         st.session_state.pop("wi_transition_to_edit", None)
         _wi_edit_dialog()
 
-    # 現在設定されている検出点を全変数から収集
-    _wi_sum_items: list = []
-    for _sv in num_cols:
-        _svkey   = f"wvol___global_{_sv}"
-        _sv_trig = st.session_state.get(
-            f"{_svkey}_trigger",
-            bool_cols[0] if bool_cols else "")
-        _sv_edge = st.session_state.get(f"{_svkey}_edge", "RISE")
-        for _si, _sdet in enumerate(
-                st.session_state.get(f"{_svkey}_t_det_list", [])):
-            _did = _sdet.get("id", "")
-            _wi_sum_items.append({
-                "変数":     _sv,
-                "トリガー": _sv_trig,
-                "エッジ":   _sv_edge,
-                "グラフ":   "時間軸",
-                "No":       _si + 1,
-                "タイプ":   _sdet.get("type", ""),
-                "名前":     st.session_state.get(f"{_svkey}_{_did}_name", ""),
-                "有効":     "✅" if st.session_state.get(
-                                f"{_svkey}_{_did}_on", False) else "−",
-                "傾向解析": "📈" if st.session_state.get(
-                                f"{_svkey}_{_did}_trend_on", False) else "−",
-                "_svkey":   _svkey,
-                "_did":     _did,
-                "_sv":      _sv,
-                "_graph":   "時間軸",
-                "_dtype":   _sdet.get("type", ""),
-            })
-        for _si, _sdet in enumerate(
-                st.session_state.get(f"{_svkey}_xy_det_list", [])):
-            _did = _sdet.get("id", "")
-            _wi_sum_items.append({
-                "変数":     _sv,
-                "トリガー": _sv_trig,
-                "エッジ":   _sv_edge,
-                "グラフ":   "XY",
-                "No":       _si + 1,
-                "タイプ":   _sdet.get("type", ""),
-                "名前":     st.session_state.get(f"{_svkey}_{_did}_name", ""),
-                "有効":     "✅" if st.session_state.get(
-                                f"{_svkey}_{_did}_on", False) else "−",
-                "傾向解析": "📈" if st.session_state.get(
-                                f"{_svkey}_{_did}_trend_on", False) else "−",
-                "_svkey":   _svkey,
-                "_did":     _did,
-                "_sv":      _sv,
-                "_graph":   "XY",
-                "_dtype":   _sdet.get("type", ""),
-            })
-
+    # 登録済みの検出点を「工程 → 検査波形 → 検査点」に整理（工程は変数のサイクル開始信号で決まる）
+    _wi_tree = inspection_tree(ref["df"] if ref else None)
+    _wi_sum_items: list = [p for n in _wi_tree for w in n["waves"] for p in w["points"]]
     _wi_n_dets  = len(_wi_sum_items)
-    _wi_n_trend = sum(1 for r in _wi_sum_items if r["傾向解析"] == "📈")
+    _wi_n_trend = sum(1 for p in _wi_sum_items if p["trend"])
+    _wi_nodes = [n for n in _wi_tree if n["waves"]]
 
     with st.expander(
-        f"📋 登録サマリー　検出点: **{_wi_n_dets}** 件"
+        f"📋 登録サマリー（工程 → 検査波形 → 検査点）　検出点: **{_wi_n_dets}** 件"
         f"　傾向解析送出: **{_wi_n_trend}** 件",
         expanded=True,
     ):
-        # スマホでは列が縦に積まれて読めなくなるので、横並びのまま横スクロールさせる（core/ui.py の CSS）
-        with st.container(key="wisumgrid"):
-            # ── ヘッダー行 ─────────────────────────────────────────
-            _wh = st.columns([2, 1.8, 0.6, 0.8, 0.4, 1.6, 1.6, 0.5, 0.5, 0.6])
-            for _lbl, _col in zip(
-                ["変数", "トリガー", "エッジ", "グラフ", "No",
-                 "タイプ", "名前", "有効", "📈", ""],
-                _wh,
-            ):
-                _col.caption(_lbl)
-
-            # ── データ行 ──────────────────────────────────────────
-            for _wi_ri, _wi_row in enumerate(_wi_sum_items):
-                _wr = st.columns([2, 1.8, 0.6, 0.8, 0.4, 1.6, 1.6, 0.5, 0.5, 0.6])
-                _wr[0].markdown(f"**{_wi_row['変数']}**")
-                _wr[1].markdown(_wi_row["トリガー"])
-                _wr[2].markdown(_wi_row["エッジ"])
-                _wr[3].markdown(_wi_row["グラフ"])
-                _wr[4].markdown(str(_wi_row["No"]))
-                _wr[5].markdown(_wi_row["タイプ"])
-                _wr[6].markdown(_wi_row["名前"] or "−")
-                _wr[7].markdown(_wi_row["有効"])
-                _wr[8].markdown(_wi_row["傾向解析"])
-                with _wr[9]:
-                    if st.button("⚙️", key=f"_wisum_edit_{_wi_ri}",
-                                 help="波形を見ながら編集"):
-                        st.session_state["wi_edit_target"] = _wi_row
-                        _wi_edit_dialog()
+        if _wi_nodes:
+            _wi_names = [n["process"] or "工程なし" for n in _wi_nodes]
+            _wi_pick = st.pills("工程で絞り込む", ["すべて"] + _wi_names, default="すべて",
+                                key="_wi_tree_filter", label_visibility="collapsed") or "すべて"
+            st.caption("図は基準データの平均波形（帯は 5〜95% のサイクル）、下の帯は工程のステップ（同じ時間軸）、"
+                       "◇ は各検査点を基準データで検出した位置です。")
+            for _wi_node, _wi_nm in zip(_wi_nodes, _wi_names):
+                if _wi_pick not in ("すべて", _wi_nm):
+                    continue
+                with st.container(border=True):
+                    st.markdown(f"<p class='apb-next-title'>{process_header(_wi_node)}</p>", unsafe_allow_html=True)
+                    if not _wi_node["process"]:
+                        st.caption("サイクル開始信号がどの工程とも一致しません。⚙️ で工程のサイクル開始信号を選ぶと、"
+                                   "その工程に入ります。")
+                    render_process(_wi_node, editable=True)
+            _wi_empty = [n["process"] for n in _wi_tree if n["process"] and not n["waves"]]
+            if _wi_empty:
+                st.caption("検査点のない工程: " + "、".join(_wi_empty))
 
         # ── 行追加ボタン ────────────────────────────────────────
         _wadd_c1, _wadd_c2 = st.columns([9.6, 0.6])
