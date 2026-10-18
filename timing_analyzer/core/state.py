@@ -2,8 +2,8 @@
 core/state.py — 全ページで共有するセッション状態
 
 st.navigation によるマルチページ構成では、どのページから開いても
-データと工程設定が揃っている必要がある。旧画面（legacy_app.py）と同じキー・
-同じ規則で状態を初期化し、準備の進み具合（ワークフロー）もここで判定する。
+データと工程設定が揃っている必要がある。設定ファイル（JSON）と互換のキー
+（P_<工程>__*）で状態を初期化し、準備の進み具合（ワークフロー）もここで判定する。
 """
 import functools
 import hashlib
@@ -20,7 +20,7 @@ CMP_SAMPLE = "sample_playback.csv"
 
 
 def pk(pname: str, suffix: str) -> str:
-    """工程ごとの session_state キー（legacy_app.pk と同一規則）"""
+    """工程ごとの session_state キー（設定ファイルの互換性のため規則は変えない）"""
     safe = "".join(c if c.isalnum() else "_" for c in pname)
     return f"P_{safe}__{suffix}"
 
@@ -54,9 +54,9 @@ def enable_session_persistence():
     """key 付きウィジェットの値を既定でセッション全体に保持する。
 
     Streamlit は表示されなくなったウィジェットの値を破棄するため、ページを
-    移ると旧画面の設定（タクト目標・波形検査条件など）が消えてしまう。
-    旧画面のウィジェットは数百あり個別に persist_state を付けられないので、
-    移行期間中はここで一括して既定値を "session" にする。
+    移ると設定（タクト目標・波形検査条件など）が消えてしまう。
+    波形検査（core/wave_inspect.py）は設定値をウィジェットのキー（wvol_*）に持っており、
+    数百あるウィジェットに個別に persist_state を付けられないので、ここで一括して既定値を "session" にする。
     """
     from streamlit.delta_generator import DeltaGenerator
 
@@ -109,7 +109,7 @@ def ensure_session():
     ss["df"], ss["col_types"] = entry["df"], entry["col_types"]
 
     bool_cols = [c for c, t in entry["col_types"].items() if t == "bool"]
-    # 初回のみ工程を自動登録する（列構成の変化は旧画面側の規則に任せる）
+    # 初回のみ工程を自動登録する
     if "_schema_hash" not in ss:
         ss["_schema_hash"] = hashlib.md5(
             str(sorted(entry["col_types"].keys())).encode()).hexdigest()[:8]

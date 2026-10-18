@@ -13,6 +13,7 @@ import streamlit as st
 from core.evaluate import STATUS, compare_keys_by_time, control_limits, evaluate_process, rule
 from core.state import pk
 from core.ui import REF_LINE, STATUS_COLOR, numeric, page_header, rule_popover, tolerance_band
+from core.wave_inspect import _compute_wi_det_stats_for_csv
 
 ss = st.session_state
 page_header(
@@ -160,4 +161,51 @@ st.dataframe(numeric(pd.DataFrame([{
 } for lbl, s in zip(labels, series)]), ["平均 [ms]", "σ [ms]", "基準との差 [ms]", "NG率 [%]"]).style.format(
     {c: "{:.1f}" for c in ("平均 [ms]", "σ [ms]", "基準との差 [ms]", "NG率 [%]")}, na_rep="—"),
     hide_index=True, width="stretch")
-st.caption("波形検査の検出点の推移は、波形検査条件の移設後（段階 4）にこの画面へ追加します。現在は旧画面の「傾向解析」で確認できます。")
+
+# ── 波形検査の検出点 ─────────────────────────────────────────
+st.subheader("波形検査の検出点の推移", anchor=False)
+det_series, det_errors = {}, []
+for k, lbl in zip(keys, labels):
+    d = store[k]["df"]
+    nums = [c for c, t in store[k]["col_types"].items() if t == "numeric"]
+    try:
+        stats = _compute_wi_det_stats_for_csv(d, nums, ss)
+    except Exception as e:
+        det_errors.append(f"{lbl}: {e}")
+        continue
+    for dk, dv in stats.items():
+        if dk.startswith("__"):
+            continue
+        det_series.setdefault(dk, {"info": dv, "rows": []})["rows"].append({"label": lbl, **dv})
+for e in det_errors:
+    st.error(f"検出点を計算できませんでした（{e}）")
+configured = any(v is True and k.startswith("wvol___global_") and k.endswith("_trend_on")
+                 for k, v in ss.items() if isinstance(k, str))
+if not det_series and configured:
+    st.warning("「傾向解析に出す」をオンにした検出点はありますが、どのデータでも検出できませんでした。"
+               "検出点の種類・閾値・検索範囲、変数ごとのサイクル開始信号を波形検査条件の画面で確認してください。")
+    if st.button("波形検査条件へ", key="_trend_to_wave_cfg"):
+        st.switch_page("views/wave.py")
+elif not det_series:
+    st.caption("波形検査条件の画面で検出点を追加し、「傾向解析に出す」をオンにすると、ここに時期ごとの変化が表示されます。")
+    if st.button("波形検査条件へ", key="_trend_to_wave"):
+        st.switch_page("views/wave.py")
+else:
+    st.caption("波形検査条件で「傾向解析に出す」をオンにした検出点の、時期ごとの平均 ± σ です。")
+    for dk, d in det_series.items():
+        info, rows = d["info"], d["rows"]
+        xs = [r["label"] for r in rows]
+        panels = [("t_mean", "t_std", info.get("x_label", "時刻 [ms]"))]
+        if not info.get("is_formula"):
+            panels.append(("v_mean", "v_std", info.get("y_label", "値")))
+        st.markdown(f"**{info.get('label', dk)}**")
+        cols = st.columns(len(panels))
+        for col, (mk, sk_, title) in zip(cols, panels):
+            fig = go.Figure(go.Scatter(
+                x=xs, y=[r[mk] for r in rows], mode="lines+markers",
+                error_y=dict(type="data", array=[r.get(sk_, 0) for r in rows], color="#8b949e", thickness=1),
+                marker=dict(size=9, color=REF_LINE), line=dict(color="#8b949e"), showlegend=False,
+                hovertemplate="%{x}<br>%{y:.2f}<extra></extra>"))
+            fig.update_layout(height=240, margin=dict(l=0, r=8, t=10, b=40), yaxis_title=title)
+            col.plotly_chart(fig, width="stretch", config={"displayModeBar": False}, key=f"_trend_det_{dk}_{mk}")
+

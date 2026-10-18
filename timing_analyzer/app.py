@@ -2,16 +2,20 @@
 app.py — APB タイミング解析 エントリーポイント（画面遷移の定義）
 
 利用者の仕事を「準備」（立ち上げ時に 1 回）と「点検」（定期）に分けてメニューを構成する。
-旧画面（legacy_app.py）は新画面への置き換えが終わるまで「移行中」に残す。
 """
 import streamlit as st
 
 from core.state import enable_session_persistence, ensure_session
 from core.ui import apply_theme
+from core.wave_inspect import _wi_restore_config
 
 st.set_page_config(page_title="APB タイミング解析", page_icon=":material/timeline:", layout="wide")
 enable_session_persistence()
 ensure_session()
+# 波形検査の検出条件（前回の自動保存）を最初に復元する。推移画面からも使うため波形検査条件の画面を待たない
+if "wi_config_loaded" not in st.session_state:
+    _wi_restore_config(st.session_state)
+    st.session_state["wi_config_loaded"] = True
 
 nav = st.navigation({
     "": [
@@ -37,12 +41,6 @@ nav = st.navigation({
                 url_path="assistant"),
         st.Page("pages/0_このツールについて.py", title="使い方", icon=":material/help:",
                 url_path="about"),
-    ],
-    "移行中": [
-        st.Page("legacy_app.py", title="旧画面", icon=":material/history:", url_path="legacy"),
-        # 旧画面のガントをダブルクリックすると別タブで開く（/histogram?proc=…）
-        st.Page("pages/5_histogram.py", title="ヒストグラム詳細", url_path="histogram",
-                visibility="hidden"),
     ],
 })
 apply_theme()

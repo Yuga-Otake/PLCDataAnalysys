@@ -3,7 +3,7 @@ core/data.py — 読み込んだ CSV（csv_store）と設定ファイルの管�
 
 csv_store の 1 件:
   {"df", "col_types", "label", "is_ref", "source"}
-  source: なし=旧画面のアップロード・サンプル ／ "upload"=データ画面 ／ "folder"=フォルダ読み込み
+  source: なし=サンプル ／ "upload"=データ画面 ／ "folder"=フォルダ読み込み
 """
 import glob
 import json

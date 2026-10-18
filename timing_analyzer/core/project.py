@@ -2,7 +2,7 @@
 core/project.py — 設定ファイル（プロジェクト JSON）の書き出し
 
 工程・ステップ・基準値・波形検出条件をまとめて 1 つの JSON にする。
-読み込み側は legacy_app._apply_settings_json（段階 2 でデータ画面へ移設予定）。
+読み込み側は core.data.apply_settings_json。
 """
 import json
 from datetime import datetime

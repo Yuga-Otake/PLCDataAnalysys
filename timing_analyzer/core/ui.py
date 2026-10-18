@@ -10,8 +10,6 @@ import html
 import pandas as pd
 import streamlit as st
 
-LEGACY_PAGE = "legacy_app.py"
-
 _PALETTE = {
     "light": {
         "accent": "#1f6feb", "accent-ink": "#0b4fb3", "accent-pale": "#ddebff",
@@ -104,39 +102,6 @@ def stepper(stages: list, done: dict, current: str | None):
         items.append(f"<span class='s {cls}'>{i}. {html.escape(label)}{tail}</span>")
     st.markdown("<div class='apb-steps'>" + "<span class='sep'>―</span>".join(items) + "</div>",
                 unsafe_allow_html=True)
-
-
-def open_legacy(view_mode: str | None = None, tab: str | None = None,
-                wizard_for: str | None = None, dialog: tuple | None = None):
-    """旧画面を指定の状態で開く（段階 2・3 で新画面に置き換わるまでの橋渡し）。
-
-    dialog: ("add_process",) または ("bulk_baseline", 工程名)
-    """
-    ss = st.session_state
-    if view_mode:
-        ss["view_mode"] = view_mode
-    if tab:
-        ss["main_tab"] = tab
-    if wizard_for:
-        ss["wizard_step"] = 1
-        ss["wizard_pname"] = wizard_for
-    if dialog:
-        ss["_legacy_open"] = dialog
-    st.switch_page(LEGACY_PAGE)
-
-
-def planned_page(title: str, lead: str, will_have: list, legacy_where: str,
-                 legacy_kwargs: dict, eyebrow: str):
-    """段階 2 以降で作る画面の仮ページ。目的と、今どこで操作できるかを示す。"""
-    page_header(title, lead, eyebrow=eyebrow)
-    with st.container(border=True):
-        st.markdown(f"{chip('移行中', 'blue')}　この画面は次の段階で作成します。", unsafe_allow_html=True)
-        st.markdown("**この画面でできるようになること**")
-        st.markdown("\n".join(f"- {w}" for w in will_have))
-        st.markdown(f"現在は **旧画面の「{legacy_where}」** で同じ操作ができます。")
-        if st.button("旧画面で開く", type="primary", key=f"_legacy_go_{title}",
-                     icon=":material/open_in_new:"):
-            open_legacy(**legacy_kwargs)
 
 
 # ── 点検画面の共通部品 ───────────────────────────────────────

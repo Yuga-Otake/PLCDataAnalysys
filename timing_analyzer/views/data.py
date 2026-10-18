@@ -56,7 +56,7 @@ with st.container(border=True):
     with up_col:
         ref_up = st.file_uploader("基準データを読み込む（CSV）", type=["csv"], key="_data_ref_up")
     with sample_col:
-        # key を付けない: 旧画面側の切り替えとずれないよう、毎回 use_sample の値から表示する
+        # key を付けない: 他の画面での切り替えとずれないよう、毎回 use_sample の値から表示する
         use_sample = st.toggle("サンプルデータを使う", value=ss.get("use_sample", True),
                                help="オフにすると、サンプルの基準データ・比較データを取り除きます")
     if use_sample != ss.get("use_sample", True):
@@ -104,7 +104,7 @@ with st.container(border=True):
             info = df_summary(e)
             rows.append({"外す": False, "ラベル": e["label"], "ファイル": k.replace("\\", "/").split("/")[-1],
                          "行数": info["rows"], "期間": info["period"],
-                         "読み込み元": {"folder": "フォルダ", "upload": "アップロード"}.get(e.get("source"), "サンプル・旧画面")})
+                         "読み込み元": {"folder": "フォルダ", "upload": "アップロード"}.get(e.get("source"), "サンプル")})
         edited = st.data_editor(
             pd.DataFrame(rows), hide_index=True, width="stretch", key=f"_data_cmp_table_{len(cmp)}",
             disabled=["ファイル", "行数", "期間", "読み込み元"],

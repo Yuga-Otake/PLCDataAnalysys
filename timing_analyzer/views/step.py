@@ -7,11 +7,12 @@ views/step.py — ステップ詳細（メニューには出さない掘り下�
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
-from analyzer import get_cycle_waveforms
+from analyzer import get_cycle_waveforms, normalize_bool_series
 from core.analysis import MODE_LABELS, cycle_starts, describe_step
-from core.evaluate import STATUS, compare_keys_by_time, evaluate_process, judge_step, rule, step_series
+from core.evaluate import STATUS, compare_keys_by_time, evaluate_process, rule
 from core.state import pk
 from core.ui import REF_LINE, STATUS_COLOR, chip, page_header, rule_popover, tolerance_band
 
@@ -180,6 +181,48 @@ if wv:
                           xaxis_title="サイクル開始からの時間 [ms]", yaxis_title=var)
         st.plotly_chart(fig, width="stretch", config={"displayModeBar": False}, key=f"_step_wave_{var}")
     st.caption("赤い線が NG のサイクルです。")
+
+# ── 元の信号（時系列）─────────────────────────────────────────
+with st.expander("元の信号（時系列）を見る"):
+    df_t = store[target]["df"]
+    trig = ss.get(pk(pname, "trigger"))
+    starts_t = cycle_starts(df_t, trig, ss.get(pk(pname, "edge"), "RISE"))
+    if len(starts_t) < 1:
+        st.caption("サイクルを検出できません。")
+    else:
+        step_vars = [v for v in (trig, step.get("variable"), step.get("start_var"), step.get("end_var"))
+                     if v and v in df_t.columns and store[target]["col_types"].get(v) == "bool"]
+        num_opts = [c for c, t in store[target]["col_types"].items() if t == "numeric"]
+        ng_list = sorted(series.loc[ng, "サイクル#"].astype(int))
+        first = max(1, (ng_list[0] - 1) if ng_list else 1)
+        n_cyc = len(starts_t)
+        t1, t2 = st.columns([2, 3])
+        rng = t1.slider("表示するサイクル", 1, n_cyc, (first, min(n_cyc, first + 4)),
+                        key=f"_step_ts_rng_{pname}_{sname}_{target}")
+        extra = t2.multiselect("一緒に表示するアナログ変数", num_opts, placeholder="なし",
+                               default=[v for v in step.get("waveform_vars", []) if v in num_opts],
+                               key=f"_step_ts_num_{pname}_{sname}")
+        a_idx = starts_t[rng[0] - 1]
+        b_idx = starts_t[rng[1]] if rng[1] < n_cyc else df_t.index[-1]
+        win = df_t.loc[a_idx:b_idx]
+        fig = make_subplots(rows=len(step_vars) + (1 if extra else 0), cols=1, shared_xaxes=True,
+                            vertical_spacing=0.04)
+        for i, v in enumerate(step_vars, start=1):
+            fig.add_trace(go.Scatter(x=win["Timestamp"], y=normalize_bool_series(win[v]), mode="lines",
+                                     line=dict(width=1.2, shape="hv", color=REF_LINE), fill="tozeroy",
+                                     name=v, showlegend=False), row=i, col=1)
+            fig.update_yaxes(title_text=v, title_font=dict(size=10), tickvals=[0, 1], row=i, col=1)
+        for v in extra:
+            fig.add_trace(go.Scatter(x=win["Timestamp"], y=win[v], mode="lines", name=v,
+                                     line=dict(width=1)), row=len(step_vars) + 1, col=1)
+        for c in range(rng[0], rng[1] + 1):
+            ts = df_t.loc[starts_t[c - 1], "Timestamp"]
+            fig.add_vline(x=ts, line_width=0.8, line_dash="dash",
+                          line_color=STATUS_COLOR["ng"] if c in ng_list else "#8b949e")
+        fig.update_layout(height=110 * len(step_vars) + (200 if extra else 0) + 60,
+                          margin=dict(l=0, r=8, t=10, b=30), legend=dict(orientation="h", y=-0.15))
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False}, key="_step_ts")
+        st.caption("縦の破線がサイクルの開始です（赤は NG のサイクル）。")
 
 # ── サイクル一覧 ─────────────────────────────────────────────
 st.markdown("**サイクル一覧**")

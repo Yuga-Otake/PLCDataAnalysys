@@ -234,7 +234,7 @@ def compute_baseline(dfs: list, trigger_col: str, edge: str, steps: list, method
     """複数データからステップごとの基準値を算出する。
 
     method: "mean"（平均）/ "min"（最小）
-    返り値: (baseline dict, サイクル数)。baseline は旧画面と同じ形式
+    返り値: (baseline dict, サイクル数)。baseline は設定ファイルと同じ形式
       時刻ステップ:  {"mode", "ref_ms", "std_ms"}
       期間ステップ:  {"mode", "ref_start_ms", "ref_dur_ms", "std_start_ms", "std_dur_ms"}
     """
