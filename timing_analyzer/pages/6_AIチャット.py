@@ -30,11 +30,6 @@ st.set_page_config(
     layout="wide",
 )
 
-st.markdown(
-    '<style>[data-testid="stSidebarNav"] { display: none !important; }</style>',
-    unsafe_allow_html=True,
-)
-
 # ── ページ先頭でナビゲーション処理 ──────────────────────────────────────────
 # st.switch_page() はウィジェット外で呼ぶ必要があるため、
 # execute_tool() が _ai_nav_target にセットした値をここで処理する
@@ -46,9 +41,6 @@ api_key = get_api_key()
 
 # ── サイドバー ───────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.page_link("app.py", label="← メイン画面に戻る")
-    st.divider()
-
     with st.expander("🔑 Google API キー設定", expanded=not bool(api_key)):
         st.text_input(
             "API Key",

@@ -20,12 +20,6 @@ from analyzer import (
 
 st.set_page_config(page_title="ロガー設定ナビ", page_icon="📋", layout="wide")
 
-st.markdown("""
-<style>
-[data-testid="stSidebarNav"] { display: none !important; }
-</style>
-""", unsafe_allow_html=True)
-
 # ── APB 標準サンプリング周期 [ms] ────────────────────────────────
 APB_STANDARD_MS = [1, 2, 5, 10, 20, 50, 100]
 

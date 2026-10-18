@@ -5,3 +5,40 @@ port = 8501
 
 [browser]
 gatherUsageStats = false
+
+[theme]
+# ライト: 青と灰色のシンプルな配色 ／ ダーク: Sysmac Studio 風（右上メニュー Settings で切替、既定は OS に追従）
+baseRadius = "4px"
+baseFontSize = 14
+showWidgetBorder = true
+font = "\"Segoe UI\", \"Yu Gothic UI\", Meiryo, \"Hiragino Kaku Gothic ProN\", \"Noto Sans JP\", sans-serif"
+headingFont = "\"Segoe UI\", \"Yu Gothic UI\", Meiryo, \"Hiragino Kaku Gothic ProN\", \"Noto Sans JP\", sans-serif"
+codeFont = "Consolas, \"Cascadia Mono\", ui-monospace, monospace"
+
+[theme.light]
+primaryColor = "#1f6feb"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f1f3f5"
+textColor = "#1f2328"
+linkColor = "#1f6feb"
+borderColor = "#d0d7de"
+chartCategoricalColors = ["#1f6feb", "#8c959f", "#54aeff", "#57606a", "#0a3069", "#bf8700", "#1a7f37", "#cf222e"]
+
+[theme.light.sidebar]
+backgroundColor = "#f6f8fa"
+secondaryBackgroundColor = "#ffffff"
+borderColor = "#d0d7de"
+
+[theme.dark]
+primaryColor = "#007acc"
+backgroundColor = "#1e1e1e"
+secondaryBackgroundColor = "#2d2d30"
+textColor = "#e6e6e6"
+linkColor = "#4fa3ff"
+borderColor = "#3f3f46"
+chartCategoricalColors = ["#4fa3ff", "#9da5b4", "#2bb3ff", "#c8c8c8", "#d7ba7d", "#4ec9b0", "#f48771", "#b180d7"]
+
+[theme.dark.sidebar]
+backgroundColor = "#252526"
+secondaryBackgroundColor = "#333337"
+borderColor = "#3f3f46"

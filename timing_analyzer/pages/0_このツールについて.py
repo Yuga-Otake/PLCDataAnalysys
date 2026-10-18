@@ -1,325 +1,145 @@
 """
-0_このツールについて.py — ヘルプ・概要説明ページ（日英対応）
+0_このツールについて.py — 使い方（ツールの目的・画面の構成・進め方・判定ルール・用語、日英対応）
 """
-
+import pandas as pd
 import streamlit as st
 
-st.set_page_config(
-    page_title="このツールについて | About This Tool",
-    page_icon="ℹ️",
-    layout="wide",
-)
+from core.evaluate import rule_text
+from core.ui import page_header
 
-st.markdown("""
-<style>
-[data-testid="stSidebarNav"] { display: none !important; }
-</style>
-""", unsafe_allow_html=True)
-
-# ── 言語切り替え ─────────────────────────────────────────────────
-lang = st.radio(
-    "言語 / Language",
-    ["🇯🇵 日本語", "🇬🇧 English"],
-    horizontal=True,
-    key="help_lang",
-    label_visibility="collapsed",
-)
-JP = (lang == "🇯🇵 日本語")
-
-# ═══════════════════════════════════════════════════════════════
-# コンテンツ定義（日本語 / English）
-# ═══════════════════════════════════════════════════════════════
+lang = st.segmented_control("言語 / Language", ["日本語", "English"], default="日本語",
+                            key="help_lang", label_visibility="collapsed")
+JP = lang != "English"
 
 if JP:
-    st.title("ℹ️ このツールについて")
-    st.caption("APB タイミング解析ツール — APBの補助ツール｜立ち上げタクト短縮・予兆保全を支援")
+    page_header(
+        "使い方",
+        "APB（Automation PlayBack）が記録した PLC の CSV から、設備の各動作がサイクル開始から何 ms 後に"
+        "起きたかを測り、立ち上げ時（正常）と今を比べて、遅れやばらつきを見つけるツールです。",
+        eyebrow="ツール",
+    )
 else:
-    st.title("ℹ️ About This Tool")
-    st.caption("APB Timing Analyzer — APB Companion Tool | Supporting Takt Reduction & Predictive Maintenance")
+    page_header(
+        "How to Use",
+        "This tool measures, from APB (Automation PlayBack) CSV logs, how many milliseconds after each cycle start "
+        "every machine action happens, and compares the current state with the startup (normal) state to find "
+        "delays and growing variation.",
+        eyebrow="Tools",
+    )
 
-st.divider()
+# ── 2 つの仕事 ───────────────────────────────────────────────
+st.subheader("準備と点検" if JP else "Setup and Inspection", anchor=False)
+c1, c2 = st.columns(2)
+with c1.container(border=True):
+    if JP:
+        st.markdown("**準備**（設備の立ち上げ時に 1 回）\n\n"
+                    "1. データ — 正常に動いていたときの CSV を基準データとして読み込む\n"
+                    "2. 工程とステップ — サイクル開始信号を選び、時間を測りたい動作をステップとして選ぶ\n"
+                    "3. 基準値 — 正常時の各ステップのタイミングを基準値として登録する\n"
+                    "4. 設定の保存 — 工程・ステップ・基準値を設定ファイル（JSON）に保存する")
+    else:
+        st.markdown("**Setup** (once, at machine startup)\n\n"
+                    "1. Data — load a CSV recorded while the machine ran normally as the reference data\n"
+                    "2. Processes & Steps — choose the cycle-start signal and the actions to time as steps\n"
+                    "3. Baseline — register the normal timing of each step\n"
+                    "4. Save settings — save processes, steps and baselines to a settings file (JSON)")
+with c2.container(border=True):
+    if JP:
+        st.markdown("**点検**（定期的に）\n\n"
+                    "1. データ — 設定ファイルを読み込み、点検したい時期の CSV を比較データとして追加する\n"
+                    "2. 最新データの評価 — 基準値から外れた工程・ステップを確認する\n"
+                    "3. ステップ詳細 — 気になるステップの分布・サイクルごとの値・波形を見る\n"
+                    "4. 推移・工程能力 — いつから悪化したか、規格に対する余裕はどれだけかを見る")
+    else:
+        st.markdown("**Inspection** (periodically)\n\n"
+                    "1. Data — load the settings file and add CSVs from the period to inspect\n"
+                    "2. Evaluate latest data — see which processes and steps left the baseline\n"
+                    "3. Step detail — check the distribution, per-cycle values and waveforms\n"
+                    "4. Trend / Capability — see since when it degraded and how much margin remains")
+st.caption("ホームの「準備の進み具合」に、次にやることが表示されます。" if JP
+           else "The Home page shows the next thing to do under “Setup progress”.")
 
-# ── セクション 1: APB とは ────────────────────────────────────
+# ── 画面の構成 ───────────────────────────────────────────────
+st.subheader("画面の構成" if JP else "Screens", anchor=False)
 if JP:
-    st.subheader("🔁 APB（Automation PlayBack）とは")
-    st.markdown("""
-APB（**Automation PlayBack**）は、PLCが制御する生産設備の **全変数データを一定期間にわたって記録・再生できる機能**です。
-もともとは**設備の不具合発生時に「何が起きていたか」を事後分析するための原因究明ツール**として開発されました。
-
-- 設備が動作している間、数万に及ぶ内部変数（センサ値・フラグ・タイマー値など）を **ms 単位でログ取得**
-- 取得したCSVデータをもとに、設備の動作を時系列で振り返ることができる
-- 不具合発生時の「何が起きていたか」を事後に詳細解析できる
-""")
-    st.info("""
-**📌 このツールはAPBの補助ツールです**
-
-APBが持つ「**設備の全データを網羅的に取得する**」という能力に注目し、原因分析という本来用途を超えた新たな価値を引き出します。
-
-→ **立ち上げ時のタクトタイムを基準として記録し、現状との差分を可視化**することで、問題の予兆を早期に発見。
-→ ベテランの経験や勘に頼らず、**データドリブンな予兆保全・メンテナンス判断**を実現します。
-""")
+    rows = [
+        ("", "ホーム", "準備の進み具合、次にやること、工程の一覧、最新データの判定"),
+        ("準備", "データ", "基準データ・比較データの読み込み、設定ファイルの保存・読み込み、フォルダ読み込み"),
+        ("準備", "工程とステップ", "サイクル開始信号・タクト目標、ステップ候補の自動検出、ステップの編集、タイミング図"),
+        ("準備", "基準値", "基準にするデータを選んで基準値を算出・登録、登録値の修正"),
+        ("準備", "波形検査条件", "アナログ波形の検出点・良品範囲の設定（詳細設定）"),
+        ("点検", "最新データの評価", "工程ごとの状態、ステップの判定表、基準と今回のタイミング比較"),
+        ("点検", "推移", "全ステップ×時期のヒートマップ、ステップの推移と管理図、波形検査の検出点の推移"),
+        ("点検", "工程能力", "許容幅に対する Cpk、タクト目標に対する工程能力、良品条件の一覧"),
+        ("ツール", "ロガー設定ナビ", "どの変数を何 ms 周期で記録すればよいかの提案"),
+        ("ツール", "AI アシスタント", "解析結果についての質問、画面の切り替え"),
+    ]
+    st.dataframe(pd.DataFrame(rows, columns=["メニュー", "画面", "できること"]), hide_index=True, width="stretch")
 else:
-    st.subheader("🔁 What is APB (Automation PlayBack)?")
-    st.markdown("""
-APB (**Automation PlayBack**) is a function that **records and replays all PLC variable data over a defined time period** for production equipment under PLC control.
-It was originally developed as a **fault cause analysis tool** — to investigate "what was happening" when equipment failures occurred.
+    rows = [
+        ("", "Home", "Setup progress, next step, process list, verdict for the latest data"),
+        ("Setup", "Data", "Load reference/comparison CSVs, save/load settings, folder import"),
+        ("Setup", "Processes & Steps", "Cycle-start signal and takt target, step candidates, editing, timing chart"),
+        ("Setup", "Baseline", "Compute and register baselines from chosen data, edit registered values"),
+        ("Setup", "Waveform inspection", "Detection points and good ranges on analog waveforms (advanced)"),
+        ("Inspection", "Evaluate latest data", "Status per process, step verdict table, baseline vs. current timing"),
+        ("Inspection", "Trend", "Step × period heatmap, step trend and control chart, detection-point trend"),
+        ("Inspection", "Capability", "Cpk against the tolerance and against the takt target, baseline list"),
+        ("Tools", "Logger setup navigator", "Suggests which variables to log and at what interval"),
+        ("Tools", "AI assistant", "Questions about the results, switching screens"),
+    ]
+    st.dataframe(pd.DataFrame(rows, columns=["Menu", "Screen", "What you can do"]), hide_index=True, width="stretch")
 
-- While equipment is running, tens of thousands of internal variables (sensor values, flags, timer values, etc.) are **logged at millisecond resolution**
-- The collected CSV data enables time-series review of equipment operation
-- Post-incident deep analysis of "what was happening" during a fault becomes possible
-""")
-    st.info("""
-**📌 This tool is an APB companion tool**
-
-It leverages APB's core capability — **comprehensive capture of all equipment variables** — and re-builds new value beyond its original fault-analysis purpose.
-
-→ **Records takt time at initial equipment startup as a baseline, then visualizes deviations over time** to detect early signs of degradation.
-→ Enables **data-driven predictive maintenance decisions** without relying on veteran expertise or intuition.
-""")
-
-st.divider()
-
-# ── セクション 2: 背景・課題 ──────────────────────────────────
+# ── 判定ルール ───────────────────────────────────────────────
+st.subheader("判定ルール" if JP else "Verdict rule", anchor=False)
 if JP:
-    st.subheader("⚠️ このツールが生まれた背景")
-    st.markdown("""
-APBはすでに現場に導入されており、設備の**全変数データを取得し続けている**。
-しかしそのデータは「不具合が起きたときだけ見る」という使われ方に留まっていた。
-
-> 「せっかく全データが揃っているのに、不具合対応にしか使っていないのはもったいない」
-
-この発想から、APBデータを**立ち上げタクト短縮・予兆保全**という新しい目的に再活用するツールが生まれました。
-""")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.markdown("""
-**このツールを使う前の現場では...**
-
-- 🔴 **不具合が起きてから初めて気づく**
-  → 生産停止・品質問題が表面化してから対処
-- 🔴 **じわじわ進む性能劣化に気づかない**
-  → タクトタイムのわずかな悪化、動作遅延の蓄積
-- 🔴 **原因究明に時間と経験が必要**
-  → ベテラン技術者でないとデータを読めない
-- 🔴 **設備立ち上げ時との比較ができない**
-  → 「最初はどうだったか」という基準がない
-""")
-    with col_b:
-        st.markdown("""
-**このツール（APBの補助）を使うと...**
-
-- 🟢 **立ち上げ時との差分を定量的に可視化**
-  → 「いつから」「どのステップが」遅くなったかわかる
-- 🟢 **問題が顕在化する前に予兆を検知**
-  → NG 判定・σ逸脱で異常を早期発見
-- 🟢 **データを見るだけで根拠ある判断が可能**
-  → 経験に頼らず誰でも分析できる
-- 🟢 **メンテナンスのタイミングを根拠をもって決定**
-  → 「そろそろ調整が必要」を数値で説明できる
-""")
+    st.markdown(rule_text())
+    st.caption("各点検画面の「判定ルール」ボタンで、σ の倍数・最小許容幅・異常とする NG率を変更できます。")
 else:
-    st.subheader("⚠️ Background: Why This Tool Was Created")
-    st.markdown("""
-APB is already deployed on the shop floor, continuously capturing **all equipment variable data**.
-Yet that data was only ever used reactively — looked at only after a fault occurred.
+    st.markdown("Tolerance = baseline ± max(N·σ, minimum width) (default N = 3, minimum 2 ms). "
+                "Cycles outside the tolerance are NG; an NG rate of 10% or more is *Abnormal*, at least one NG "
+                "cycle is *Caution*. Event steps are judged by their time, period steps by their length. "
+                "With few baseline cycles, σ is estimated generously (95% upper confidence bound).")
+    st.caption("The thresholds can be changed with the “判定ルール” button on each inspection screen.")
 
-> "We have all this data available, but we're only using it when something breaks — that's a waste."
-
-From that insight, this tool was created to **re-purpose APB data** for a new goal: reducing startup takt time and enabling predictive maintenance.
-""")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.markdown("""
-**Before this tool, the shop floor faced...**
-
-- 🔴 **Problems only noticed after they occur**
-  → Production stops and quality issues before any action
-- 🔴 **Gradual performance degradation goes undetected**
-  → Slow accumulation of takt time increases and motion delays
-- 🔴 **Root cause analysis requires time and expertise**
-  → Only experienced engineers can interpret the data
-- 🔴 **No baseline for comparison with initial setup**
-  → "How was it when we first started?" has no answer
-""")
-    with col_b:
-        st.markdown("""
-**With this tool (APB companion)...**
-
-- 🟢 **Quantitative visualization of deviation from baseline**
-  → See "since when" and "which step" slowed down
-- 🟢 **Detect early signs before problems become critical**
-  → NG judgment and σ-deviation catch anomalies early
-- 🟢 **Data-driven decisions without relying on experience**
-  → Anyone can analyze — no expert required
-- 🟢 **Maintenance timing backed by evidence**
-  → "Adjustment needed soon" explained with numbers
-""")
-
-st.divider()
-
-# ── セクション 3: 対象ユーザー・適用現場 ────────────────────────
+# ── 用語 ─────────────────────────────────────────────────────
+st.subheader("用語" if JP else "Terms", anchor=False)
 if JP:
-    st.subheader("🏭 対象ユーザーと適用現場")
-
-    u1, u2, u3 = st.columns(3)
-    with u1:
-        st.markdown("""
-**👷 保全担当者**
-- 設備の定期点検・予防保全に活用
-- 「どこを調整すべきか」をデータで判断
-- ロガー設定ナビで変数取得設計も支援
-""")
-    with u2:
-        st.markdown("""
-**🔧 生産技術者**
-- 設備立ち上げ時の基準値を登録・管理
-- 工程ごとのタクトタイム分析・改善
-- 傾向解析で経時変化を追跡
-""")
-    with u3:
-        st.markdown("""
-**🏭 適用現場の例**
-- 自動車部品の組立ライン
-- 食品・飲料の充填・包装ライン
-- 電子部品の実装・検査ライン
-- その他 PLC 制御の自動化設備全般
-""")
-else:
-    st.subheader("🏭 Target Users & Applications")
-
-    u1, u2, u3 = st.columns(3)
-    with u1:
-        st.markdown("""
-**👷 Maintenance Staff**
-- Apply to scheduled inspections and preventive maintenance
-- Data-driven decisions on "what needs adjustment"
-- Logger Setup Navigator assists with variable selection
-""")
-    with u2:
-        st.markdown("""
-**🔧 Production Engineers**
-- Register and manage baseline values at equipment setup
-- Takt time analysis and improvement per process
-- Track long-term trends with trend analysis
-""")
-    with u3:
-        st.markdown("""
-**🏭 Example Applications**
-- Automotive parts assembly lines
-- Food & beverage filling/packaging lines
-- Electronics assembly and inspection lines
-- Any PLC-controlled automated equipment
-""")
-
-st.divider()
-
-# ── セクション 4: 機能説明 ────────────────────────────────────
-if JP:
-    st.subheader("📐 主な機能")
-else:
-    st.subheader("📐 Key Features")
-
-feat_cols = st.columns(2)
-
-if JP:
-    features = [
-        ("⚙️ 画面設定 — 工程・ステップ設定",
-         "解析する工程（ProA, ProB, ProC...）ごとに、どの変数を「ステップ」として計測するかを登録。"
-         "ガントチャートでサイクルごとのタイミングを可視化します。"),
-        ("📐 新データ評価 — 現状データの異常検知",
-         "立ち上げ時に登録した**基準値**と、現在取得した新しいCSVを比較。"
-         "各ステップの遅れ・ばらつきがσ判定でNG表示されます。"),
-        ("📈 傾向解析 — 複数時期の経時変化追跡",
-         "複数の時期のCSVをまとめてアップロードし、ステップ別の時系列トレンドをグラフ表示。"
-         "「いつから悪化し始めたか」を一目で確認できます。"),
-        ("📋 ロガー設定ナビ — データ取得設計支援",
-         "既存のAPBデータから「どの変数をロガーに登録すべきか」「サンプリング周期は何ms か」を自動提案。"
-         "保全担当者がデータ取得設計を経験なしに行えます。"),
-        ("💾 設定ファイル保存・読み込み",
-         "工程設定・ステップ・基準値をJSONとして保存。別の端末や次回起動時に即座に復元できます。"),
-        ("🎯 基準値登録",
-         "立ち上げ時の平均値・最小値・特定サイクル値を基準として登録。以降の評価・傾向解析の比較軸になります。"),
+    terms = [
+        ("工程", "1 サイクルのまとまり。サイクルの始まりを示す Bool 変数（サイクル開始信号）で区切ります。"),
+        ("ステップ", "工程の中で時間を測る動作。発生時刻を測る「時刻」と、長さを測る「ON期間」「開始〜終了」「数値条件」があります。"),
+        ("基準データ", "設備が正常に動いていたとき（立ち上げ時など）の CSV。2〜10 サイクルで工程・ステップを定義できますが、基準値には 10 サイクル以上を勧めます。"),
+        ("比較データ", "点検したい時期の CSV。時期の違うものを複数入れると推移を確認できます。"),
+        ("基準値", "正常時の各ステップのタイミング（平均）とばらつき（σ）。点検の比較の基準です。"),
+        ("許容幅", "基準値からどこまで離れてよいかの幅。外に出たサイクルを NG とします。"),
+        ("Cpk", "許容幅に対して、ばらつきと偏りを考えた余裕の大きさ。1.33 以上で十分、1.00 未満は不足です。"),
     ]
 else:
-    features = [
-        ("⚙️ Configuration — Process & Step Setup",
-         "Register which variables to measure as 'steps' for each process (ProA, ProB, ProC...). "
-         "Visualize per-cycle timing as Gantt charts."),
-        ("📐 New Data Evaluation — Anomaly Detection",
-         "Compare **baseline values** registered at equipment startup against newly acquired CSV data. "
-         "Each step's delay and variation is flagged as NG using σ judgment."),
-        ("📈 Trend Analysis — Long-term Change Tracking",
-         "Upload multiple CSVs from different time periods to display step-by-step time-series trends. "
-         "See at a glance 'when did it start degrading'."),
-        ("📋 Logger Setup Navigator — Data Acquisition Design",
-         "Automatically recommends 'which variables to register' and 'what sampling interval to use' "
-         "based on existing APB data. Enables maintenance staff to design data acquisition without expertise."),
-        ("💾 Settings Save & Load",
-         "Save process configurations, steps, and baseline values as JSON. "
-         "Instantly restore on a different device or next session."),
-        ("🎯 Baseline Registration",
-         "Register average, minimum, or specific cycle values at startup as baselines. "
-         "These become the reference for all subsequent evaluation and trend analysis."),
+    terms = [
+        ("Process", "One cycle unit, delimited by a Bool cycle-start signal."),
+        ("Step", "An action timed within a process: an event time, or a period (ON period, start–end, numeric condition)."),
+        ("Reference data", "A CSV recorded while the machine ran normally. 2–10 cycles suffice to define steps; 10+ are recommended for baselines."),
+        ("Comparison data", "CSVs from periods to inspect. Several periods give a trend."),
+        ("Baseline", "Normal timing (mean) and variation (σ) of each step — the reference for inspection."),
+        ("Tolerance", "How far a value may deviate from the baseline. Cycles outside are NG."),
+        ("Cpk", "Margin against the tolerance considering spread and offset. ≥1.33 is sufficient, <1.00 insufficient."),
     ]
+for t, d in terms:
+    st.markdown(f"**{t}** — {d}")
 
-for i, (title, desc) in enumerate(features):
-    with feat_cols[i % 2]:
-        with st.container(border=True):
-            st.markdown(f"**{title}**")
-            st.caption(desc)
-
-st.divider()
-
-# ── セクション 5: 使い方フロー ─────────────────────────────────
-if JP:
-    st.subheader("🗺️ 推奨ワークフロー")
-    st.markdown("""
-```
-① CSVをアップロード（またはサンプルデータを使用）
-        ↓
-② 工程を追加（+ 工程を追加）→ トリガー変数を選択
-        ↓
-③ ステップを追加（各工程に計測したい変数を登録）
-        ↓
-④ ガントチャートで現状のタイミングを確認
-        ↓
-⑤ 基準値を登録（設備立ち上げ時のデータで行うのが理想）
-        ↓
-⑥ 新データ評価 → 定期的に新しいCSVをアップロードして比較
-        ↓
-⑦ 傾向解析 → 複数時期のCSVで経時劣化をトラッキング
-        ↓
-⑧ 異常・傾向変化を検知したらメンテナンスへ
-```
-""")
-    st.info("💡 設定をJSONで保存しておくと、次回から⑥の評価だけで運用できます。")
-else:
-    st.subheader("🗺️ Recommended Workflow")
-    st.markdown("""
-```
-① Upload CSV (or use sample data)
-        ↓
-② Add a process (+ Add Process) → Select trigger variable
-        ↓
-③ Add steps (register variables to measure for each process)
-        ↓
-④ Review current timing via Gantt chart
-        ↓
-⑤ Register baseline (ideally using data from initial equipment setup)
-        ↓
-⑥ New Data Evaluation → Periodically upload new CSV and compare
-        ↓
-⑦ Trend Analysis → Track gradual degradation with multi-period CSVs
-        ↓
-⑧ When anomaly or trend change detected → trigger maintenance
-```
-""")
-    st.info("💡 Save settings as JSON so that future use only requires step ⑥ onward.")
-
-st.divider()
-
-# ── フッター ──────────────────────────────────────────────────
-if JP:
-    st.caption("© APB タイミング解析ツール　— 設備の健康管理をデータドリブンへ")
-else:
-    st.caption("© APB Timing Analyzer — Bringing data-driven health management to production equipment")
+# ── 背景 ─────────────────────────────────────────────────────
+with st.expander("このツールが生まれた背景" if JP else "Background"):
+    if JP:
+        st.markdown(
+            "APB は、PLC が制御する設備の全変数を ms 単位で記録・再生できる機能です。もともとは不具合が起きたときに"
+            "「何が起きていたか」を調べる原因究明ツールとして使われてきました。\n\n"
+            "せっかく全データが揃っているのに、不具合のときにしか見ないのはもったいない。そこで、立ち上げ時のタイミングを"
+            "基準として記録し、今との差を見える化することで、じわじわ進む性能劣化を問題になる前に見つけ、"
+            "経験や勘に頼らずにメンテナンスの時期を判断できるようにしたのがこのツールです。")
+    else:
+        st.markdown(
+            "APB records and replays every PLC variable at millisecond resolution. It has mainly been used after a "
+            "failure, to find out what happened.\n\n"
+            "Since all the data is already there, this tool reuses it: it records the startup timing as a baseline "
+            "and visualizes the difference from today, so gradual degradation is found before it becomes a problem "
+            "and maintenance timing can be decided from data rather than experience.")
