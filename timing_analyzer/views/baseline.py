@@ -8,10 +8,11 @@ import pandas as pd
 import streamlit as st
 
 from core.analysis import MODE_LABELS, baseline_meta, compute_baseline
-from core.profile import cycle_health
+from core.profile import cycle_health, wave_candidates
 from core.project import build_settings_json, mark_saved, settings_file_name
 from core.state import pk
 from core.ui import chip, page_header
+from core.wave_inspect import registered_points
 
 ss = st.session_state
 page_header(
@@ -174,6 +175,25 @@ with st.container(border=True):
 # ── 次へ ─────────────────────────────────────────────────────
 if current:
     st.divider()
+    # 基準値を登録したところで、この工程のアナログ波形にも検出点の候補があれば知らせる（任意の詳細設定）
+    ref = next((e for e in store.values() if e.get("is_ref")), None)
+    if ref:
+        procs = {n: {"trigger_col": ss.get(pk(n, "trigger"), ""), "edge": ss.get(pk(n, "edge"), "RISE")}
+                 for n in names}
+        hyp = {v: h for v, h in wave_candidates(ref, procs).items() if h["process"] == pname}
+        pending = [(v, c) for v, h in hyp.items() for c in h["cands"]
+                   if (c["dtype"], c["name"]) not in registered_points(v)]
+        if pending:
+            with st.container(border=True):
+                eg = "、".join(f"{v.split('.')[-1]} {c['name']}" for v, c in pending[:3])
+                st.markdown(
+                    f"<p class='apb-next-title'>アナログ波形も点検しますか（任意）</p>"
+                    f"<p class='apb-next-body'>「{pname}」にはアナログ波形が {len(hyp)} 本あり、"
+                    f"検出点の候補が {len(pending)} 件あります（{eg} など）。"
+                    "ピークの値や立ち上がりの時刻も推移で見たい場合は、候補から選んで登録できます。"
+                    "登録した検出点も設定ファイルに保存されます。</p>", unsafe_allow_html=True)
+                if st.button("波形検査の候補を見る", key="_bl_wave", icon=":material/show_chart:"):
+                    st.switch_page("views/wave.py")
     others = [n for n in names if not ss.get(pk(n, "baseline"))]
     n1, n2, _ = st.columns([1.2, 1.2, 2])
     n1.download_button("設定を保存", data=build_settings_json(), file_name=settings_file_name(),

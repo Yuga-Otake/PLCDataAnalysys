@@ -5,13 +5,16 @@ views/wave.py — 波形検査条件（準備の詳細設定）
 旧メイン画面の「波形検査」タブを移したもの。検査ロジックは core/wave_inspect.py（移設のみで内容は同一）。
 設定した検出点のうち「傾向解析に出す」をオンにしたものは、推移画面に表示される。
 """
+import pandas as pd
 import streamlit as st
 
-from core.state import ref_entry
+from core.profile import WAVE_POINT_TYPES, wave_candidates
+from core.state import pk, ref_entry
 from core.ui import page_header
 from core.wave_inspect import (_render_waveform_overlay, _wi_add_dialog, _wi_edit_dialog,
                                _wi_load_from_file, _wi_restore_config, _wi_save_config,
-                               _wi_save_to_file, cached_detect_cycles, set_columns)
+                               _wi_save_to_file, adopt_point, cached_detect_cycles,
+                               registered_points, set_columns)
 
 # 重ね表示の色（CSV ごと）
 _CMP_PALETTE = ["#3b82f6", "#f59e0b", "#10b981", "#ef4444", "#8b5cf6", "#ec4899", "#06b6d4", "#84cc16"]
@@ -47,6 +50,82 @@ col_types = store[data_key]["col_types"]
 bool_cols = [c for c, t in col_types.items() if t == "bool"]
 num_cols = [c for c, t in col_types.items() if t == "numeric"]
 set_columns(bool_cols, num_cols)
+for msg in ss.pop("_wave_msgs", []):
+    st.success(msg)
+
+
+# ── 検出点の候補（基準データの事前解析）────────────────────────────
+def _candidate_panel():
+    processes = {n: {"trigger_col": ss.get(pk(n, "trigger"), p.get("trigger_col", "")),
+                     "edge": ss.get(pk(n, "edge"), p.get("edge", "RISE"))}
+                 for n, p in ss.get("processes", {}).items()}
+    if not ref:
+        st.caption("基準データを読み込むと、波形の形から検出点の候補を出します。")
+        return
+    if not processes:
+        st.caption("工程を登録すると、そのサイクル開始信号を基準に、波形の形から検出点の候補を出します。")
+        if st.button("工程とステップへ", key="_wave_to_process"):
+            st.switch_page("views/process.py")
+        return
+    with st.spinner("基準データの波形を調べています…"):
+        hyp = wave_candidates(ref, processes)
+    rows, n_done = [], 0
+    for var, h in hyp.items():
+        done = registered_points(var)
+        for i, c in enumerate(h["cands"]):
+            if (c["dtype"], c["name"]) in done:
+                n_done += 1
+                continue
+            hint = "—" if pd.isna(c["t_ms"]) else f"{c['t_ms']:.0f} ms／{c['v']:.4g}"
+            rows.append({"採用": c["include"], "波形": h["spark"], "変数": var, "工程": h["process"],
+                         "形": h["shape"], "検出点タイプ": c["dtype"], "名前": c["name"], "目安": hint,
+                         "確からしさ": c["confidence"], "傾向解析に出す": True, "説明": c["note"],
+                         "_id": f"{var}|{i}"})
+    if not rows:
+        st.caption("候補はすべて登録済みです。" if n_done else
+                   "検出点の候補になるアナログ波形は見つかりませんでした（変化しない変数・状態番号は除いています）。")
+        return
+    st.caption("基準データのサイクルごとの波形の形から、検出点のタイプと設定値（しきい値など）を仮に決めたものです。"
+               "違うものはチェックを外し、タイプや名前を直してから登録してください。"
+               "登録後は下の一覧の ⚙️ で、波形を見ながら調整できます。"
+               + (f"（登録済みの {n_done} 件は除いています）" if n_done else ""))
+    df_rows = pd.DataFrame(rows)
+    edited = st.data_editor(
+        df_rows.drop(columns="_id"), hide_index=True, width="stretch",
+        key="_wave_cands_" + str(abs(hash(tuple(df_rows["_id"]))) % 10**8),
+        disabled=["波形", "変数", "工程", "形", "目安", "確からしさ", "説明"],
+        column_config={
+            "採用": st.column_config.CheckboxColumn(width="small"),
+            "波形": st.column_config.LineChartColumn("波形（平均）", width="small"),
+            "変数": st.column_config.TextColumn(width="medium"),
+            "工程": st.column_config.TextColumn(width="small"),
+            "形": st.column_config.TextColumn(width="small", help="山形・台形・谷形・くぼみ（サイクルごとの形の多数決）"),
+            "検出点タイプ": st.column_config.SelectboxColumn(options=WAVE_POINT_TYPES, required=True),
+            "目安": st.column_config.TextColumn("目安（時刻／値）", width="small",
+                                              help="基準データで検出した時刻と値の中央値"),
+            "確からしさ": st.column_config.TextColumn(
+                width="small", help="全サイクルで検出できた割合と、サイクル間の時刻のばらつきから決めています"),
+            "傾向解析に出す": st.column_config.CheckboxColumn("推移に出す", width="small"),
+        })
+    picked = edited[edited["採用"]]
+    if st.button(f"採用した {len(picked)} 件を検出点として登録", type="primary",
+                 disabled=picked.empty, key="_wave_adopt"):
+        for i, r in picked.iterrows():
+            var = df_rows.loc[i, "変数"]
+            h = hyp[var]
+            c = h["cands"][int(df_rows.loc[i, "_id"].split("|")[1])]
+            dtype = r["検出点タイプ"]
+            params = c["params"] if dtype == c["dtype"] else h["defaults"].get(dtype, {})
+            adopt_point(var, dtype, str(r["名前"] or "").strip(), params, h["trigger"], h["edge"],
+                        h["wpost"], bool(r["傾向解析に出す"]))
+        ss["_wave_msgs"] = [f"検出点を {len(picked)} 件登録しました。下の一覧で確認・調整できます。"]
+        st.rerun()
+
+
+_has_points = any(ss.get(f"wvol___global_{v}_t_det_list") or ss.get(f"wvol___global_{v}_xy_det_list")
+                  for v in num_cols)
+with st.expander("検出点の候補（基準データの事前解析）", expanded=not _has_points):
+    _candidate_panel()
 
 # ── ここから旧メイン画面の波形検査タブを移設（ロジックは変更なし）────────────
 
