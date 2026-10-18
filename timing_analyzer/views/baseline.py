@@ -197,11 +197,11 @@ if current:
                     st.switch_page("views/wave.py")
     others = [n for n in names if not ss.get(pk(n, "baseline"))]
     n1, n2, n3, _ = st.columns([1.3, 1.5, 1, 1.2])
-    n1.download_button("データごと保存", data=bundle_maker(False), file_name=bundle_file_name(),
+    n1.download_button("基準データ＋設定を保存", data=bundle_maker(), file_name=bundle_file_name(),
                        mime="application/zip", on_click=mark_saved, type="primary",
                        icon=":material/inventory_2:", key="_bl_dl_zip", width="stretch",
-                       help="基準データと設定を 1 つのファイル（ZIP）にまとめます。読み込めばデータごと元に戻ります")
-    n2.download_button("設定だけ保存（JSON）", data=build_settings_json(), file_name=settings_file_name(),
+                       help="基準データ（CSV）と設定ファイル（JSON）を 1 つの ZIP にまとめます。読み込めば両方元に戻ります")
+    n2.download_button("設定ファイルだけ保存（JSON）", data=build_settings_json(), file_name=settings_file_name(),
                        mime="application/json", on_click=mark_saved,
                        icon=":material/download:", key="_bl_dl", width="stretch")
     if n3.button("ホームへ戻る", key="_bl_home", width="stretch"):

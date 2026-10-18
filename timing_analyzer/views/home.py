@@ -73,13 +73,12 @@ with st.container(border=True):
             st.switch_page("views/baseline.py")
     elif cur == "save":
         text_col.markdown("<p class='apb-next-title'>設定を保存する</p>"
-                          "<p class='apb-next-body'>基準データと、工程・ステップ・基準値の設定を 1 つのファイル（ZIP）に"
-                          "まとめて保存します。次回からはこのファイルを読み込むだけで点検を始められます。"
-                          "設定だけ（JSON）を保存することもできます。</p>", unsafe_allow_html=True)
-        btn_col.download_button("データごと保存", data=bundle_maker(False), file_name=bundle_file_name(),
+                          "<p class='apb-next-body'>基準データ（CSV）と設定ファイル（工程・ステップ・基準値）を 1 つの ZIP に"
+                          "まとめて保存します。次回からはこのファイルを読み込むだけで点検を始められます。</p>", unsafe_allow_html=True)
+        btn_col.download_button("基準データ＋設定を保存", data=bundle_maker(), file_name=bundle_file_name(),
                                 mime="application/zip", type="primary", width="stretch",
                                 on_click=mark_saved, icon=":material/inventory_2:")
-        btn_col.download_button("設定だけ保存（JSON）", data=build_settings_json(), file_name=settings_file_name(),
+        btn_col.download_button("設定ファイルだけ保存（JSON）", data=build_settings_json(), file_name=settings_file_name(),
                                 mime="application/json", type="tertiary", width="stretch",
                                 on_click=mark_saved, icon=":material/download:")
     else:

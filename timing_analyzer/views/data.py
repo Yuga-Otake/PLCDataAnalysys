@@ -20,7 +20,7 @@ from core.ui import chip, page_header
 page_header(
     "データ",
     "設備が正常に動いていたときの基準データと、点検したい時期の比較データを読み込みます。"
-    "工程・ステップ・基準値は設定ファイルとして保存し、次回はそれを読み込むだけで再開できます。",
+    "基準データと設定（工程・ステップ・基準値）はプロジェクトファイル（ZIP）にまとめて保存でき、次回はそれを読み込むだけで再開できます。",
     eyebrow="準備",
 )
 ss = st.session_state
@@ -146,30 +146,26 @@ with st.container(border=True):
 
 # ── 保存・読み込み ───────────────────────────────────────────
 st.subheader("保存・読み込み", anchor=False)
-st.caption("設定ファイル（JSON）は工程・ステップ・基準値・波形検査条件だけ、"
-           "プロジェクトファイル（ZIP）は基準データ（必要なら比較データも）と設定をまとめた 1 つのファイルです。"
-           "プロジェクトファイルを読み込めば、データを探し直さずにそのまま点検を再開できます。")
+st.caption("プロジェクトファイル（ZIP）は、基準データ（CSV）と設定ファイル（JSON：工程・ステップ・基準値・波形検査条件）を"
+           "1 つにまとめたものです。これを読み込めば、点検したい時期の CSV を追加するだけで点検を再開できます。")
 with st.container(border=True):
     save_col, load_col = st.columns(2)
     with save_col:
         st.markdown("**保存**")
         if ss.get("processes"):
-            with_cmp = st.checkbox("比較データも含める", key="_data_bundle_cmp",
-                                   help="オフのときは基準データと設定だけを入れます（ファイルが小さくなります）")
-            b1, b2 = st.columns(2)
-            b1.download_button("データごと保存（ZIP）", data=bundle_maker(with_cmp), file_name=bundle_file_name(),
+            st.download_button("基準データ＋設定を保存（ZIP）", data=bundle_maker(), file_name=bundle_file_name(),
                                mime="application/zip", on_click=mark_saved, icon=":material/inventory_2:",
                                type="primary", key="_data_save_bundle", width="stretch")
-            b2.download_button("設定だけ保存（JSON）", data=build_settings_json(), file_name=settings_file_name(),
-                               mime="application/json", on_click=mark_saved, icon=":material/download:",
-                               key="_data_save_json", width="stretch")
+            st.download_button("設定ファイルだけ保存（JSON）", data=build_settings_json(),
+                               file_name=settings_file_name(), mime="application/json", on_click=mark_saved,
+                               icon=":material/download:", type="tertiary", key="_data_save_json")
         else:
             st.caption("工程を登録すると保存できます。")
     with load_col:
         st.markdown("**読み込み**")
         cfg_up = st.file_uploader("設定ファイル（JSON）またはプロジェクトファイル（ZIP）", type=["json", "zip"],
                                   key="_data_cfg_up", label_visibility="collapsed")
-        st.caption("プロジェクトファイルを読み込むと、今のデータと設定はすべて置き換わります。")
+        st.caption("プロジェクトファイルを読み込むと、基準データと設定が置き換わります（追加済みの比較データはそのまま）。")
         if cfg_up is not None and cfg_up.file_id != ss.get("_data_cfg_loaded"):
             try:
                 with st.spinner("読み込んでいます…"):
