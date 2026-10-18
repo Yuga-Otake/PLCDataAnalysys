@@ -12,6 +12,7 @@ from core.evaluate import STATUS, compare_keys_by_time, evaluate_process
 from core.project import build_settings_json, mark_saved, settings_file_name
 from core.state import STAGES, compare_keys, ref_entry, workflow
 from core.ui import chip, page_header, stepper
+from core.wave_inspect import inspection_points, process_defs
 
 page_header(
     "ホーム",
@@ -94,6 +95,9 @@ if not wf["rows"]:
     st.caption("工程はまだ登録されていません。")
 else:
     body = []
+    n_wave = {}
+    for it in inspection_points({n: (d["trigger"], d["edge"]) for n, d in process_defs().items()}):
+        n_wave[it["process"]] = n_wave.get(it["process"], 0) + 1
     for r in wf["rows"]:
         label, kind = _STATUS[r["status"]]
         edge = "立ち上がり" if r["edge"] == "RISE" else "立ち下がり"
@@ -101,15 +105,17 @@ else:
             f"<tr><td><b>{html.escape(r['name'])}</b></td>"
             f"<td>{html.escape(r['trigger'])}<span class='sub'>{edge}</span></td>"
             f"<td class='r apb-num opt'>{r['cycles']}</td><td class='r apb-num'>{r['steps']}</td>"
-            f"<td class='r apb-num opt'>{r['baseline']}</td><td>{chip(label, kind)}</td></tr>"
+            f"<td class='r apb-num opt'>{r['baseline']}</td>"
+            f"<td class='r apb-num'>{n_wave.get(r['name'], 0) or '−'}</td><td>{chip(label, kind)}</td></tr>"
         )
     st.markdown(
         "<div class='apb-scroll'><table class='apb-table'><thead><tr><th>工程</th><th>サイクル開始信号</th>"
         "<th class='r opt'>サイクル数</th><th class='r'>ステップ</th><th class='r opt'>基準値</th>"
+        "<th class='r'>波形検査点</th>"
         "<th>状態</th></tr></thead><tbody>" + "".join(body) + "</tbody></table></div>",
         unsafe_allow_html=True,
     )
-    st.caption("サイクル数は基準データで検出した数です。")
+    st.caption("サイクル数は基準データで検出した数です。波形検査点は、サイクル開始信号がその工程のものを数えています。")
 
 # ── 点検 ─────────────────────────────────────────────────────
 st.subheader("点検", anchor=False)
