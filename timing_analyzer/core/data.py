@@ -126,15 +126,20 @@ def apply_settings_json(loaded: dict) -> str:
             ss[k] = v
     ss["processes"] = new_procs
     ss["_expand_new"] = next(iter(new_procs), None)
-    n_glob = 0
     for k, v in loaded.get("global_det_conditions", {}).items():
         ss[k] = v
-        n_glob += 1
-    n_det = sum(len(p.get("det_conditions", {})) for p in loaded["processes"].values())
-    msg = f"設定を読み込みました（工程 {len(new_procs)} 件・波形検出条件 {n_det} 件"
-    if n_glob:
-        msg += f"・波形検査の独立条件 {n_glob} 件"
-    return msg + "）"
+    return "設定を読み込みました（" + settings_summary(loaded) + "）"
+
+
+def settings_summary(loaded: dict) -> str:
+    """設定の中身を人が読める数で要約する（工程・ステップ・基準値・波形検査点）"""
+    procs = loaded.get("processes", {})
+    n_steps = sum(len(p.get("steps", [])) for p in procs.values())
+    n_base = sum(1 for p in procs.values() if p.get("baseline"))
+    n_pts = sum(len(v) for k, v in loaded.get("global_det_conditions", {}).items()
+                if isinstance(v, list) and (k.endswith("_t_det_list") or k.endswith("_xy_det_list")))
+    txt = f"工程 {len(procs)}・ステップ {n_steps}・基準値 {n_base} 工程"
+    return txt + (f"・波形検査点 {n_pts}" if n_pts else "")
 
 
 # ═══════════════════════════════════════════════════════════════

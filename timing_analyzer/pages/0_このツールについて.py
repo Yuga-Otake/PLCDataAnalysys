@@ -36,23 +36,23 @@ with c1.container(border=True):
                     "1. データ — 正常に動いていたときの CSV を基準データとして読み込む\n"
                     "2. 工程とステップ — サイクル開始信号を選び、時間を測りたい動作をステップとして選ぶ\n"
                     "3. 基準値 — 正常時の各ステップのタイミングを基準値として登録する\n"
-                    "4. 設定の保存 — 工程・ステップ・基準値を設定ファイル（JSON）に保存する")
+                    "4. 保存 — 基準データと工程・ステップ・基準値をプロジェクトファイル（ZIP）にまとめて保存する（設定だけの JSON も可）")
     else:
         st.markdown("**Setup** (once, at machine startup)\n\n"
                     "1. Data — load a CSV recorded while the machine ran normally as the reference data\n"
                     "2. Processes & Steps — choose the cycle-start signal and the actions to time as steps\n"
                     "3. Baseline — register the normal timing of each step\n"
-                    "4. Save settings — save processes, steps and baselines to a settings file (JSON)")
+                    "4. Save — save the reference data together with processes, steps and baselines as a project file (ZIP; settings-only JSON also available)")
 with c2.container(border=True):
     if JP:
         st.markdown("**点検**（定期的に）\n\n"
-                    "1. データ — 設定ファイルを読み込み、点検したい時期の CSV を比較データとして追加する\n"
+                    "1. データ — プロジェクトファイル（または設定ファイル）を読み込み、点検したい時期の CSV を比較データとして追加する\n"
                     "2. 最新データの評価 — 基準値から外れた工程・ステップを確認する\n"
                     "3. ステップ詳細 — 気になるステップの分布・サイクルごとの値・波形を見る\n"
                     "4. 推移・工程能力 — いつから悪化したか、規格に対する余裕はどれだけかを見る")
     else:
         st.markdown("**Inspection** (periodically)\n\n"
-                    "1. Data — load the settings file and add CSVs from the period to inspect\n"
+                    "1. Data — load the project file (or settings file) and add CSVs from the period to inspect\n"
                     "2. Evaluate latest data — see which processes and steps left the baseline\n"
                     "3. Step detail — check the distribution, per-cycle values and waveforms\n"
                     "4. Trend / Capability — see since when it degraded and how much margin remains")

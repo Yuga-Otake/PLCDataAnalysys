@@ -9,6 +9,7 @@ import html
 import streamlit as st
 
 from core.evaluate import STATUS, compare_keys_by_time, evaluate_process
+from core.bundle import bundle_file_name, bundle_maker
 from core.project import build_settings_json, mark_saved, settings_file_name
 from core.state import STAGES, compare_keys, ref_entry, workflow
 from core.ui import chip, page_header, stepper
@@ -72,10 +73,13 @@ with st.container(border=True):
             st.switch_page("views/baseline.py")
     elif cur == "save":
         text_col.markdown("<p class='apb-next-title'>設定を保存する</p>"
-                          "<p class='apb-next-body'>工程・ステップ・基準値を設定ファイル（JSON）に保存します。"
-                          "次回からはこのファイルを読み込むだけで点検を始められます。</p>", unsafe_allow_html=True)
-        btn_col.download_button("設定を保存", data=build_settings_json(), file_name=settings_file_name(),
-                                mime="application/json", type="primary", width="stretch",
+                          "<p class='apb-next-body'>基準データ（CSV）と設定ファイル（工程・ステップ・基準値）を 1 つの ZIP に"
+                          "まとめて保存します。次回からはこのファイルを読み込むだけで点検を始められます。</p>", unsafe_allow_html=True)
+        btn_col.download_button("基準データ＋設定を保存", data=bundle_maker(), file_name=bundle_file_name(),
+                                mime="application/zip", type="primary", width="stretch",
+                                on_click=mark_saved, icon=":material/inventory_2:")
+        btn_col.download_button("設定ファイルだけ保存（JSON）", data=build_settings_json(), file_name=settings_file_name(),
+                                mime="application/json", type="tertiary", width="stretch",
                                 on_click=mark_saved, icon=":material/download:")
     else:
         text_col.markdown("<p class='apb-next-title'>準備は完了しています</p>"
