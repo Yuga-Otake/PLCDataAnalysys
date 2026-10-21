@@ -16,13 +16,13 @@ _PALETTE = {
         "accent": "#1f6feb", "accent-ink": "#0b4fb3", "accent-pale": "#ddebff",
         "ink": "#1f2328", "body": "#424a53", "label": "#6e7781", "hair": "#d0d7de", "band": "#f1f3f5",
         "ok": "#1a7f37", "ok-pale": "#dafbe1", "warn": "#9a6700", "warn-pale": "#fff1c5",
-        "ng": "#cf222e", "ng-pale": "#ffebe9", "gray-pale": "#eaeef2",
+        "ng": "#cf222e", "ng-pale": "#ffebe9", "gray-pale": "#eaeef2", "card": "#ffffff",
     },
     "dark": {
         "accent": "#3794ff", "accent-ink": "#6cb6ff", "accent-pale": "#0e3a5c",
         "ink": "#f1f1f1", "body": "#cccccc", "label": "#9d9d9d", "hair": "#3f3f46", "band": "#2d2d30",
         "ok": "#89d185", "ok-pale": "#1f3a1f", "warn": "#d7ba7d", "warn-pale": "#3d3420",
-        "ng": "#f48771", "ng-pale": "#4b2420", "gray-pale": "#333337",
+        "ng": "#f48771", "ng-pale": "#4b2420", "gray-pale": "#333337", "card": "#252526",
     },
 }
 

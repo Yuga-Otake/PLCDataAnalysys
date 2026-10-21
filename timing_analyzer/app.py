@@ -37,6 +37,7 @@ def _reload_updated_modules():
 _reload_updated_modules()
 
 from core.state import enable_session_persistence, ensure_session  # noqa: E402
+from core import tutorial  # noqa: E402
 from core.ui import apply_theme  # noqa: E402
 from core.wave_inspect import _wi_restore_config  # noqa: E402
 
@@ -70,9 +71,12 @@ nav = st.navigation({
                 url_path="logger"),
         st.Page("pages/6_AIチャット.py", title="AI アシスタント", icon=":material/chat:",
                 url_path="assistant"),
+        st.Page("views/tutorial.py", title="チュートリアル", icon=":material/school:", url_path="tutorial"),
         st.Page("pages/0_このツールについて.py", title="使い方", icon=":material/help:",
                 url_path="about"),
     ],
 })
 apply_theme()
+# チュートリアル中は、どの画面でも暗転・スポットライト・吹き出しで案内する
+tutorial.render(nav.url_path)
 nav.run()

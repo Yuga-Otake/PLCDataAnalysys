@@ -38,6 +38,16 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ── はじめての人へ（チュートリアルの案内）──────────────────────
+if not ss.get("tut_on") and not ss.get("processes"):
+    with st.container(border=True):
+        t1, t2 = st.columns([4, 1.3], vertical_alignment="center")
+        t1.markdown("<p class='apb-next-title'>はじめて使う方へ</p>"
+                    "<p class='apb-next-body'>練習データを使って、準備から点検までを実際の画面で操作しながら覚える"
+                    "チュートリアルがあります（15 分ほど）。</p>", unsafe_allow_html=True)
+        if t2.button("チュートリアル", icon=":material/school:", width="stretch", key="_home_tut"):
+            st.switch_page("views/tutorial.py")
+
 # ── 準備の進み具合 ───────────────────────────────────────────
 st.subheader("準備の進み具合", anchor=False)
 with st.container(border=True):
