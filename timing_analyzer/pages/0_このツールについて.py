@@ -58,6 +58,9 @@ with c2.container(border=True):
                     "4. Trend / Capability — see since when it degraded and how much margin remains")
 st.caption("ホームの「準備の進み具合」に、次にやることが表示されます。" if JP
            else "The Home page shows the next thing to do under “Setup progress”.")
+if st.button("チュートリアルで操作を覚える" if JP else "Learn by doing: tutorial (Japanese)",
+             icon=":material/school:", key="_help_tut"):
+    st.switch_page("views/tutorial.py")
 
 # ── 画面の構成 ───────────────────────────────────────────────
 st.subheader("画面の構成" if JP else "Screens", anchor=False)
@@ -72,6 +75,7 @@ if JP:
         ("点検", "推移", "全ステップ×時期のヒートマップ、ステップの推移と管理図、波形検査の検出点の推移"),
         ("点検", "工程能力", "許容幅に対する Cpk、タクト目標に対する工程能力、良品条件の一覧"),
         ("ツール", "ロガー設定ナビ", "どの変数を何 ms 周期で記録すればよいかの提案"),
+        ("ツール", "チュートリアル", "練習データで、準備から点検までを画面の案内に沿って操作する"),
         ("ツール", "AI アシスタント", "解析結果についての質問、画面の切り替え"),
     ]
     st.dataframe(pd.DataFrame(rows, columns=["メニュー", "画面", "できること"]), hide_index=True, width="stretch")
@@ -86,6 +90,7 @@ else:
         ("Inspection", "Trend", "Step × period heatmap, step trend and control chart, detection-point trend"),
         ("Inspection", "Capability", "Cpk against the tolerance and against the takt target, baseline list"),
         ("Tools", "Logger setup navigator", "Suggests which variables to log and at what interval"),
+        ("Tools", "Tutorial", "Hands-on guided walkthrough with practice data (Japanese)"),
         ("Tools", "AI assistant", "Questions about the results, switching screens"),
     ]
     st.dataframe(pd.DataFrame(rows, columns=["Menu", "Screen", "What you can do"]), hide_index=True, width="stretch")
