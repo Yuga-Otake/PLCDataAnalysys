@@ -69,6 +69,109 @@ def _sel(p: str) -> bool:
     return _ss().get("sel_process") == p
 
 
+# ── 設定した内容の説明（実際の値を使う）─────────────────────────
+
+def _ref_entry():
+    return next((e for e in _store().values() if e.get("is_ref")), None)
+
+
+def _sum_ref(ctx) -> str:
+    from core.profile import sampling_profile, variable_profile
+    e = _ref_entry()
+    if not e:
+        return "基準データを読み込みました。"
+    df = e["df"]
+    sp = sampling_profile(df)
+    kinds = variable_profile(df, tuple(e["col_types"].items()))["kind"].value_counts().to_dict()
+    return (f"<b>{e['label']}</b> を基準データとして読み込みました。<ul>"
+            f"<li>{len(df):,} 行・約 {sp['duration_s']:.0f} 秒分（{sp['message']}）</li>"
+            f"<li>変数 {sum(kinds.values())} 個：Bool（ON/OFF）{kinds.get('bool', 0)}・アナログ {kinds.get('analog', 0)}</li></ul>"
+            "照らしているのが、記録の質の診断結果です。記録の抜けや動いていない変数があれば、ここに出ます。")
+
+
+def _sum_procs(ctx) -> str:
+    from core.profile import cycle_health
+    e = _ref_entry()
+    items = []
+    for p in _ss().get("processes", {}):
+        trig, edge = _ss().get(pk(p, "trigger"), ""), _ss().get(pk(p, "edge"), "RISE")
+        h = cycle_health(e["df"], trig, edge) if e and trig else {"n": 0, "median_ms": 0}
+        items.append(f"<li><b>{p}</b>：{trig} の{'立ち上がり' if edge == 'RISE' else '立ち下がり'}で区切る"
+                     f" → {h['n']} サイクル・周期 {h['median_ms']:.0f} ms</li>")
+    return (f"工程を {len(items)} つ作りました。<ul>{''.join(items)}</ul>"
+            "照らしている「信号」が、この工程のサイクル開始信号です。これが立ち上がるたびに 1 サイクルが始まり、"
+            "ステップの時間はすべてここからの経過時間で測ります。")
+
+
+def _step_list(p: str) -> str:
+    from core.analysis import MODE_LABELS
+    steps = _ss().get(pk(p, "steps_list"), []) or []
+    return "、".join(f"{s.get('name')}（{MODE_LABELS.get(s.get('mode', 'single'), '')}）" for s in steps)
+
+
+def _sum_steps(p: str):
+    def f(ctx) -> str:
+        n = _steps(p)
+        return (f"{p}に {n} つのステップを登録しました：{_step_list(p)}。<br>"
+                "「ON期間」はその信号が ON になっている<b>長さ</b>、「時刻」はサイクル開始から<b>何 ms 後に変化したか</b>を測ります。"
+                "照らしている表の行を選ぶと、名前や測り方を後から直せます。")
+    return f
+
+
+def _sum_timing(ctx) -> str:
+    return (f"圧入工程にも {_steps(PRESS)} つのステップを登録しました：{_step_list(PRESS)}。<br>"
+            "図は、各ステップがサイクル開始から何 ms 後に起きているかを表します。棒が動作中の期間、薄い部分がサイクルごとの幅です。"
+            "これが、この設備の「正常なとき」の動きです。")
+
+
+def _sum_baseline(ctx) -> str:
+    from core.evaluate import rule
+    p = _ss().get("sel_process") if _has_baseline(_ss().get("sel_process", "")) else \
+        next((x for x in (FEED, PRESS) if _has_baseline(x)), FEED)
+    r = rule()
+    bl = _ss().get(pk(p, "baseline"), {}) or {}
+    meta = _ss().get(pk(p, "baseline_meta"), {}) or {}
+    name = "部品検出" if "部品検出" in bl else next(iter(bl), "")
+    b = bl.get(name, {})
+    if b.get("mode", "single") == "single":
+        ex = f"{name}：発生 {b.get('ref_ms', 0):.1f} ms（ばらつき σ {b.get('std_ms', 0):.1f} ms）"
+    else:
+        ex = f"{name}：長さ {b.get('ref_dur_ms', 0):.1f} ms（ばらつき σ {b.get('std_dur_ms', 0):.1f} ms）"
+    cyc = meta.get("n_cycles")
+    return (f"<b>{p}</b>の {len(bl)} ステップの基準値を登録しました"
+            + (f"（{cyc} サイクルの平均）" if cyc else "") + f"。<br>例）{ex}<br>"
+            f"点検では、この平均から ±（{r['nsig']:g}σ と {r['min_tol']:g} ms の大きい方）"
+            "を許容幅とし、外に出たサイクルを NG と数えます。照らしている表で、値を手で直すこともできます。")
+
+
+def _sum_wave(ctx) -> str:
+    from core.wave_inspect import inspection_points, process_defs
+    pts = inspection_points({n: (d["trigger"], d["edge"]) for n, d in process_defs().items()})
+    waves = {(p["process"], p["var"]) for p in pts}
+    eg = next((p for p in pts if p["var"].endswith("プレス力[kN]")), pts[0] if pts else None)
+    eg_txt = f"例）{eg['var'].split('.', 1)[-1]} の「{eg['name'] or eg['type']}」（{eg['type']}）<br>" if eg else ""
+    return (f"{len(waves)} 本の波形に、検査点を {len(pts)} 点登録しました。<br>{eg_txt}"
+            "検査点は「工程 → 検査波形 → 検査点」の順に整理されます。図の ◇ が検査点の位置、下の帯が工程のステップです。"
+            "⚙️ で波形を見ながら調整、🗑 で削除できます。")
+
+
+def _sum_save(ctx) -> str:
+    n_steps = sum(_steps(p) for p in _ss().get("processes", {}))
+    return ("保存した ZIP の中身はこうなっています。<ul>"
+            f"<li>基準データ：{REF_FILE}</li>"
+            f"<li>設定ファイル（JSON）：工程 {len(_ss().get('processes', {}))}・ステップ {n_steps}・基準値・"
+            f"波形検査点 {_n_wave_points()}</li></ul>"
+            "照らしているホームの工程一覧でも、設定した内容（ステップ・基準値・波形検査点）がそろって「準備完了」になっています。"
+            "次回は「データ」画面でこの ZIP を読み込むだけで、点検したい時期の CSV を追加して点検を始められます。")
+
+
+def _sum_cmp(ctx) -> str:
+    labels = [e["label"] for e in _store().values() if not e.get("is_ref") and e.get("label") in CMP_LABELS]
+    return (f"比較データを {len(labels)} 件読み込みました（{'、'.join(sorted(labels))}）。<br>"
+            "照らしている表に並びます。点検画面では、データの取得日時の古い順に並べて比べます。"
+            "「基準との整合」が「一致」なら、基準データと同じ変数がそろっています。")
+
+
 # ── 「代わりにやる」 ─────────────────────────────────────────
 
 def _load(name: str, is_ref: bool):
@@ -171,10 +274,8 @@ STEPS = [
              "基準データは、設備が正常に動いていたときの記録です。",
      "target": {"sel": '[data-testid="stFileUploader"]', "text": "基準データを読み込む"},
      "done": lambda ctx: _ref_loaded(), "auto": _auto_ref},
-    {"ch": "準備 1 データ", "page": "data", "title": "記録の質を自動でチェック",
-     "body": "読み込むと、記録の抜けや、動いていない変数がないかを自動で調べます。"
-             "「記録 良好」なら、そのまま工程の登録に進めます。",
-     "target": _md("動いている変数"), "done": None},
+    {"ch": "準備 1 データ", "page": "data", "title": "基準データが入りました",
+     "body": _sum_ref, "target": _md("動いている変数"), "kind": "result", "done": None},
     # ── 準備 2 工程とステップ ──
     _goto("process", "「工程とステップ」を開く", "次に、設備の工程と、時間を測る動作（ステップ）を決めます。", "準備 2 工程とステップ"),
     {"ch": "準備 2 工程とステップ", "page": "process", "title": "工程の提案を採用する",
@@ -182,25 +283,29 @@ STEPS = [
              "「すべて作成」を押してください。",
      "target": _btn("すべて作成"), "done": lambda ctx: len(_ss().get("processes", {})) >= 2,
      "auto": _auto_processes},
+    {"ch": "準備 2 工程とステップ", "page": "process", "title": "工程ができました",
+     "body": _sum_procs, "target": _select_box("信号"), "kind": "result", "done": None},
     {"ch": "準備 2 工程とステップ", "page": "process", "title": "供給工程のステップを登録する",
      "body": "1 サイクルの中で変数が変化する順番を、ツールが仮説として並べています。"
              "違うものがあれば表で直せますが、今回はそのまま「ステップとして登録」を押してください。",
      "target": _btn("ステップとして登録"), "done": lambda ctx: _steps(FEED) > 0, "pre": _select(FEED)},
+    {"ch": "準備 2 工程とステップ", "page": "process", "title": "供給工程のステップが登録されました",
+     "body": _sum_steps(FEED), "target": {"sel": '[data-testid="stDataFrame"]'}, "kind": "result", "done": None},
     {"ch": "準備 2 工程とステップ", "page": "process", "title": "圧入工程に切り替える",
      "body": "「工程」で<b>圧入工程</b>を選んでください。",
      "target": _select_box("工程"), "done": lambda ctx: _sel(PRESS) or _steps(PRESS) > 0, "auto": _select(PRESS)},
     {"ch": "準備 2 工程とステップ", "page": "process", "title": "圧入工程のステップを登録する",
      "body": "同じように「ステップとして登録」を押してください。",
      "target": _btn("ステップとして登録"), "done": lambda ctx: _steps(PRESS) > 0},
-    {"ch": "準備 2 工程とステップ", "page": "process", "title": "タイミング図",
-     "body": "各ステップがサイクル開始から何 ms 後に起きているかの図です。棒が動作中の期間、薄い部分がサイクルごとの幅です。"
-             "これが、この設備の「正常なとき」の動きです。",
-     "target": {"sel": '[data-testid="stPlotlyChart"]'}, "done": None},
+    {"ch": "準備 2 工程とステップ", "page": "process", "title": "圧入工程のステップとタイミング図",
+     "body": _sum_timing, "target": {"sel": '[data-testid="stPlotlyChart"]'}, "kind": "result", "done": None},
     # ── 準備 3 基準値 ──
     _goto("baseline", "「基準値」を開く", "正常なときのタイミングを、点検の基準として記録します。", "準備 3 基準値"),
     {"ch": "準備 3 基準値", "page": "baseline", "title": "基準値を登録する",
      "body": "基準データから各ステップの平均とばらつきを計算しました。「この内容で登録」を押してください。",
      "target": _btn("この内容で登録"), "done": lambda ctx: any(_has_baseline(p) for p in (FEED, PRESS))},
+    {"ch": "準備 3 基準値", "page": "baseline", "title": "基準値が登録されました",
+     "body": _sum_baseline, "target": {"sel": '[data-testid="stDataFrame"]'}, "kind": "result", "done": None},
     {"ch": "準備 3 基準値", "page": "baseline", "title": "もう一方の工程も登録する",
      "body": "「工程」でもう一方の工程を選び、同じように「この内容で登録」を押してください。",
      "target": _select_box("工程"), "done": lambda ctx: _has_baseline(FEED) and _has_baseline(PRESS),
@@ -214,10 +319,8 @@ STEPS = [
      "body": "波形の形から、検査点のタイプ（ピーク・立ち上がりなど）と設定値を提案しています。"
              "「検出点として登録」を押してください。",
      "target": _btn("検出点として登録"), "done": lambda ctx: _n_wave_points() > 0},
-    {"ch": "準備 4 波形検査", "page": "wave", "title": "工程 → 検査波形 → 検査点",
-     "body": "登録した検査点は、工程ごと・波形ごとに整理されます。図の ◇ が検査点の位置、下の帯が工程のステップです。"
-             "⚙️ で波形を見ながら調整、🗑 で削除できます。",
-     "target": _md("工程 → 検査波形 → 検査点"), "done": None},
+    {"ch": "準備 4 波形検査", "page": "wave", "title": "検査点が登録されました",
+     "body": _sum_wave, "target": _md("工程 → 検査波形 → 検査点"), "kind": "result", "done": None},
     # ── 準備 5 保存 ──
     _goto("", "ホームに戻る", "ホームでは、準備の進み具合と次にやることが分かります。", "準備 5 保存"),
     {"ch": "準備 5 保存", "page": "", "title": "基準データと設定を保存する",
@@ -225,6 +328,8 @@ STEPS = [
              "次からはこのファイルを読み込むだけで点検を始められます。",
      "target": _btn("基準データ＋設定を保存"), "done": lambda ctx: _ss().get("_project_saved"),
      "next_label": "保存した"},
+    {"ch": "準備 5 保存", "page": "", "title": "保存したファイルの中身",
+     "body": _sum_save, "target": {"sel": "table.apb-table"}, "kind": "result", "done": None},
     # ── 点検 1 比較データ ──
     _goto("data", "「データ」画面を開く", "ここからは点検です。点検したい時期のデータを読み込みます。", "点検 1 比較データ"),
     {"ch": "点検 1 比較データ", "page": "data", "title": "比較データを読み込む",
@@ -232,6 +337,8 @@ STEPS = [
              "（「Upload」から複数選ぶこともできます）。",
      "target": {"sel": '[data-testid="stFileUploader"]', "text": "比較データを追加"},
      "done": lambda ctx: _n_cmp() >= len(CMP_FILES), "auto": _auto_cmp},
+    {"ch": "点検 1 比較データ", "page": "data", "title": "比較データが入りました",
+     "body": _sum_cmp, "target": {"sel": '[data-testid="stDataFrame"]'}, "kind": "result", "done": None},
     # ── 点検 2 評価 ──
     _goto("evaluate", "「最新データの評価」を開く", "いちばん新しい比較データ（9 か月後）を、基準値と比べます。", "点検 2 評価"),
     {"ch": "点検 2 評価", "page": "evaluate", "title": "工程ごとの状態",
@@ -339,6 +446,10 @@ _CSS = """
 [class*="st-key-tutbubble"] .tut-bar { height: 3px; background: var(--apb-hair, #d0d7de); border-radius: 2px; margin-top: 8px; }
 [class*="st-key-tutbubble"] .tut-bar > i { display: block; height: 3px; background: var(--apb-accent, #1f6feb); border-radius: 2px; }
 [class*="st-key-tutbubble"] button p { font-size: 12.5px; }
+[class*="st-key-tutbubble"] .tut-done { display: inline-block; margin-right: 8px; padding: 1px 8px; border-radius: 10px;
+  background: var(--apb-ok-pale, #dafbe1); color: var(--apb-ok, #1a7f37); font-weight: 700; letter-spacing: 0; }
+[class*="st-key-tutbubble"] .tut-body ul { margin: 4px 0 6px; padding-left: 1.2em; }
+[class*="st-key-tutbubble"] .tut-body li { margin: 0; }
 [class*="st-key-tutbubble"] [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: 6px !important; }
 [class*="st-key-tutbubble"] [data-testid="stColumn"] { min-width: 0 !important; width: auto !important; }
 [class*="st-key-tutbubble"] button { padding-left: 6px; padding-right: 6px; min-height: 34px; }
@@ -405,12 +516,14 @@ _JS = r"""
     }
     if (st.scrolled !== cfg.step) { st.scrolled = cfg.step; t.scrollIntoView({ block: "center", behavior: "smooth" }); }
     shade.style.display = "none";
+    hole.style.outlineColor = cfg.tone === "result" ? "#3fb950" : "#58a6ff";
     const r = t.getBoundingClientRect(), pad = 6;
     Object.assign(hole.style, { display: "block", left: (r.left - pad) + "px", top: (r.top - pad) + "px",
       width: (r.width + 2 * pad) + "px", height: (r.height + 2 * pad) + "px" });
     // カーソル：前の位置から、照らした場所の中心へ動かす
     const cx = r.left + Math.min(r.width / 2, 120), cy = r.top + Math.min(r.height / 2, 40);
-    if (lastTarget !== t) {
+    if (cfg.tone === "result") { cur.style.display = "none"; ring.style.display = "none"; lastTarget = t; }
+    else if (lastTarget !== t) {
       lastTarget = t; arrived = false;
       const from = st.cursor || { x: P.innerWidth / 2, y: P.innerHeight / 2 };
       cur.style.transition = "none"; cur.style.left = from.x + "px"; cur.style.top = from.y + "px"; cur.style.display = "block";
@@ -443,12 +556,14 @@ _JS = r"""
 
 def _bubble(step: dict, i: int, n: int, wrong_page: str | None):
     with st.container(key="tutbubble"):
-        title, body = step["title"], step["body"]
+        title = step["title"]
+        body = step["body"]({"page": None}) if callable(step["body"]) else step["body"]
         if wrong_page is not None:
             title = f"「{PAGES.get(wrong_page, wrong_page)}」画面に戻りましょう"
             body = f"次は「{PAGES.get(wrong_page, wrong_page)}」画面で「{step['title']}」を行います。左のメニューから開いてください。"
         ch_no = CHAPTERS.index(step["ch"]) + 1
-        st.markdown(f"<div class='tut-ch'>{step['ch']}（{ch_no}/{len(CHAPTERS)}）・ステップ {i + 1}/{n}</div>"
+        tag = "<span class='tut-done'>✔ 設定した内容</span>" if step.get("kind") == "result" and wrong_page is None else ""
+        st.markdown(f"<div class='tut-ch'>{tag}{step['ch']}（{ch_no}/{len(CHAPTERS)}）・ステップ {i + 1}/{n}</div>"
                     f"<div class='tut-title'>{title}</div><div class='tut-body'>{body}</div>"
                     f"<div class='tut-bar'><i style='width:{(i + 1) / n * 100:.0f}%'></i></div>",
                     unsafe_allow_html=True)
@@ -497,5 +612,6 @@ def render(page: str):
     st.markdown(_CSS, unsafe_allow_html=True)
     _bubble(step, i, len(STEPS), wrong)
     components.html(_JS.replace("__CFG__", json.dumps(
-        {"on": True, "step": f"{i}:{wrong or ''}", "target": target}, ensure_ascii=False)), height=0)
+        {"on": True, "step": f"{i}:{wrong or ''}", "target": target,
+         "tone": "result" if step.get("kind") == "result" and wrong is None else "do"}, ensure_ascii=False)), height=0)
     ss["_tut_drawn"] = True
