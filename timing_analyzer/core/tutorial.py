@@ -285,18 +285,29 @@ STEPS = [
      "auto": _auto_processes},
     {"ch": "準備 2 工程とステップ", "page": "process", "title": "工程ができました",
      "body": _sum_procs, "target": _select_box("信号"), "kind": "result", "done": None},
+    {"ch": "準備 2 工程とステップ", "page": "process", "title": "動作シーケンスの仮説を確認する",
+     "body": "供給工程の 1 サイクルの中で、変数が変化する順番をツールが仮説として並べました。<ul>"
+             "<li><b>順番・ステップ名</b>：動作の順番と名前（表の中で直せます）</li>"
+             "<li><b>測り方</b>：ON期間＝ON の長さ、立ち上がり／立ち下がり時刻＝変化した時刻</li>"
+             "<li><b>時刻・ばらつき</b>：サイクル開始から何 ms 後か、サイクルごとの幅</li>"
+             "<li><b>確からしさ</b>：全サイクルで同じ順番に起きていれば「高」</li></ul>"
+             "違う動作があれば「採用」のチェックを外します。今回はすべて「高」なので、このまま使います。",
+     "target": {"sel": '[data-testid="stExpander"]', "text": "動作シーケンスの仮説から登録", "open": "動作シーケンスの仮説から登録"},
+     "done": None, "need_sel": FEED},
     {"ch": "準備 2 工程とステップ", "page": "process", "title": "供給工程のステップを登録する",
-     "body": "1 サイクルの中で変数が変化する順番を、ツールが仮説として並べています。"
-             "違うものがあれば表で直せますが、今回はそのまま「ステップとして登録」を押してください。",
-     "target": _btn("ステップとして登録"), "done": lambda ctx: _steps(FEED) > 0, "pre": _select(FEED)},
+     "body": "表の下の「ステップとして登録」を押してください。採用にチェックが入っている動作が、"
+             "供給工程のステップとして登録されます。",
+     "target": dict(_btn("ステップとして登録"), open="動作シーケンスの仮説から登録"), "done": lambda ctx: _steps(FEED) > 0,
+     "need_sel": FEED},
     {"ch": "準備 2 工程とステップ", "page": "process", "title": "供給工程のステップが登録されました",
      "body": _sum_steps(FEED), "target": {"sel": '[data-testid="stDataFrame"]'}, "kind": "result", "done": None},
     {"ch": "準備 2 工程とステップ", "page": "process", "title": "圧入工程に切り替える",
      "body": "「工程」で<b>圧入工程</b>を選んでください。",
      "target": _select_box("工程"), "done": lambda ctx: _sel(PRESS) or _steps(PRESS) > 0, "auto": _select(PRESS)},
     {"ch": "準備 2 工程とステップ", "page": "process", "title": "圧入工程のステップを登録する",
-     "body": "同じように「ステップとして登録」を押してください。",
-     "target": _btn("ステップとして登録"), "done": lambda ctx: _steps(PRESS) > 0},
+     "body": "圧入工程の仮説が表に出ています。同じように、表の下の「ステップとして登録」を押してください。",
+     "target": dict(_btn("ステップとして登録"), open="動作シーケンスの仮説から登録"), "done": lambda ctx: _steps(PRESS) > 0,
+     "need_sel": PRESS},
     {"ch": "準備 2 工程とステップ", "page": "process", "title": "圧入工程のステップとタイミング図",
      "body": _sum_timing, "target": {"sel": '[data-testid="stPlotlyChart"]'}, "kind": "result", "done": None},
     # ── 準備 3 基準値 ──
@@ -399,6 +410,7 @@ def start():
     ss["ref_csv_key"] = None
     for k in [k for k in list(ss.keys()) if isinstance(k, str) and (
             k.startswith("P_") or k.startswith("wvol_") or k.startswith("_wave_cands_")
+            or k.startswith("_tut_pre_")
             or k in ("sel_process", "detail", "active_csv", "_project_saved", "wi_sel___global",
                      "_data_ref_loaded", "_data_cmp_seen", "_data_cfg_loaded"))]:
         del ss[k]
@@ -503,6 +515,12 @@ _JS = r"""
   let lastTarget = null, arrived = false;
   function place() {
     const b = bubble(); let t = find();
+    if (cfg.target && cfg.target.open && st.expanded !== cfg.step) {
+      const sm = Array.from(D.querySelectorAll('[data-testid="stExpander"] summary'))
+        .find(x => x.innerText.includes(cfg.target.open));
+      const det = sm && sm.closest("details");
+      if (det) { st.expanded = cfg.step; if (!det.open) { sm.click(); return; } }
+    }
     if (!t && cfg.target && cfg.target.sidebar) {
       const ex = D.querySelector('[data-testid="stExpandSidebarButton"]');
       if (ex && visible(ex) && st.opened !== cfg.step) { st.opened = cfg.step; ex.click(); }
@@ -554,10 +572,16 @@ _JS = r"""
 """
 
 
-def _bubble(step: dict, i: int, n: int, wrong_page: str | None):
+def _bubble(step: dict, i: int, n: int, wrong_page: str | None, need_sel: str | None = None):
     with st.container(key="tutbubble"):
         title = step["title"]
         body = step["body"]({"page": None}) if callable(step["body"]) else step["body"]
+        if need_sel is not None:
+            title = f"まず「工程」で{need_sel}を選びます"
+            body = (f"いまは別の工程が選ばれています。照らしている「工程」で<b>{need_sel}</b>を選んでください。"
+                    f"選ぶと「{step['title']}」に進みます。")
+            step = dict(step, auto=_select(need_sel), auto_label="代わりに選ぶ", done=lambda ctx: False,
+                        next_label=None)
         if wrong_page is not None:
             title = f"「{PAGES.get(wrong_page, wrong_page)}」画面に戻りましょう"
             body = f"次は「{PAGES.get(wrong_page, wrong_page)}」画面で「{step['title']}」を行います。左のメニューから開いてください。"
@@ -575,7 +599,7 @@ def _bubble(step: dict, i: int, n: int, wrong_page: str | None):
                 _ss()["_tut_goto"] = wrong_page
                 st.rerun()
         else:
-            if step["done"] is None or step.get("next_label"):
+            if need_sel is None and (step["done"] is None or step.get("next_label")):
                 cols[0].button(step.get("next_label", "次へ"), type="primary" if step["done"] is None else "secondary",
                                key="tut_next", on_click=_next, width="stretch")
             if step.get("auto"):
@@ -603,15 +627,14 @@ def render(page: str):
         i += 1
     ss["tut_i"] = i
     step = STEPS[i]
-    if step.get("pre") and not ss.get(f"_tut_pre_{i}"):
-        ss[f"_tut_pre_{i}"] = True
-        step["pre"]()
     need = step.get("page")
     wrong = need if (need is not None and need != page) else None
-    target = _link(PAGES[need]) if wrong is not None else step.get("target")
+    sel_need = step.get("need_sel") if wrong is None and step.get("need_sel") and not _sel(step["need_sel"]) else None
+    target = _link(PAGES[need]) if wrong is not None else (_select_box("工程") if sel_need else step.get("target"))
     st.markdown(_CSS, unsafe_allow_html=True)
-    _bubble(step, i, len(STEPS), wrong)
+    _bubble(step, i, len(STEPS), wrong, sel_need)
     components.html(_JS.replace("__CFG__", json.dumps(
-        {"on": True, "step": f"{i}:{wrong or ''}", "target": target,
-         "tone": "result" if step.get("kind") == "result" and wrong is None else "do"}, ensure_ascii=False)), height=0)
+        {"on": True, "step": f"{i}:{wrong or ''}:{sel_need or ''}", "target": target,
+         "tone": "result" if step.get("kind") == "result" and wrong is None and not sel_need else "do"},
+        ensure_ascii=False)), height=0)
     ss["_tut_drawn"] = True
